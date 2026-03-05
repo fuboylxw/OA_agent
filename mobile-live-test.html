@@ -1,0 +1,622 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>移动端适配实时测试工具</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      min-height: 100vh;
+      padding: 20px;
+    }
+    .container {
+      max-width: 1600px;
+      margin: 0 auto;
+    }
+    .header {
+      text-align: center;
+      color: white;
+      margin-bottom: 30px;
+    }
+    .header h1 {
+      font-size: 36px;
+      margin-bottom: 10px;
+    }
+    .header p {
+      font-size: 18px;
+      opacity: 0.9;
+    }
+    .control-panel {
+      background: white;
+      border-radius: 16px;
+      padding: 30px;
+      margin-bottom: 20px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+    }
+    .control-row {
+      display: flex;
+      gap: 20px;
+      margin-bottom: 20px;
+      flex-wrap: wrap;
+      align-items: center;
+    }
+    .control-group {
+      flex: 1;
+      min-width: 200px;
+    }
+    .control-group label {
+      display: block;
+      font-weight: 600;
+      color: #1e293b;
+      margin-bottom: 8px;
+      font-size: 14px;
+    }
+    .control-group select,
+    .control-group input {
+      width: 100%;
+      padding: 10px 12px;
+      border: 2px solid #e2e8f0;
+      border-radius: 8px;
+      font-size: 14px;
+      transition: border-color 0.2s;
+    }
+    .control-group select:focus,
+    .control-group input:focus {
+      outline: none;
+      border-color: #3b82f6;
+    }
+    .btn-group {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+    }
+    .btn {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 8px;
+      font-weight: 600;
+      font-size: 14px;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+    .btn-primary {
+      background: #3b82f6;
+      color: white;
+    }
+    .btn-primary:hover {
+      background: #2563eb;
+      transform: translateY(-2px);
+    }
+    .btn-secondary {
+      background: #f1f5f9;
+      color: #475569;
+    }
+    .btn-secondary:hover {
+      background: #e2e8f0;
+    }
+    .btn-success {
+      background: #10b981;
+      color: white;
+    }
+    .btn-success:hover {
+      background: #059669;
+    }
+    .status-bar {
+      background: #f8fafc;
+      border-radius: 12px;
+      padding: 20px;
+      margin-bottom: 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      flex-wrap: wrap;
+      gap: 15px;
+    }
+    .status-item {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+    }
+    .status-label {
+      font-weight: 600;
+      color: #64748b;
+      font-size: 14px;
+    }
+    .status-value {
+      font-size: 18px;
+      font-weight: 700;
+      color: #1e293b;
+    }
+    .status-badge {
+      padding: 6px 12px;
+      border-radius: 20px;
+      font-weight: 600;
+      font-size: 13px;
+    }
+    .status-badge.mobile {
+      background: #dbeafe;
+      color: #1e40af;
+    }
+    .status-badge.desktop {
+      background: #dcfce7;
+      color: #166534;
+    }
+    .preview-container {
+      background: white;
+      border-radius: 16px;
+      padding: 30px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+      margin-bottom: 20px;
+    }
+    .preview-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      margin-bottom: 20px;
+      padding-bottom: 15px;
+      border-bottom: 2px solid #e2e8f0;
+    }
+    .preview-header h2 {
+      font-size: 20px;
+      color: #1e293b;
+    }
+    .iframe-container {
+      border: 3px solid #e2e8f0;
+      border-radius: 12px;
+      overflow: hidden;
+      background: #f8fafc;
+      position: relative;
+      margin: 0 auto;
+      transition: all 0.3s;
+    }
+    .iframe-container iframe {
+      display: block;
+      border: none;
+      background: white;
+    }
+    .device-frame {
+      position: relative;
+      margin: 0 auto;
+    }
+    .device-frame::before {
+      content: '';
+      position: absolute;
+      top: -30px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 60px;
+      height: 6px;
+      background: #94a3b8;
+      border-radius: 3px;
+    }
+    .device-frame::after {
+      content: '';
+      position: absolute;
+      bottom: -30px;
+      left: 50%;
+      transform: translateX(-50%);
+      width: 40px;
+      height: 40px;
+      border: 3px solid #94a3b8;
+      border-radius: 50%;
+    }
+    .test-results {
+      background: white;
+      border-radius: 16px;
+      padding: 30px;
+      box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+    }
+    .test-results h2 {
+      font-size: 20px;
+      color: #1e293b;
+      margin-bottom: 20px;
+    }
+    .test-item {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      padding: 12px;
+      background: #f8fafc;
+      border-radius: 8px;
+      margin-bottom: 10px;
+      transition: all 0.2s;
+    }
+    .test-item:hover {
+      background: #f1f5f9;
+    }
+    .test-checkbox {
+      width: 20px;
+      height: 20px;
+      cursor: pointer;
+    }
+    .test-label {
+      flex: 1;
+      color: #475569;
+      font-size: 14px;
+    }
+    .test-status {
+      padding: 4px 10px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 600;
+    }
+    .test-status.pass {
+      background: #dcfce7;
+      color: #166534;
+    }
+    .test-status.fail {
+      background: #fee2e2;
+      color: #991b1b;
+    }
+    .test-status.pending {
+      background: #fef3c7;
+      color: #92400e;
+    }
+    .progress-bar {
+      width: 100%;
+      height: 8px;
+      background: #e2e8f0;
+      border-radius: 4px;
+      overflow: hidden;
+      margin-bottom: 20px;
+    }
+    .progress-fill {
+      height: 100%;
+      background: linear-gradient(90deg, #3b82f6 0%, #2563eb 100%);
+      transition: width 0.3s;
+    }
+    .quick-links {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 15px;
+      margin-top: 20px;
+    }
+    .quick-link {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 15px;
+      border-radius: 10px;
+      text-decoration: none;
+      text-align: center;
+      font-weight: 600;
+      transition: transform 0.2s;
+    }
+    .quick-link:hover {
+      transform: translateY(-3px);
+    }
+    @media (max-width: 768px) {
+      .control-row {
+        flex-direction: column;
+      }
+      .control-group {
+        width: 100%;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <h1>🔬 移动端适配实时测试工具</h1>
+      <p>交互式测试对话工作台的移动端适配效果</p>
+    </div>
+
+    <div class="control-panel">
+      <div class="control-row">
+        <div class="control-group">
+          <label>📱 选择设备预设</label>
+          <select id="device-preset">
+            <option value="custom">自定义</option>
+            <option value="iphone14" selected>iPhone 14 (390×844)</option>
+            <option value="iphoneSE">iPhone SE (375×667)</option>
+            <option value="iphone14ProMax">iPhone 14 Pro Max (430×932)</option>
+            <option value="galaxyS21">Samsung Galaxy S21 (360×800)</option>
+            <option value="narrow">极窄屏幕 (320×568)</option>
+            <option value="ipad">iPad (768×1024)</option>
+            <option value="ipadPro">iPad Pro (1024×1366)</option>
+            <option value="laptop">笔记本 (1280×800)</option>
+            <option value="desktop">台式机 (1920×1080)</option>
+          </select>
+        </div>
+
+        <div class="control-group">
+          <label>📏 宽度 (px)</label>
+          <input type="number" id="width-input" value="390" min="320" max="2560">
+        </div>
+
+        <div class="control-group">
+          <label>📐 高度 (px)</label>
+          <input type="number" id="height-input" value="844" min="400" max="1600">
+        </div>
+      </div>
+
+      <div class="btn-group">
+        <button class="btn btn-primary" onclick="applySize()">
+          🔄 应用尺寸
+        </button>
+        <button class="btn btn-secondary" onclick="rotateDevice()">
+          🔄 旋转设备
+        </button>
+        <button class="btn btn-secondary" onclick="reloadIframe()">
+          ↻ 重新加载
+        </button>
+        <button class="btn btn-success" onclick="runAutoTest()">
+          ✓ 运行自动测试
+        </button>
+      </div>
+    </div>
+
+    <div class="status-bar">
+      <div class="status-item">
+        <span class="status-label">当前尺寸:</span>
+        <span class="status-value" id="current-size">390 × 844</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">模式:</span>
+        <span class="status-badge mobile" id="mode-badge">移动端</span>
+      </div>
+      <div class="status-item">
+        <span class="status-label">测试进度:</span>
+        <span class="status-value" id="test-progress">0/24</span>
+      </div>
+    </div>
+
+    <div class="preview-container">
+      <div class="preview-header">
+        <h2>📱 实时预览</h2>
+        <div class="btn-group">
+          <button class="btn btn-secondary" onclick="openInNewTab()">
+            🔗 新标签页打开
+          </button>
+        </div>
+      </div>
+
+      <div class="progress-bar">
+        <div class="progress-fill" id="progress-fill" style="width: 0%"></div>
+      </div>
+
+      <div class="iframe-container" id="iframe-container">
+        <iframe id="preview-iframe" src="http://localhost:3000/chat"></iframe>
+      </div>
+    </div>
+
+    <div class="test-results">
+      <h2>✅ 测试清单</h2>
+
+      <h3 style="margin: 20px 0 15px; color: #1e293b; font-size: 16px;">移动端测试 (< 1024px)</h3>
+      <div id="mobile-tests"></div>
+
+      <h3 style="margin: 20px 0 15px; color: #1e293b; font-size: 16px;">桌面端测试 (≥ 1024px)</h3>
+      <div id="desktop-tests"></div>
+
+      <h3 style="margin: 20px 0 15px; color: #1e293b; font-size: 16px;">响应式断点测试</h3>
+      <div id="responsive-tests"></div>
+
+      <div class="quick-links">
+        <a href="mobile-test.html" class="quick-link" target="_blank">
+          📋 测试清单
+        </a>
+        <a href="mobile-demo.html" class="quick-link" target="_blank">
+          🎨 演示页面
+        </a>
+        <a href="mobile-comparison.html" class="quick-link" target="_blank">
+          📊 对比展示
+        </a>
+        <a href="MOBILE_ADAPTATION_REPORT.md" class="quick-link" target="_blank">
+          📄 完整报告
+        </a>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const devices = {
+      iphone14: { width: 390, height: 844, name: 'iPhone 14' },
+      iphoneSE: { width: 375, height: 667, name: 'iPhone SE' },
+      iphone14ProMax: { width: 430, height: 932, name: 'iPhone 14 Pro Max' },
+      galaxyS21: { width: 360, height: 800, name: 'Samsung Galaxy S21' },
+      narrow: { width: 320, height: 568, name: '极窄屏幕' },
+      ipad: { width: 768, height: 1024, name: 'iPad' },
+      ipadPro: { width: 1024, height: 1366, name: 'iPad Pro' },
+      laptop: { width: 1280, height: 800, name: '笔记本' },
+      desktop: { width: 1920, height: 1080, name: '台式机' }
+    };
+
+    const mobileTests = [
+      '汉堡按钮在聊天头部左侧可见',
+      '点击汉堡按钮，抽屉从左侧滑入',
+      '滑入动画流畅（300ms）',
+      '抽屉打开时，半透明遮罩覆盖屏幕',
+      '点击遮罩层，抽屉关闭并滑出',
+      '点击关闭按钮（×），抽屉关闭',
+      '点击"新建对话"，抽屉关闭 + 创建新对话',
+      '点击快捷操作，抽屉关闭 + 发送消息',
+      '切换到"历史对话"标签，内容正常显示',
+      '点击历史会话，抽屉关闭 + 加载会话',
+      '欢迎页快捷操作响应式显示',
+      '输入框高度 ≥ 44px',
+      '发送按钮高度 ≥ 44px',
+      'iPhone X+ 底部输入区域不被遮挡'
+    ];
+
+    const desktopTests = [
+      '汉堡按钮完全隐藏',
+      '左侧边栏正常显示（256px）',
+      '侧边栏功能正常',
+      '整体布局与修改前一致',
+      '欢迎页双列网格'
+    ];
+
+    const responsiveTests = [
+      '1280px → 768px：汉堡出现，侧边栏隐藏',
+      '768px → 1280px：汉堡消失，侧边栏显示',
+      '640px 断点：网格单列/双列切换',
+      '1024px 断点切换流畅',
+      '无闪烁或布局错乱'
+    ];
+
+    let testStates = {};
+
+    function initTests() {
+      const mobileContainer = document.getElementById('mobile-tests');
+      const desktopContainer = document.getElementById('desktop-tests');
+      const responsiveContainer = document.getElementById('responsive-tests');
+
+      mobileTests.forEach((test, index) => {
+        const id = `mobile-${index}`;
+        testStates[id] = localStorage.getItem(id) === 'true';
+        mobileContainer.innerHTML += createTestItem(id, test, testStates[id]);
+      });
+
+      desktopTests.forEach((test, index) => {
+        const id = `desktop-${index}`;
+        testStates[id] = localStorage.getItem(id) === 'true';
+        desktopContainer.innerHTML += createTestItem(id, test, testStates[id]);
+      });
+
+      responsiveTests.forEach((test, index) => {
+        const id = `responsive-${index}`;
+        testStates[id] = localStorage.getItem(id) === 'true';
+        responsiveContainer.innerHTML += createTestItem(id, test, testStates[id]);
+      });
+
+      updateProgress();
+    }
+
+    function createTestItem(id, label, checked) {
+      const status = checked ? 'pass' : 'pending';
+      const statusText = checked ? '✓ 通过' : '待测试';
+      return `
+        <div class="test-item">
+          <input type="checkbox" class="test-checkbox" id="${id}" ${checked ? 'checked' : ''} onchange="toggleTest('${id}')">
+          <label class="test-label" for="${id}">${label}</label>
+          <span class="test-status ${status}" id="${id}-status">${statusText}</span>
+        </div>
+      `;
+    }
+
+    function toggleTest(id) {
+      const checkbox = document.getElementById(id);
+      const status = document.getElementById(`${id}-status`);
+      testStates[id] = checkbox.checked;
+      localStorage.setItem(id, checkbox.checked);
+
+      if (checkbox.checked) {
+        status.className = 'test-status pass';
+        status.textContent = '✓ 通过';
+      } else {
+        status.className = 'test-status pending';
+        status.textContent = '待测试';
+      }
+
+      updateProgress();
+    }
+
+    function updateProgress() {
+      const total = Object.keys(testStates).length;
+      const passed = Object.values(testStates).filter(v => v).length;
+      const percentage = (passed / total * 100).toFixed(0);
+
+      document.getElementById('test-progress').textContent = `${passed}/${total}`;
+      document.getElementById('progress-fill').style.width = `${percentage}%`;
+    }
+
+    function applySize() {
+      const width = parseInt(document.getElementById('width-input').value);
+      const height = parseInt(document.getElementById('height-input').value);
+      updateIframeSize(width, height);
+    }
+
+    function updateIframeSize(width, height) {
+      const container = document.getElementById('iframe-container');
+      const iframe = document.getElementById('preview-iframe');
+
+      container.style.width = `${width}px`;
+      container.style.height = `${height}px`;
+      iframe.style.width = `${width}px`;
+      iframe.style.height = `${height}px`;
+
+      document.getElementById('current-size').textContent = `${width} × ${height}`;
+
+      const modeBadge = document.getElementById('mode-badge');
+      if (width < 640) {
+        modeBadge.textContent = '📱 移动端（极窄）';
+        modeBadge.className = 'status-badge mobile';
+      } else if (width < 1024) {
+        modeBadge.textContent = '📱 移动端';
+        modeBadge.className = 'status-badge mobile';
+      } else {
+        modeBadge.textContent = '🖥️ 桌面端';
+        modeBadge.className = 'status-badge desktop';
+      }
+
+      // Add device frame for mobile
+      if (width < 768) {
+        container.classList.add('device-frame');
+        container.style.padding = '40px 20px';
+      } else {
+        container.classList.remove('device-frame');
+        container.style.padding = '0';
+      }
+    }
+
+    function rotateDevice() {
+      const width = parseInt(document.getElementById('width-input').value);
+      const height = parseInt(document.getElementById('height-input').value);
+
+      document.getElementById('width-input').value = height;
+      document.getElementById('height-input').value = width;
+
+      updateIframeSize(height, width);
+    }
+
+    function reloadIframe() {
+      const iframe = document.getElementById('preview-iframe');
+      iframe.src = iframe.src;
+    }
+
+    function openInNewTab() {
+      window.open('http://localhost:3000/chat', '_blank');
+    }
+
+    function runAutoTest() {
+      alert('自动测试功能\n\n请按以下步骤操作：\n\n1. 点击"新标签页打开"按钮\n2. 在新页面按 F12 打开控制台\n3. 复制并运行 verify-mobile-adaptation.js 脚本\n4. 根据测试结果勾选本页面的测试项');
+    }
+
+    // Device preset change handler
+    document.getElementById('device-preset').addEventListener('change', function() {
+      const preset = this.value;
+      if (preset !== 'custom' && devices[preset]) {
+        const device = devices[preset];
+        document.getElementById('width-input').value = device.width;
+        document.getElementById('height-input').value = device.height;
+        updateIframeSize(device.width, device.height);
+      }
+    });
+
+    // Initialize
+    initTests();
+    applySize();
+
+    // Auto-save test states
+    window.addEventListener('beforeunload', () => {
+      Object.keys(testStates).forEach(id => {
+        localStorage.setItem(id, testStates[id]);
+      });
+    });
+
+    console.log('🔬 移动端适配实时测试工具已加载');
+    console.log('提示: 所有测试状态会自动保存到 localStorage');
+  </script>
+</body>
+</html>

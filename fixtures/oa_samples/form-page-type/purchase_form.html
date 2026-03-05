@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <title>采购申请</title>
+</head>
+<body>
+    <h1>采购申请表单</h1>
+    <form action="/forms/purchase/submit" method="POST">
+        <div>
+            <label for="itemName">物品名称:</label>
+            <input type="text" id="itemName" name="itemName" required>
+        </div>
+        <div>
+            <label for="quantity">数量:</label>
+            <input type="number" id="quantity" name="quantity" required>
+        </div>
+        <div>
+            <label for="estimatedPrice">预估价格:</label>
+            <input type="number" id="estimatedPrice" name="estimatedPrice" required>
+        </div>
+        <div>
+            <label for="reason">采购理由:</label>
+            <textarea id="reason" name="reason" required></textarea>
+        </div>
+        <button type="submit">提交</button>
+    </form>
+</body>
+</html>

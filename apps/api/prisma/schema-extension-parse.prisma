@@ -1,0 +1,86 @@
+// Prisma Schema 扩展 - 添加到 schema.prisma
+
+model ParseJob {
+  id              String   @id @default(uuid())
+  bootstrapJobId  String
+  bootstrapJob    BootstrapJob @relation(fields: [bootstrapJobId], references: [id])
+
+  documentType    String   // openapi/swagger/postman/har
+  documentUrl     String?
+  documentHash    String   // 文档内容哈希，用于缓存
+
+  status          String   // PENDING/PARSING/COMPLETED/FAILED/REVIEW_REQUIRED
+  progress        Int      @default(0)
+
+  parseOptions    Json     // 解析选项
+  parseResult     Json?    // 解析结果
+  parseMetadata   Json?    // 元数据（耗时、token等）
+
+  warnings        Json[]   // 警告信息
+  errors          Json[]   // 错误信息
+
+  reviewedBy      String?
+  reviewedAt      DateTime?
+  reviewComment   String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  completedAt     DateTime?
+
+  extractedProcesses ExtractedProcess[]
+
+  @@index([bootstrapJobId])
+  @@index([status])
+  @@index([documentHash])
+}
+
+model ExtractedProcess {
+  id              String   @id @default(uuid())
+  parseJobId      String
+  parseJob        ParseJob @relation(fields: [parseJobId], references: [id])
+
+  processCode     String
+  processName     String
+  processCategory String
+  description     String?
+
+  confidence      Float    // 0-1
+  endpoints       Json     // API端点信息
+  fields          Json     // 字段定义
+
+  status          String   // EXTRACTED/REVIEWED/PUBLISHED/REJECTED
+  publishedTemplateId String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([parseJobId])
+  @@index([processCode])
+  @@index([status])
+}
+
+model ProcessTemplate {
+  id              String   @id @default(uuid())
+  tenantId        String
+
+  processCode     String
+  processName     String
+  processCategory String
+  description     String?
+
+  version         Int      @default(1)
+  status          String   // draft/published/archived
+  falLevel        String   // F0-F4
+
+  fields          Json     // 字段定义
+  endpoints       Json     // API端点映射
+  rules           Json     // 业务规则
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  publishedAt     DateTime?
+
+  @@unique([tenantId, processCode, version])
+  @@index([tenantId, status])
+  @@index([processCode])
+}
