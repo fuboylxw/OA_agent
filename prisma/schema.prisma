@@ -1,0 +1,562 @@
+// This is your Prisma schema file,
+// learn more about it in the docs: https://pris.ly/d/prisma-schema
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "mysql"
+  url      = env("DATABASE_URL")
+}
+
+// ============================================================
+// Core Tenant & User Management
+// ============================================================
+
+model Tenant {
+  id         String   @id @default(uuid())
+  name       String
+  code       String   @unique
+  status     String   @default("active") // active, suspended
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  users              User[]
+  connectors         Connector[]
+  processTemplates   ProcessTemplate[]
+  processDrafts      ProcessDraft[]
+  submissions        Submission[]
+  auditLogs          AuditLog[]
+  bootstrapJobs      BootstrapJob[]
+  parseTasks         ParseTask[]
+  permissionPolicies PermissionPolicy[]
+  chatSessions       ChatSession[]
+  mcpTools           MCPTool[]
+
+  @@map("tenants")
+}
+
+model User {
+  id           String   @id @default(uuid())
+  tenantId     String
+  username     String
+  email        String
+  displayName  String
+  roles        Json // ["admin", "flow_manager", "user", "auditor"]
+  oaUserId     String? // OA系统中的用户ID
+  status       String   @default("active")
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  tenant       Tenant         @relation(fields: [tenantId], references: [id])
+  drafts       ProcessDraft[]
+  submissions  Submission[]
+  chatSessions ChatSession[]
+
+  @@unique([tenantId, username])
+  @@unique([tenantId, email])
+  @@map("users")
+}
+
+// ============================================================
+// Bootstrap Center (Batch 0 - Highest Priority)
+// ============================================================
+
+model BootstrapJob {
+  id              String   @id @default(uuid())
+  tenantId        String
+  status          String   @default("CREATED") // CREATED -> DISCOVERING -> PARSING -> NORMALIZING -> COMPILING -> REPLAYING -> REVIEW -> PUBLISHED
+  oaUrl           String?
+  sourceBundleUrl String?
+  openApiUrl      String?
+  harFileUrl      String?
+  uploadedFiles   Json? // Array of file paths
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  completedAt     DateTime?
+
+  tenant          Tenant             @relation(fields: [tenantId], references: [id])
+  sources         BootstrapSource[]
+  reports         BootstrapReport[]
+  flowIRs         FlowIR[]
+  fieldIRs        FieldIR[]
+  ruleIRs         RuleIR[]
+  permissionIRs   PermissionIR[]
+  adapterBuilds   AdapterBuild[]
+  replayCases     ReplayCase[]
+  driftEvents     DriftEvent[]
+
+  @@index([tenantId, status])
+  @@map("bootstrap_jobs")
+}
+
+model BootstrapSource {
+  id              String   @id @default(uuid())
+  bootstrapJobId  String
+  sourceType      String // oa_url, source_bundle, openapi, har, file
+  sourceUrl       String?
+  sourceContent   String? // For inline content
+  metadata        Json? // Additional metadata
+  createdAt       DateTime @default(now())
+
+  bootstrapJob BootstrapJob @relation(fields: [bootstrapJobId], references: [id], onDelete: Cascade)
+
+  @@map("bootstrap_sources")
+}
+
+model BootstrapReport {
+  id             String   @id @default(uuid())
+  bootstrapJobId String
+  oclLevel       String // OCL0-OCL5
+  coverage       Float // 0.0-1.0
+  confidence     Float // 0.0-1.0
+  risk           String // low, medium, high
+  evidence       Json // Array of evidence items
+  recommendation String @db.Text
+  createdAt      DateTime @default(now())
+
+  bootstrapJob BootstrapJob @relation(fields: [bootstrapJobId], references: [id], onDelete: Cascade)
+
+  @@map("bootstrap_reports")
+}
+
+// ============================================================
+// Intermediate Representation (IR) - For OA Normalization
+// ============================================================
+
+model FlowIR {
+  id             String   @id @default(uuid())
+  bootstrapJobId String
+  flowCode       String
+  flowName       String
+  flowCategory   String?
+  entryUrl       String?
+  submitUrl      String?
+  queryUrl       String?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  bootstrapJob BootstrapJob @relation(fields: [bootstrapJobId], references: [id], onDelete: Cascade)
+
+  @@unique([bootstrapJobId, flowCode])
+  @@map("flow_irs")
+}
+
+model FieldIR {
+  id             String   @id @default(uuid())
+  bootstrapJobId String
+  flowCode       String
+  fieldKey       String
+  fieldLabel     String
+  fieldType      String // text, number, date, select, file, etc.
+  required       Boolean  @default(false)
+  defaultValue   String?
+  options        Json? // For select/radio fields
+  validation     Json? // Validation rules
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  bootstrapJob BootstrapJob @relation(fields: [bootstrapJobId], references: [id], onDelete: Cascade)
+
+  @@unique([bootstrapJobId, flowCode, fieldKey])
+  @@map("field_irs")
+}
+
+model RuleIR {
+  id             String   @id @default(uuid())
+  bootstrapJobId String
+  flowCode       String
+  ruleType       String // validation, calculation, conditional
+  ruleExpression String @db.Text
+  errorLevel     String // error, warn
+  errorMessage   String?
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  bootstrapJob BootstrapJob @relation(fields: [bootstrapJobId], references: [id], onDelete: Cascade)
+
+  @@map("rule_irs")
+}
+
+model PermissionIR {
+  id             String   @id @default(uuid())
+  bootstrapJobId String
+  flowCode       String
+  permissionType String // role, department, custom
+  permissionRule String @db.Text
+  metadata       Json?
+  createdAt      DateTime @default(now())
+
+  bootstrapJob BootstrapJob @relation(fields: [bootstrapJobId], references: [id], onDelete: Cascade)
+
+  @@map("permission_irs")
+}
+
+// ============================================================
+// Adapter Compilation & Replay Validation
+// ============================================================
+
+model AdapterBuild {
+  id             String   @id @default(uuid())
+  bootstrapJobId String
+  adapterType    String // api, rpa, hybrid
+  generatedCode  String @db.Text
+  buildStatus    String // pending, success, failed
+  buildLog       String? @db.Text
+  createdAt      DateTime @default(now())
+  updatedAt      DateTime @updatedAt
+
+  bootstrapJob BootstrapJob @relation(fields: [bootstrapJobId], references: [id], onDelete: Cascade)
+
+  @@map("adapter_builds")
+}
+
+model ReplayCase {
+  id             String   @id @default(uuid())
+  bootstrapJobId String
+  flowCode       String
+  testData       Json
+  expectedResult Json?
+  createdAt      DateTime @default(now())
+
+  bootstrapJob  BootstrapJob   @relation(fields: [bootstrapJobId], references: [id], onDelete: Cascade)
+  replayResults ReplayResult[]
+
+  @@map("replay_cases")
+}
+
+model ReplayResult {
+  id           String   @id @default(uuid())
+  replayCaseId String
+  status       String // success, failed, error
+  actualResult Json?
+  errorMessage String? @db.Text
+  executedAt   DateTime @default(now())
+
+  replayCase ReplayCase @relation(fields: [replayCaseId], references: [id], onDelete: Cascade)
+
+  @@map("replay_results")
+}
+
+model DriftEvent {
+  id             String   @id @default(uuid())
+  bootstrapJobId String
+  driftType      String // field_change, url_change, auth_change
+  driftDetails   Json
+  detectedAt     DateTime @default(now())
+  resolved       Boolean  @default(false)
+
+  bootstrapJob BootstrapJob @relation(fields: [bootstrapJobId], references: [id], onDelete: Cascade)
+
+  @@map("drift_events")
+}
+
+// ============================================================
+// Process Step & UI Action Graph (For Step-based OA)
+// ============================================================
+
+model ProcessStep {
+  id          String   @id @default(uuid())
+  flowCode    String
+  stepOrder   Int
+  stepName    String
+  stepType    String // form, approval, notification
+  stepConfig  Json
+  createdAt   DateTime @default(now())
+
+  @@unique([flowCode, stepOrder])
+  @@map("process_steps")
+}
+
+model UIActionGraph {
+  id          String   @id @default(uuid())
+  flowCode    String
+  actionType  String // click, input, select, upload
+  selector    String
+  actionValue String?
+  actionOrder Int
+  metadata    Json?
+  createdAt   DateTime @default(now())
+
+  @@map("ui_action_graphs")
+}
+
+// ============================================================
+// OA Connector Management
+// ============================================================
+
+model Connector {
+  id              String   @id @default(uuid())
+  tenantId        String
+  name            String
+  oaType          String // openapi, form-page, hybrid
+  oaVendor        String? // 厂商名称
+  oaVersion       String?
+  baseUrl         String
+  authType        String // oauth2, basic, apikey, cookie
+  authConfig      Json // 认证配置
+  healthCheckUrl  String?
+  oclLevel        String // OCL0-OCL5
+  falLevel        String? // F0-F4 (default level for this connector)
+  status          String   @default("active")
+  lastHealthCheck DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tenant           Tenant            @relation(fields: [tenantId], references: [id])
+  processTemplates ProcessTemplate[]
+  mcpTools         MCPTool[]
+
+  @@unique([tenantId, name])
+  @@map("connectors")
+}
+
+// ============================================================
+// Process Library (流程库)
+// ============================================================
+
+model ProcessTemplate {
+  id              String   @id @default(uuid())
+  tenantId        String
+  connectorId     String
+  processCode     String // 流程编码，如 "travel_expense"
+  processName     String
+  processCategory String? // 流程分类
+  version         Int      @default(1)
+  status          String   @default("draft") // draft, published, archived
+  falLevel        String // F0-F4
+  schema          Json // 字段定义
+  rules           Json? // 规则定义
+  permissions     Json? // 权限定义
+  uiHints         Json? // UI提示
+  publishedAt     DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tenant    Tenant         @relation(fields: [tenantId], references: [id])
+  connector Connector      @relation(fields: [connectorId], references: [id])
+  drafts    ProcessDraft[]
+
+  @@unique([tenantId, processCode, version])
+  @@index([tenantId, status])
+  @@map("process_templates")
+}
+
+// ============================================================
+// Parse Task (解析任务)
+// ============================================================
+
+model ParseTask {
+  id          String   @id @default(uuid())
+  tenantId    String
+  sourceType  String // openapi, har, manual
+  sourceUrl   String?
+  sourceData  Json?
+  status      String   @default("pending") // pending, parsing, completed, failed
+  result      Json?
+  errorMsg    String? @db.Text
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+  completedAt DateTime?
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@map("parse_tasks")
+}
+
+// ============================================================
+// Permission Management
+// ============================================================
+
+model PermissionPolicy {
+  id           String   @id @default(uuid())
+  tenantId     String
+  processCode  String
+  policyType   String // rbac, abac
+  policyRule   Json // 策略规则
+  priority     Int      @default(0)
+  enabled      Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, processCode])
+  @@map("permission_policies")
+}
+
+// ============================================================
+// Chat & Assistant
+// ============================================================
+
+model ChatSession {
+  id        String   @id @default(uuid())
+  tenantId  String
+  userId    String
+  status    String   @default("active") // active, closed
+  metadata  Json?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  tenant   Tenant        @relation(fields: [tenantId], references: [id])
+  user     User          @relation(fields: [userId], references: [id])
+  messages ChatMessage[]
+
+  @@index([tenantId, userId])
+  @@map("chat_sessions")
+}
+
+model ChatMessage {
+  id        String   @id @default(uuid())
+  sessionId String
+  role      String // user, assistant, system
+  content   String @db.Text
+  metadata  Json? // intent, extracted_fields, etc.
+  createdAt DateTime @default(now())
+
+  session ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
+
+  @@index([sessionId])
+  @@map("chat_messages")
+}
+
+// ============================================================
+// Process Draft (草稿)
+// ============================================================
+
+model ProcessDraft {
+  id         String   @id @default(uuid())
+  tenantId   String
+  userId     String
+  templateId String
+  sessionId  String? // 关联的对话会话
+  formData   Json
+  status     String   @default("editing") // editing, ready, submitted
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  tenant   Tenant          @relation(fields: [tenantId], references: [id])
+  user     User            @relation(fields: [userId], references: [id])
+  template ProcessTemplate @relation(fields: [templateId], references: [id])
+
+  @@index([tenantId, userId])
+  @@map("process_drafts")
+}
+
+// ============================================================
+// Submission (提交记录)
+// ============================================================
+
+model Submission {
+  id              String   @id @default(uuid())
+  tenantId        String
+  userId          String
+  templateId      String
+  draftId         String?
+  idempotencyKey  String
+  formData        Json
+  oaSubmissionId  String? // OA系统返回的单据ID
+  status          String   @default("pending") // pending, submitted, failed, cancelled
+  submitResult    Json?
+  errorMsg        String? @db.Text
+  submittedAt     DateTime?
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  tenant        Tenant              @relation(fields: [tenantId], references: [id])
+  user          User                @relation(fields: [userId], references: [id])
+  statusRecords SubmissionStatus[]
+
+  @@unique([tenantId, idempotencyKey])
+  @@index([tenantId, userId])
+  @@index([tenantId, oaSubmissionId])
+  @@map("submissions")
+}
+
+model SubmissionStatus {
+  id           String   @id @default(uuid())
+  submissionId String
+  status       String
+  statusDetail Json?
+  queriedAt    DateTime @default(now())
+
+  submission Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+  @@index([submissionId])
+  @@map("submission_statuses")
+}
+
+// ============================================================
+// Audit Log (审计日志)
+// ============================================================
+
+model AuditLog {
+  id         String   @id @default(uuid())
+  tenantId   String
+  traceId    String // 全链路追踪ID
+  userId     String?
+  action     String // chat, permission_check, submit, query_status, etc.
+  resource   String? // 资源标识
+  result     String // success, denied, error
+  details    Json?
+  ipAddress  String?
+  userAgent  String?
+  createdAt  DateTime @default(now())
+
+  tenant Tenant @relation(fields: [tenantId], references: [id])
+
+  @@index([tenantId, traceId])
+  @@index([tenantId, userId])
+  @@index([tenantId, action])
+  @@index([createdAt])
+  @@map("audit_logs")
+}
+
+// ============================================================
+// MCP (Model Context Protocol) Tools
+// ============================================================
+
+model MCPTool {
+  id          String   @id @default(uuid())
+  tenantId    String
+  connectorId String
+
+  // MCP 工具定义
+  toolName        String // 工具名称，如 "o2oa_submit_expense"
+  toolDescription String @db.Text // 工具描述
+  toolSchema      Json // MCP 工具 schema（JSON Schema 格式）
+
+  // API 映射
+  apiEndpoint String // API 端点，如 "/x_processplatform_assemble_surface/jaxrs/work"
+  httpMethod  String // HTTP 方法，如 "POST"
+  headers     Json? // 请求头模板
+  bodyTemplate Json? // 请求体模板
+
+  // 参数映射
+  paramMapping Json // 参数映射规则：{ "targetParam": "sourceParam" } 或 { "targetParam": { "source": "sourceParam", "transform": "..." } }
+
+  // 响应处理
+  responseMapping Json // 响应映射规则：{ "targetField": "response.data.field" }
+
+  // 元数据
+  flowCode    String? // 关联的流程代码
+  category    String // 工具分类：submit, query, cancel, urge, list, get
+  enabled     Boolean  @default(true)
+
+  // 测试数据
+  testInput   Json? // 测试输入示例
+  testOutput  Json? // 预期输出示例
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  connector   Connector @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+  tenant      Tenant    @relation(fields: [tenantId], references: [id])
+
+  @@unique([connectorId, toolName])
+  @@index([connectorId])
+  @@index([flowCode])
+  @@index([category])
+  @@map("mcp_tools")
+}

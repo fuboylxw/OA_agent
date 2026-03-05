@@ -1,0 +1,71 @@
+{
+  "timestamp": "2026-03-05T07:41:49.126Z",
+  "summary": {
+    "total": 7,
+    "success": 6,
+    "failed": 1,
+    "successRate": 85.71
+  },
+  "results": [
+    {
+      "endpoint": "健康检查",
+      "method": "GET",
+      "status": "success",
+      "statusCode": 200,
+      "responseTime": 29,
+      "data": {
+        "status": "ok",
+        "timestamp": "2026-03-05T07:41:49.023Z",
+        "service": "uniflow-oa-api"
+      }
+    },
+    {
+      "endpoint": "API上传 (JSON)",
+      "method": "POST",
+      "status": "failed",
+      "responseTime": 37,
+      "statusCode": 500,
+      "error": "Request failed with status code 500"
+    },
+    {
+      "endpoint": "获取上传历史",
+      "method": "GET",
+      "status": "success",
+      "statusCode": 200,
+      "responseTime": 48,
+      "data": []
+    },
+    {
+      "endpoint": "列出MCP工具",
+      "method": "GET",
+      "status": "success",
+      "statusCode": 200,
+      "responseTime": 5,
+      "data": []
+    },
+    {
+      "endpoint": "按分类查询MCP工具",
+      "method": "GET",
+      "status": "success",
+      "statusCode": 200,
+      "responseTime": 2,
+      "data": []
+    },
+    {
+      "endpoint": "查询流程库",
+      "method": "GET",
+      "status": "success",
+      "statusCode": 200,
+      "responseTime": 2,
+      "data": []
+    },
+    {
+      "endpoint": "列出连接器",
+      "method": "GET",
+      "status": "success",
+      "statusCode": 200,
+      "responseTime": 3,
+      "data": []
+    }
+  ]
+}

@@ -1,0 +1,297 @@
+{
+  "openapi": "3.0.0",
+  "info": {
+    "title": "示例OA系统API",
+    "version": "1.0.0",
+    "description": "包含常见办事流程的OA系统API示例"
+  },
+  "servers": [
+    {
+      "url": "https://oa.example.com/api/v1"
+    }
+  ],
+  "paths": {
+    "/leave/submit": {
+      "post": {
+        "summary": "提交请假申请",
+        "description": "员工提交请假申请，支持年假、病假、事假等类型",
+        "tags": ["办事流程", "请假"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["startDate", "endDate", "reason", "leaveType"],
+                "properties": {
+                  "startDate": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "请假开始日期"
+                  },
+                  "endDate": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "请假结束日期"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "description": "请假原因"
+                  },
+                  "leaveType": {
+                    "type": "string",
+                    "enum": ["annual", "sick", "personal", "maternity"],
+                    "description": "请假类型：annual-年假, sick-病假, personal-事假, maternity-产假"
+                  },
+                  "days": {
+                    "type": "number",
+                    "description": "请假天数"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "提交成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "success": true,
+                    "data": {
+                      "type": "object",
+                      "properties": {
+                        "applicationId": {
+                          "type": "string",
+                          "description": "申请单ID"
+                        }
+                      }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/expense/submit": {
+      "post": {
+        "summary": "提交报销申请",
+        "description": "员工提交费用报销申请",
+        "tags": ["办事流程", "报销"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["amount", "category", "description"],
+                "properties": {
+                  "amount": {
+                    "type": "number",
+                    "description": "报销金额"
+                  },
+                  "category": {
+                    "type": "string",
+                    "enum": ["travel", "meal", "office", "training"],
+                    "description": "报销类别"
+                  },
+                  "description": {
+                    "type": "string",
+                    "description": "报销说明"
+                  },
+                  "date": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "费用发生日期"
+                  },
+                  "attachments": {
+                    "type": "array",
+                    "items": {
+                      "type": "string"
+                    },
+                    "description": "附件URL列表"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "提交成功"
+          }
+        }
+      }
+    },
+    "/attendance/query": {
+      "get": {
+        "summary": "查询考勤记录",
+        "description": "查询员工的考勤打卡记录",
+        "tags": ["办事流程", "考勤"],
+        "parameters": [
+          {
+            "name": "startDate",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "查询开始日期"
+          },
+          {
+            "name": "endDate",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "date"
+            },
+            "description": "查询结束日期"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "查询成功"
+          }
+        }
+      }
+    },
+    "/overtime/submit": {
+      "post": {
+        "summary": "提交加班申请",
+        "description": "员工提交加班申请",
+        "tags": ["办事流程", "加班"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["date", "startTime", "endTime", "reason"],
+                "properties": {
+                  "date": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "加班日期"
+                  },
+                  "startTime": {
+                    "type": "string",
+                    "description": "开始时间"
+                  },
+                  "endTime": {
+                    "type": "string",
+                    "description": "结束时间"
+                  },
+                  "reason": {
+                    "type": "string",
+                    "description": "加班原因"
+                  },
+                  "hours": {
+                    "type": "number",
+                    "description": "加班小时数"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "提交成功"
+          }
+        }
+      }
+    },
+    "/business-trip/submit": {
+      "post": {
+        "summary": "提交出差申请",
+        "description": "员工提交出差申请",
+        "tags": ["办事流程", "出差"],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["destination", "startDate", "endDate", "purpose"],
+                "properties": {
+                  "destination": {
+                    "type": "string",
+                    "description": "出差目的地"
+                  },
+                  "startDate": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "出差开始日期"
+                  },
+                  "endDate": {
+                    "type": "string",
+                    "format": "date",
+                    "description": "出差结束日期"
+                  },
+                  "purpose": {
+                    "type": "string",
+                    "description": "出差目的"
+                  },
+                  "estimatedCost": {
+                    "type": "number",
+                    "description": "预计费用"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "提交成功"
+          }
+        }
+      }
+    },
+    "/user/profile": {
+      "get": {
+        "summary": "获取用户信息",
+        "description": "获取当前登录用户的个人信息",
+        "tags": ["用户管理"],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    },
+    "/system/config": {
+      "get": {
+        "summary": "获取系统配置",
+        "description": "获取系统配置信息",
+        "tags": ["系统管理"],
+        "responses": {
+          "200": {
+            "description": "成功"
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "securitySchemes": {
+      "ApiKeyAuth": {
+        "type": "apiKey",
+        "in": "header",
+        "name": "X-API-Key"
+      }
+    }
+  },
+  "security": [
+    {
+      "ApiKeyAuth": []
+    }
+  ]
+}
