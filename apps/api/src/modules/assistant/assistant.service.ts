@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { IntentAgent } from './agents/intent.agent';
 import { FlowAgent } from './agents/flow.agent';
@@ -17,6 +17,12 @@ interface ChatInput {
   message: string;
 }
 
+interface ActionButton {
+  label: string;
+  action: string; // confirm | cancel | modify
+  type: 'primary' | 'default' | 'danger';
+}
+
 interface ChatResponse {
   sessionId: string;
   message: string;
@@ -24,6 +30,7 @@ interface ChatResponse {
   draftId?: string;
   needsInput: boolean;
   suggestedActions?: string[];
+  actionButtons?: ActionButton[];
   formData?: Record<string, any>;
   missingFields?: Array<{ key: string; label: string; question: string }>;
   processStatus?: ProcessStatus;
@@ -83,6 +90,8 @@ interface SharedContext {
 
 @Injectable()
 export class AssistantService {
+  private readonly logger = new Logger(AssistantService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly intentAgent: IntentAgent,
@@ -120,104 +129,101 @@ export class AssistantService {
       // Check if we're in the middle of a process
       const processContext = this.extractProcessContext(session);
 
+      let response: ChatResponse;
+
       // If in parameter collection, continue that flow
       if (processContext && processContext.status === ProcessStatus.PARAMETER_COLLECTION) {
-        return await this.continueParameterCollection(
+        response = await this.continueParameterCollection(
           { ...input, userId: resolvedUserId },
           session,
           processContext,
           sharedContext,
           traceId,
         );
-      }
-
-      // If pending confirmation, handle confirmation
-      if (processContext && processContext.status === ProcessStatus.PENDING_CONFIRMATION) {
-        return await this.handleConfirmation(
+      } else if (processContext && processContext.status === ProcessStatus.PENDING_CONFIRMATION) {
+        // If pending confirmation, handle confirmation
+        response = await this.handleConfirmation(
           { ...input, userId: resolvedUserId },
           session,
           processContext,
           traceId,
         );
+      } else {
+        // Step 1: Detect intent
+        const intentResult = await this.intentAgent.detectIntent(input.message, {
+          userId: resolvedUserId,
+          tenantId: input.tenantId,
+          sessionId: session.id,
+        });
+
+        // Log intent detection
+        await this.auditService.createLog({
+          tenantId: input.tenantId,
+          traceId,
+          userId: resolvedUserId,
+          action: 'intent_detection',
+          result: 'success',
+          details: { intent: intentResult.intent, confidence: intentResult.confidence },
+        });
+
+        // Create a modified input with resolved userId
+        const resolvedInput = { ...input, userId: resolvedUserId };
+
+        switch (intentResult.intent) {
+          case ChatIntent.CREATE_SUBMISSION:
+            response = await this.handleCreateSubmission(
+              resolvedInput,
+              session,
+              intentResult,
+              sharedContext,
+              traceId,
+            );
+            break;
+          case ChatIntent.QUERY_STATUS:
+            response = await this.handleQueryStatus(resolvedInput, session, traceId);
+            break;
+          case ChatIntent.CANCEL_SUBMISSION:
+            response = await this.handleAction(resolvedInput, session, 'cancel', traceId);
+            break;
+          case ChatIntent.URGE:
+            response = await this.handleAction(resolvedInput, session, 'urge', traceId);
+            break;
+          case ChatIntent.SUPPLEMENT:
+            response = await this.handleAction(resolvedInput, session, 'supplement', traceId);
+            break;
+          case ChatIntent.DELEGATE:
+            response = await this.handleAction(resolvedInput, session, 'delegate', traceId);
+            break;
+          case ChatIntent.SERVICE_REQUEST:
+            response = await this.handleServiceRequest(resolvedInput, session, traceId);
+            break;
+          default:
+            response = {
+              sessionId: session.id,
+              message: '抱歉，我没有理解您的意图。您可以尝试：\n- 发起申请（如"我要报销差旅费"）\n- 查询进度（如"我的请假申请到哪了"）\n- 撤回申请\n- 催办\n- 补件\n- 转办',
+              needsInput: true,
+              suggestedActions: ['发起申请', '查询进度', '查看流程列表'],
+            };
+        }
       }
 
-      // Step 1: Detect intent
-      const intentResult = await this.intentAgent.detectIntent(input.message, {
-        userId: resolvedUserId,
-        tenantId: input.tenantId,
-        sessionId: session.id,
-      });
-
-      // Log intent detection
-      await this.auditService.createLog({
-        tenantId: input.tenantId,
-        traceId,
-        userId: resolvedUserId,
-        action: 'intent_detection',
-        result: 'success',
-        details: { intent: intentResult.intent, confidence: intentResult.confidence },
-      });
-
-      // Route based on intent
-      let response: ChatResponse;
-
-      // Create a modified input with resolved userId
-      const resolvedInput = { ...input, userId: resolvedUserId };
-
-      switch (intentResult.intent) {
-        case ChatIntent.CREATE_SUBMISSION:
-          response = await this.handleCreateSubmission(
-            resolvedInput,
-            session,
-            intentResult,
-            sharedContext,
-            traceId,
-          );
-          break;
-        case ChatIntent.QUERY_STATUS:
-          response = await this.handleQueryStatus(resolvedInput, session, traceId);
-          break;
-        case ChatIntent.CANCEL_SUBMISSION:
-          response = await this.handleAction(resolvedInput, session, 'cancel', traceId);
-          break;
-        case ChatIntent.URGE:
-          response = await this.handleAction(resolvedInput, session, 'urge', traceId);
-          break;
-        case ChatIntent.SUPPLEMENT:
-          response = await this.handleAction(resolvedInput, session, 'supplement', traceId);
-          break;
-        case ChatIntent.DELEGATE:
-          response = await this.handleAction(resolvedInput, session, 'delegate', traceId);
-          break;
-        case ChatIntent.SERVICE_REQUEST:
-          response = await this.handleServiceRequest(resolvedInput, session, traceId);
-          break;
-        default:
-          response = {
-            sessionId: session.id,
-            message: '抱歉，我没有理解您的意图。您可以尝试：\n- 发起申请（如"我要报销差旅费"）\n- 查询进度（如"我的请假申请到哪了"）\n- 撤回申请\n- 催办\n- 补件\n- 转办',
-            needsInput: true,
-            suggestedActions: ['发起申请', '查询进度', '查看流程列表'],
-          };
-      }
-
-      // Save assistant response
+      // Save assistant response (unified for all branches)
       await this.prisma.chatMessage.create({
         data: {
           sessionId: session.id,
           role: 'assistant',
           content: response.message,
           metadata: {
-            intent: intentResult.intent,
-            draftId: response.draftId,
             processStatus: response.processStatus,
+            draftId: response.draftId,
+            actionButtons: response.actionButtons as any,
           },
         },
       });
 
       return response;
     } catch (err: any) {
-      console.error('[AssistantService] chat error:', err.message, err.stack);
+      this.logger.error(' chat error:', err.message, err.stack);
 
       // Log error
       await this.auditService.createLog({
@@ -252,42 +258,58 @@ export class AssistantService {
       where: { userId, tenantId },
       orderBy: { createdAt: 'desc' },
       take: 10,
-      include: { template: true },
     });
+
+    // 获取模板信息
+    const templateIds = [...new Set(recentSubmissions.map(s => s.templateId))];
+    const templates = await this.prisma.processTemplate.findMany({
+      where: { id: { in: templateIds } },
+    });
+
+    const templateMap = new Map(templates.map(t => [t.id, t]));
 
     // 统计常用流程类型
     const frequentTypes = recentSubmissions
-      .map(s => s.template.processCode)
+      .map(s => {
+        const template = templateMap.get(s.templateId);
+        return template?.processCode;
+      })
+      .filter(Boolean)
       .reduce((acc, code) => {
-        acc[code] = (acc[code] || 0) + 1;
+        if (code) {
+          acc[code] = (acc[code] || 0) + 1;
+        }
         return acc;
       }, {} as Record<string, number>);
 
     const sortedTypes = Object.entries(frequentTypes)
-      .sort(([, a], [, b]) => b - a)
+      .sort(([, a], [, b]) => (b as number) - (a as number))
       .map(([code]) => code);
 
     return {
       userId,
       profile: {
         employeeId: user.id,
-        name: user.name || 'User',
-        department: (user.metadata as any)?.department,
-        position: (user.metadata as any)?.position,
+        name: user.displayName || user.username || 'User',
+        department: undefined,
+        position: undefined,
       },
       preferences: {
-        defaultApprover: (user.metadata as any)?.defaultApprover,
-        defaultCC: (user.metadata as any)?.defaultCC || [],
+        defaultApprover: undefined,
+        defaultCC: [],
         language: 'zh-CN',
       },
       history: {
-        recentRequests: recentSubmissions.map(s => ({
-          id: s.id,
-          processCode: s.template.processCode,
-          processName: s.template.processName,
-          status: s.status,
-          createdAt: s.createdAt,
-        })),
+        recentRequests: recentSubmissions.map(s => {
+          const template = templateMap.get(s.templateId);
+          return {
+            id: s.id,
+            processCode: template?.processCode || '',
+            processName: template?.processName || '',
+            status: s.status,
+            createdAt: s.createdAt,
+          };
+        }),
         frequentTypes: sortedTypes,
       },
     };
@@ -348,19 +370,19 @@ export class AssistantService {
       this.prefillFromSharedContext(currentFormData, schema, sharedContext);
 
       // 更新会话元数据
+      const updatedMetadata = {
+        ...session.metadata,
+        currentFormData,
+        processStatus: formResult.isComplete
+          ? ProcessStatus.PENDING_CONFIRMATION
+          : ProcessStatus.PARAMETER_COLLECTION,
+        processUpdatedAt: new Date().toISOString(),
+      };
       await this.prisma.chatSession.update({
         where: { id: session.id },
-        data: {
-          metadata: {
-            ...session.metadata,
-            currentFormData,
-            processStatus: formResult.isComplete
-              ? ProcessStatus.PENDING_CONFIRMATION
-              : ProcessStatus.PARAMETER_COLLECTION,
-            processUpdatedAt: new Date().toISOString(),
-          },
-        },
+        data: { metadata: updatedMetadata },
       });
+      session.metadata = updatedMetadata;
 
       // 如果还有缺失字段，继续询问
       if (!formResult.isComplete) {
@@ -379,7 +401,7 @@ export class AssistantService {
       // 参数收集完成，生成确认摘要
       return await this.generateConfirmation(input, session, template, currentFormData, traceId);
     } catch (error: any) {
-      console.error('[AssistantService] continueParameterCollection error:', error.message);
+      this.logger.error(' continueParameterCollection error:', error.message);
 
       // 回滚到初始状态
       await this.rollbackProcess(session, traceId);
@@ -393,22 +415,20 @@ export class AssistantService {
     }
   }
 
-  // 处理确认
+  // 处理确认（支持按钮点击和自然语言回复）
   private async handleConfirmation(
     input: ChatInput,
     session: any,
     processContext: ProcessContext,
     traceId: string,
   ): Promise<ChatResponse> {
-    const message = input.message.trim().toLowerCase();
+    const message = input.message.trim();
 
-    // 检查是否确认提交
-    if (/^(确认|提交|是|好|ok|yes)$/i.test(message)) {
+    // 1. 按钮点击：前端传来的 action 标识（精确匹配）
+    if (message === '__ACTION_CONFIRM__') {
       return await this.executeSubmission(input, session, processContext, traceId);
     }
-
-    // 检查是否取消
-    if (/^(取消|不|no|算了)$/i.test(message)) {
+    if (message === '__ACTION_CANCEL__') {
       await this.rollbackProcess(session, traceId);
       return {
         sessionId: session.id,
@@ -417,37 +437,176 @@ export class AssistantService {
         processStatus: ProcessStatus.CANCELLED,
       };
     }
-
-    // 检查是否修改
-    if (/^(修改|改|重新填)/.test(message)) {
-      // 重置到参数收集状态
-      await this.prisma.chatSession.update({
-        where: { id: session.id },
-        data: {
-          metadata: {
-            ...session.metadata,
-            processStatus: ProcessStatus.PARAMETER_COLLECTION,
-          },
-        },
-      });
-
-      return {
-        sessionId: session.id,
-        message: '好的，请告诉我您要修改哪个字段。',
-        needsInput: true,
-        formData: processContext.parameters,
-        processStatus: ProcessStatus.PARAMETER_COLLECTION,
-      };
+    if (message === '__ACTION_MODIFY__') {
+      return await this.enterModifyMode(session, processContext);
     }
 
-    // 未识别的输入，重新提示
+    // 2. 自然语言回复：用 LLM 判断用户意图
+    const confirmIntent = await this.detectConfirmIntent(message, processContext);
+
+    switch (confirmIntent.action) {
+      case 'confirm':
+        return await this.executeSubmission(input, session, processContext, traceId);
+
+      case 'cancel':
+        await this.rollbackProcess(session, traceId);
+        return {
+          sessionId: session.id,
+          message: '已取消申请。如需重新发起，请告诉我。',
+          needsInput: false,
+          processStatus: ProcessStatus.CANCELLED,
+        };
+
+      case 'modify':
+        // 如果 LLM 同时提取了修改内容，直接应用修改
+        if (confirmIntent.modifications && Object.keys(confirmIntent.modifications).length > 0) {
+          return await this.applyModificationsAndReconfirm(
+            input, session, processContext, confirmIntent.modifications, traceId,
+          );
+        }
+        return await this.enterModifyMode(session, processContext);
+
+      default:
+        // 无法判断，温和地再次提示
+        return {
+          sessionId: session.id,
+          message: '没太明白您的意思，您可以点击下方按钮操作，或者直接告诉我要修改什么。',
+          needsInput: true,
+          actionButtons: [
+            { label: '确认提交', action: 'confirm', type: 'primary' },
+            { label: '修改内容', action: 'modify', type: 'default' },
+            { label: '取消', action: 'cancel', type: 'danger' },
+          ],
+          formData: processContext.parameters,
+          processStatus: ProcessStatus.PENDING_CONFIRMATION,
+        };
+    }
+  }
+
+  // 用 LLM 判断确认阶段的用户意图
+  private async detectConfirmIntent(
+    message: string,
+    processContext: ProcessContext,
+  ): Promise<{ action: 'confirm' | 'cancel' | 'modify' | 'unknown'; modifications?: Record<string, any> }> {
+    try {
+      const { LLMClientFactory } = await import('@uniflow/agent-kernel');
+      const llmClient = LLMClientFactory.createFromEnv();
+
+      const currentFields = Object.entries(processContext.parameters)
+        .map(([k, v]) => `  ${k}: ${v}`)
+        .join('\n');
+
+      const messages = [
+        {
+          role: 'system' as const,
+          content: `你是一个表单确认助手。用户正在确认一份申请表单，当前表单内容如下：
+${currentFields}
+
+判断用户的回复属于以下哪种意图：
+1. confirm - 确认提交（如"好的"、"没问题"、"提交吧"、"确认"、"可以"、"行"、"对"、"嗯"）
+2. cancel - 取消申请（如"算了"、"不要了"、"取消"、"不提交了"）
+3. modify - 修改内容（如"把日期改成明天"、"金额改为2000"、"请假类型改成年假"）
+
+如果是 modify，请同时提取用户想修改的字段和新值。
+
+返回JSON：
+{
+  "action": "confirm" | "cancel" | "modify" | "unknown",
+  "modifications": { "field_key": "new_value" },
+  "reasoning": "判断依据"
+}`,
+        },
+        {
+          role: 'user' as const,
+          content: `今天是 ${new Date().toISOString().split('T')[0]}。\n用户回复: "${message}"`,
+        },
+      ];
+
+      const response = await llmClient.chat(messages);
+      let jsonStr = response.content.trim();
+      if (jsonStr.startsWith('```')) {
+        jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
+      }
+      const result = JSON.parse(jsonStr);
+      return {
+        action: result.action || 'unknown',
+        modifications: result.modifications,
+      };
+    } catch (error: any) {
+      this.logger.error(' detectConfirmIntent LLM failed:', error.message);
+      // LLM 失败时回退到简单规则
+      const lower = message.toLowerCase();
+      if (/^(确认|提交|是|好|ok|yes|没问题|可以|行|对|嗯)$/i.test(lower)) {
+        return { action: 'confirm' };
+      }
+      if (/^(取消|不|no|算了|不要)$/i.test(lower)) {
+        return { action: 'cancel' };
+      }
+      if (/修改|改|换/.test(lower)) {
+        return { action: 'modify' };
+      }
+      return { action: 'unknown' };
+    }
+  }
+
+  // 进入修改模式
+  private async enterModifyMode(
+    session: any,
+    processContext: ProcessContext,
+  ): Promise<ChatResponse> {
+    await this.prisma.chatSession.update({
+      where: { id: session.id },
+      data: {
+        metadata: {
+          ...session.metadata,
+          processStatus: ProcessStatus.PARAMETER_COLLECTION,
+        },
+      },
+    });
+
     return {
       sessionId: session.id,
-      message: '请确认是否提交？\n回复"确认"提交申请，"修改"修改内容，或"取消"取消申请。',
+      message: '好的，请告诉我您要修改什么，比如"把日期改成下周一"。',
       needsInput: true,
-      suggestedActions: ['确认提交', '修改内容', '取消'],
+      formData: processContext.parameters,
+      processStatus: ProcessStatus.PARAMETER_COLLECTION,
+    };
+  }
+
+  // 应用修改并重新确认
+  private async applyModificationsAndReconfirm(
+    input: ChatInput,
+    session: any,
+    processContext: ProcessContext,
+    modifications: Record<string, any>,
+    traceId: string,
+  ): Promise<ChatResponse> {
+    // 合并修改
+    const updatedFormData = {
+      ...processContext.parameters,
+      ...modifications,
+    };
+
+    // 获取模板用于格式化
+    const template = await this.processLibraryService.getByCode(
+      input.tenantId,
+      processContext.processCode,
+    );
+
+    // 更新会话中的表单数据
+    const updatedMeta = {
+      ...session.metadata,
+      currentFormData: updatedFormData,
       processStatus: ProcessStatus.PENDING_CONFIRMATION,
     };
+    await this.prisma.chatSession.update({
+      where: { id: session.id },
+      data: { metadata: updatedMeta },
+    });
+    session.metadata = updatedMeta;
+
+    // 重新生成确认
+    return await this.generateConfirmation(input, session, template, updatedFormData, traceId);
   }
 
   // 从共享上下文预填充
@@ -532,11 +691,16 @@ export class AssistantService {
 
     return {
       sessionId: session.id,
-      message: `"${template.processName}"草稿已生成。\n\n表单内容：\n${formattedData}\n\n确认提交吗？`,
+      message: `"${template.processName}"草稿已生成。\n\n表单内容：\n${formattedData}\n\n请确认是否提交，也可以直接告诉我要修改的内容。`,
       intent: ChatIntent.CREATE_SUBMISSION,
       draftId: draft.id,
       needsInput: true,
       formData: formData,
+      actionButtons: [
+        { label: '确认提交', action: 'confirm', type: 'primary' },
+        { label: '修改内容', action: 'modify', type: 'default' },
+        { label: '取消', action: 'cancel', type: 'danger' },
+      ],
       suggestedActions: ['确认提交', '修改内容', '取消'],
       processStatus: ProcessStatus.PENDING_CONFIRMATION,
     };
@@ -605,7 +769,7 @@ export class AssistantService {
           throw new Error('未找到提交工具');
         }
         toolName = allSubmitTools[0].toolName;
-        console.log(`[Assistant] 使用回退提交工具: ${toolName}`);
+        this.logger.log(` 使用回退提交工具: ${toolName}`);
       } else {
         toolName = submitTool.toolName;
       }
@@ -617,7 +781,7 @@ export class AssistantService {
         connector.id,
       );
 
-      console.log(`[Assistant] MCP工具执行结果:`, result);
+      this.logger.log(` MCP工具执行结果:`, result);
 
       // 创建提交记录
       const submission = await this.prisma.submission.create({
@@ -668,7 +832,7 @@ export class AssistantService {
         processStatus: ProcessStatus.COMPLETED,
       };
     } catch (error: any) {
-      console.error('[Assistant] 提交失败:', error.message, error.stack);
+      this.logger.error(' 提交失败:', error.message, error.stack);
 
       // 记录失败日志
       await this.auditService.createLog({
@@ -714,19 +878,12 @@ export class AssistantService {
         },
       });
 
-      console.log(`[Assistant] 流程已回滚: sessionId=${session.id}`);
+      this.logger.log(` 流程已回滚: sessionId=${session.id}`);
     } catch (error: any) {
-      console.error('[Assistant] 回滚流程失败:', error.message);
+      this.logger.error(' 回滚流程失败:', error.message);
     }
   }
 
-  private async handleCreateSubmission(
-    input: ChatInput,
-    session: any,
-    intentResult: any,
-    sharedContext: SharedContext,
-    traceId: string,
-  ): Promise<ChatResponse> {
   private async handleCreateSubmission(
     input: ChatInput,
     session: any,
@@ -795,22 +952,23 @@ export class AssistantService {
 
       // Initialize process context
       const processId = `process_${Date.now()}`;
+      const newMetadata = {
+        processId,
+        processType: ChatIntent.CREATE_SUBMISSION,
+        currentProcessCode: flowResult.matchedFlow.processCode,
+        currentFormData,
+        processStatus: formResult.isComplete
+          ? ProcessStatus.PENDING_CONFIRMATION
+          : ProcessStatus.PARAMETER_COLLECTION,
+        processCreatedAt: new Date().toISOString(),
+        processUpdatedAt: new Date().toISOString(),
+      };
       await this.prisma.chatSession.update({
         where: { id: session.id },
-        data: {
-          metadata: {
-            processId,
-            processType: ChatIntent.CREATE_SUBMISSION,
-            currentProcessCode: flowResult.matchedFlow.processCode,
-            currentFormData,
-            processStatus: formResult.isComplete
-              ? ProcessStatus.PENDING_CONFIRMATION
-              : ProcessStatus.PARAMETER_COLLECTION,
-            processCreatedAt: new Date().toISOString(),
-            processUpdatedAt: new Date().toISOString(),
-          },
-        },
+        data: { metadata: newMetadata },
       });
+      // 同步更新 session 对象，避免后续方法使用旧 metadata
+      session.metadata = newMetadata;
 
       // Log process initialization
       await this.auditService.createLog({
@@ -842,7 +1000,7 @@ export class AssistantService {
       // All parameters collected, generate confirmation
       return await this.generateConfirmation(input, session, template, currentFormData, traceId);
     } catch (error: any) {
-      console.error('[AssistantService] handleCreateSubmission error:', error.message, error.stack);
+      this.logger.error(' handleCreateSubmission error:', error.message, error.stack);
 
       // Log error
       await this.auditService.createLog({
@@ -874,9 +1032,6 @@ export class AssistantService {
           tenantId: input.tenantId,
           userId: input.userId,
         },
-        include: {
-          template: true,
-        },
         orderBy: { createdAt: 'desc' },
         take: 5,
       });
@@ -890,11 +1045,19 @@ export class AssistantService {
         };
       }
 
+      // 获取模板信息
+      const templateIds = [...new Set(submissions.map(s => s.templateId))];
+      const templates = await this.prisma.processTemplate.findMany({
+        where: { id: { in: templateIds } },
+      });
+      const templateMap = new Map(templates.map(t => [t.id, t]));
+
       const statusList = submissions
         .map((s, i) => {
+          const template = templateMap.get(s.templateId);
           const statusText = this.getStatusText(s.status);
           const date = new Date(s.createdAt).toLocaleDateString('zh-CN');
-          return `${i + 1}. ${s.template.processName} - ${statusText} (${date})`;
+          return `${i + 1}. ${template?.processName || '未知流程'} - ${statusText} (${date})`;
         })
         .join('\n');
 
@@ -915,7 +1078,7 @@ export class AssistantService {
         suggestedActions: ['查看详情', '催办', '发起新申请'],
       };
     } catch (error: any) {
-      console.error('[AssistantService] handleQueryStatus error:', error.message);
+      this.logger.error(' handleQueryStatus error:', error.message);
 
       await this.auditService.createLog({
         tenantId: input.tenantId,
@@ -974,7 +1137,6 @@ export class AssistantService {
             tenantId: input.tenantId,
             userId: input.userId,
           },
-          include: { template: true },
         });
 
         if (!submission) {
@@ -997,7 +1159,6 @@ export class AssistantService {
           userId: input.userId,
           status: { in: ['submitted', 'pending'] },
         },
-        include: { template: true },
         orderBy: { createdAt: 'desc' },
         take: 5,
       });
@@ -1010,10 +1171,18 @@ export class AssistantService {
         };
       }
 
+      // 获取模板信息
+      const templateIds = [...new Set(recentSubmissions.map(s => s.templateId))];
+      const templates = await this.prisma.processTemplate.findMany({
+        where: { id: { in: templateIds } },
+      });
+      const templateMap = new Map(templates.map(t => [t.id, t]));
+
       const submissionList = recentSubmissions
         .map((s, i) => {
+          const template = templateMap.get(s.templateId);
           const date = new Date(s.createdAt).toLocaleDateString('zh-CN');
-          return `${i + 1}. ${s.template.processName} - ${s.oaSubmissionId || s.id} (${date})`;
+          return `${i + 1}. ${template?.processName || '未知流程'} - ${s.oaSubmissionId || s.id} (${date})`;
         })
         .join('\n');
 
@@ -1024,7 +1193,7 @@ export class AssistantService {
         suggestedActions: recentSubmissions.map(s => s.oaSubmissionId || s.id),
       };
     } catch (error: any) {
-      console.error(`[AssistantService] handleAction(${action}) error:`, error.message);
+      this.logger.error(`handleAction(${action}) error: ${error.message}`);
 
       await this.auditService.createLog({
         tenantId: input.tenantId,
@@ -1092,7 +1261,7 @@ export class AssistantService {
         connector.id,
       );
 
-      console.log(`[Assistant] ${action} action result:`, result);
+      this.logger.log(` ${action} action result:`, result);
 
       // 记录审计日志
       await this.auditService.createLog({
@@ -1115,7 +1284,7 @@ export class AssistantService {
         suggestedActions: ['查询进度', '发起新申请'],
       };
     } catch (error: any) {
-      console.error(`[Assistant] executeAction(${action}) error:`, error.message);
+      this.logger.error(`executeAction(${action}) error: ${error.message}`);
 
       await this.auditService.createLog({
         tenantId: input.tenantId,
@@ -1186,7 +1355,7 @@ export class AssistantService {
         suggestedActions: flows.slice(0, 5).map(f => f.processName),
       };
     } catch (error: any) {
-      console.error('[AssistantService] handleServiceRequest error:', error.message);
+      this.logger.error(' handleServiceRequest error:', error.message);
 
       await this.auditService.createLog({
         tenantId: input.tenantId,
@@ -1239,15 +1408,52 @@ export class AssistantService {
   }
 
   async listSessions(tenantId: string, userId: string) {
-    return this.prisma.chatSession.findMany({
+    const sessions = await this.prisma.chatSession.findMany({
       where: { tenantId, userId },
       orderBy: { updatedAt: 'desc' },
       take: 20,
       include: {
+        messages: {
+          orderBy: { createdAt: 'asc' },
+          take: 1,
+          where: { role: 'user' },
+          select: { content: true },
+        },
         _count: {
           select: { messages: true },
         },
       },
+    });
+
+    // 同时获取每个会话的最后一条非内部消息
+    const sessionIds = sessions.map(s => s.id);
+    const lastMessages = await Promise.all(
+      sessionIds.map(id =>
+        this.prisma.chatMessage.findFirst({
+          where: {
+            sessionId: id,
+            NOT: { content: { startsWith: '__ACTION_' } },
+          },
+          orderBy: { createdAt: 'desc' },
+          select: { content: true, role: true, createdAt: true },
+        }),
+      ),
+    );
+
+    return sessions.map((s, i) => {
+      const firstUserMsg = s.messages[0]?.content || '';
+      const lastMsg = lastMessages[i];
+      return {
+        id: s.id,
+        title: firstUserMsg.length > 30 ? firstUserMsg.substring(0, 30) + '...' : firstUserMsg || '新对话',
+        lastMessage: lastMsg?.role === 'user'
+          ? lastMsg.content.substring(0, 50)
+          : (lastMsg?.content || '').substring(0, 50),
+        messageCount: s._count.messages,
+        status: s.status,
+        timestamp: s.updatedAt,
+        createdAt: s.createdAt,
+      };
     });
   }
 
@@ -1269,7 +1475,7 @@ export class AssistantService {
       where: { id: sessionId },
     });
 
-    console.log(`[AssistantService] Session deleted: ${sessionId}`);
+    this.logger.log(` Session deleted: ${sessionId}`);
   }
 
   async resetSession(sessionId: string): Promise<void> {
@@ -1282,7 +1488,7 @@ export class AssistantService {
       },
     });
 
-    console.log(`[AssistantService] Session reset: ${sessionId}`);
+    this.logger.log(` Session reset: ${sessionId}`);
   }
 
   private formatFormData(formData: Record<string, any>, schema: any): string {

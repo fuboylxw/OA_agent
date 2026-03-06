@@ -1,21 +1,25 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { PrismaService } from '../common/prisma.service';
 import { BootstrapStateMachine } from './bootstrap.state-machine';
 import { CreateBootstrapJobDto } from './dto/create-bootstrap-job.dto';
+import { DocumentParserService } from './document-parser.service';
 import axios from 'axios';
 
 @Injectable()
 export class BootstrapService {
+  private readonly logger = new Logger(BootstrapService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly stateMachine: BootstrapStateMachine,
+    private readonly documentParserService: DocumentParserService,
     @InjectQueue('bootstrap') private readonly bootstrapQueue: Queue,
   ) {}
 
   async createJob(dto: CreateBootstrapJobDto) {
-    const tenantId = process.env.DEFAULT_TENANT_ID || 'default-tenant';
+    const tenantId = dto.tenantId || process.env.DEFAULT_TENANT_ID || 'default-tenant';
 
     // If apiDocUrl is provided, fetch the content
     let apiDocContent = dto.apiDocContent;
@@ -25,15 +29,22 @@ export class BootstrapService {
         apiDocContent = typeof response.data === 'string'
           ? response.data
           : JSON.stringify(response.data);
+        this.logger.log(`Successfully fetched API doc from ${dto.apiDocUrl}, length: ${apiDocContent.length}`);
       } catch (error: any) {
-        console.warn(`[Bootstrap] Failed to fetch API doc from ${dto.apiDocUrl}: ${error.message}`);
+        this.logger.warn(`Failed to fetch API doc from ${dto.apiDocUrl}: ${error.message}`);
+        throw new Error(`无法访问 API 文档链接: ${error.message}`);
       }
+    }
+
+    if (!apiDocContent && !dto.oaUrl) {
+      throw new Error('请提供 API 文档链接、上传 API 文档或填写 OA 系统地址');
     }
 
     // Create bootstrap job
     const job = await this.prisma.bootstrapJob.create({
       data: {
         tenantId,
+        name: dto.name,
         status: 'CREATED',
         oaUrl: dto.oaUrl,
         openApiUrl: dto.apiDocUrl,
@@ -79,7 +90,53 @@ export class BootstrapService {
     // Enqueue bootstrap job
     await this.bootstrapQueue.add('process', { jobId: job.id });
 
+    // Auto-trigger document parsing if we have API doc content
+    if (apiDocContent) {
+      this.triggerDocumentParse(job.id, tenantId, dto.apiDocType || 'openapi', apiDocContent, dto.apiDocUrl);
+    }
+
     return job;
+  }
+
+  /**
+   * 异步触发文档解析（不阻塞创建任务的返回）
+   */
+  private async triggerDocumentParse(
+    jobId: string,
+    tenantId: string,
+    docType: string,
+    content: string,
+    docUrl?: string,
+  ) {
+    try {
+      // 更新 job 状态为 DISCOVERING
+      await this.prisma.bootstrapJob.update({
+        where: { id: jobId },
+        data: { status: 'DISCOVERING' },
+      });
+
+      await this.documentParserService.createParseJob({
+        tenantId,
+        bootstrapJobId: jobId,
+        documentType: docType,
+        documentContent: content,
+        documentUrl: docUrl,
+        parseOptions: {
+          extractBusinessLogic: true,
+          generateFieldMapping: true,
+          filterNonBusinessEndpoints: true,
+        },
+      });
+
+      this.logger.log(`Auto-triggered document parse for job ${jobId}`);
+    } catch (error: any) {
+      this.logger.error(`Failed to trigger document parse for job ${jobId}: ${error.message}`);
+      // 解析失败不影响 job 创建，更新状态为 FAILED
+      await this.prisma.bootstrapJob.update({
+        where: { id: jobId },
+        data: { status: 'FAILED' },
+      });
+    }
   }
 
   async getJob(id: string) {

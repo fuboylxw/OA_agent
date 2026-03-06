@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { BaseAgent, AgentContext, AgentConfig, LLMClientFactory } from '@uniflow/agent-kernel';
 import { z } from 'zod';
 
@@ -38,6 +38,7 @@ export class ApiDocParserAgent extends BaseAgent<
   ApiDocParserInput,
   ApiDocParserOutput
 > {
+  private readonly logger = new Logger(ApiDocParserAgent.name);
   private llmClient = LLMClientFactory.createFromEnv();
 
   constructor() {
@@ -54,7 +55,7 @@ export class ApiDocParserAgent extends BaseAgent<
     input: ApiDocParserInput,
     context: AgentContext,
   ): Promise<ApiDocParserOutput> {
-    console.log(`[ApiDocParser] Parsing ${input.docType} documentation`);
+    this.logger.log(`Parsing ${input.docType} documentation`);
 
     if (input.docType === 'openapi' || input.docType === 'swagger') {
       return this.parseOpenAPI(input.docContent, input.oaUrl);
@@ -97,7 +98,7 @@ export class ApiDocParserAgent extends BaseAgent<
         }
       }
 
-      console.log(`[ApiDocParser] Parsed ${endpoints.length} endpoints from OpenAPI`);
+      this.logger.log(`Parsed ${endpoints.length} endpoints from OpenAPI`);
 
       return {
         authType,
@@ -105,7 +106,7 @@ export class ApiDocParserAgent extends BaseAgent<
         endpoints,
       };
     } catch (error: any) {
-      console.error(`[ApiDocParser] Failed to parse OpenAPI:`, error.message);
+      this.logger.error(`Failed to parse OpenAPI: ${error.message}`);
       throw new Error(`Failed to parse OpenAPI documentation: ${error.message}`);
     }
   }
@@ -166,11 +167,11 @@ ${docContent}
 
       const parsed = JSON.parse(jsonStr);
 
-      console.log(`[ApiDocParser] Parsed ${parsed.endpoints.length} endpoints with LLM`);
+      this.logger.log(`Parsed ${parsed.endpoints.length} endpoints with LLM`);
 
       return parsed;
     } catch (error: any) {
-      console.error(`[ApiDocParser] LLM parsing failed:`, error.message);
+      this.logger.error(`LLM parsing failed: ${error.message}`);
       throw new Error(`Failed to parse documentation with LLM: ${error.message}`);
     }
   }

@@ -1,0 +1,465 @@
+import { Test, TestingModule } from '@nestjs/testing';
+import { INestApplication } from '@nestjs/common';
+import * as request from 'supertest';
+import { PrismaService } from '../src/modules/common/prisma.service';
+import { DocumentParserService } from '../src/modules/bootstrap/document-parser.service';
+import { ApiDocumentParserAgent } from '../src/modules/bootstrap/agents/api-document-parser.agent';
+
+describe('API Document Parser E2E Tests', () => {
+  let app: INestApplication;
+  let prisma: PrismaService;
+  let bootstrapJobId: string;
+  let parseJobId: string;
+
+  beforeAll(async () => {
+    const moduleFixture: TestingModule = await Test.createTestingModule({
+      imports: [AppModule],
+    }).compile();
+
+    app = moduleFixture.createNestApplication();
+    await app.init();
+
+    prisma = app.get<PrismaService>(PrismaService);
+  });
+
+  afterAll(async () => {
+    await prisma.$disconnect();
+    await app.close();
+  });
+
+  describe('完整解析流程', () => {
+    it('应该完成从上传到发布的完整流程', async () => {
+      // 1. 创建Bootstrap Job
+      const createJobResponse = await request(app.getHttpServer())
+        .post('/api/v1/bootstrap/jobs')
+        .set('X-Tenant-Id', 'test-tenant-123')
+        .send({
+          oaUrl: 'https://oa.example.com',
+          openApiUrl: 'https://oa.example.com/openapi.json',
+        })
+        .expect(200);
+
+      bootstrapJobId = createJobResponse.body.data.id;
+      expect(bootstrapJobId).toBeDefined();
+
+      // 2. 上传并解析API文档
+      const testDocument = {
+        openapi: '3.0.0',
+        info: { title: 'Test OA API', version: '1.0.0' },
+        paths: {
+          '/api/v1/login': {
+            post: { summary: '用户登录', tags: ['auth'] },
+          },
+          '/api/v1/health': {
+            get: { summary: '健康检查', tags: ['system'] },
+          },
+          '/api/v1/leave/submit': {
+            post: {
+              summary: '提交请假申请',
+              tags: ['leave'],
+              requestBody: {
+                required: true,
+                content: {
+                  'application/json': {
+                    schema: {
+                      type: 'object',
+                      required: ['leave_type', 'start_date', 'end_date', 'reason'],
+                      properties: {
+                        leave_type: {
+                          type: 'string',
+                          description: '请假类型',
+                          enum: ['事假', '病假', '年假'],
+                        },
+                        start_date: {
+                          type: 'string',
+                          format: 'date',
+                          description: '开始日期',
+                        },
+                        end_date: {
+                          type: 'string',
+                          format: 'date',
+                          description: '结束日期',
+                        },
+                        reason: {
+                          type: 'string',
+                          description: '请假事由',
+                          maxLength: 500,
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+          '/api/v1/leave/{id}': {
+            get: {
+              summary: '查询请假状态',
+              tags: ['leave'],
+              parameters: [
+                {
+                  name: 'id',
+                  in: 'path',
+                  required: true,
+                  schema: { type: 'string' },
+                },
+              ],
+            },
+          },
+          '/api/v1/expense/submit': {
+            post: {
+              summary: '提交报销申请',
+              tags: ['expense'],
+              requestBody: {
+                required: true,
+                content: {
+                  'application/json': {
+                    schema: {
+                      type: 'object',
+                      required: ['amount', 'category', 'description'],
+                      properties: {
+                        amount: {
+                          type: 'number',
+                          description: '报销金额',
+                          minimum: 0,
+                        },
+                        category: {
+                          type: 'string',
+                          description: '报销类别',
+                          enum: ['差旅费', '办公费', '招待费'],
+                        },
+                        description: {
+                          type: 'string',
+                          description: '报销说明',
+                        },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      };
+
+      const parseResponse = await request(app.getHttpServer())
+        .post(`/api/v1/bootstrap/jobs/${bootstrapJobId}/parse-document`)
+        .send({
+          documentType: 'openapi',
+          documentContent: JSON.stringify(testDocument),
+          parseOptions: {
+            filterNonBusinessEndpoints: true,
+            includeUserLinks: false,
+            confidenceThreshold: 0.8,
+          },
+        })
+        .expect(200);
+
+      parseJobId = parseResponse.body.data.parseJobId;
+      expect(parseJobId).toBeDefined();
+      expect(parseResponse.body.data.status).toBe('PARSING');
+
+      // 3. 轮询查询解析状态
+      let status = 'PARSING';
+      let attempts = 0;
+      const maxAttempts = 60; // 最多等待5分钟
+
+      while (status === 'PARSING' && attempts < maxAttempts) {
+        await new Promise((resolve) => setTimeout(resolve, 5000)); // 等待5秒
+
+        const statusResponse = await request(app.getHttpServer())
+          .get(`/api/v1/bootstrap/jobs/${bootstrapJobId}/parse-status`)
+          .query({ parseJobId })
+          .expect(200);
+
+        status = statusResponse.body.data.status;
+        attempts++;
+      }
+
+      expect(status).toMatch(/COMPLETED|REVIEW_REQUIRED/);
+      expect(attempts).toBeLessThan(maxAttempts);
+
+      // 4. 获取解析结果
+      const resultResponse = await request(app.getHttpServer())
+        .get(`/api/v1/bootstrap/jobs/${bootstrapJobId}/parse-result`)
+        .expect(200);
+
+      const result = resultResponse.body.data;
+
+      // 验证过滤结果
+      expect(result.filteringSummary).toBeDefined();
+      expect(result.filteringSummary.totalEndpoints).toBe(5);
+      expect(result.filteringSummary.businessEndpoints).toBe(3);
+      expect(result.filteringSummary.filteredEndpoints).toContain('/api/v1/login');
+      expect(result.filteringSummary.filteredEndpoints).toContain('/api/v1/health');
+
+      // 验证提取的流程
+      expect(result.extractedProcesses).toHaveLength(2);
+
+      const leaveProcess = result.extractedProcesses.find(
+        (p) => p.processCode === 'LEAVE_REQUEST',
+      );
+      expect(leaveProcess).toBeDefined();
+      expect(leaveProcess.processName).toBe('请假申请');
+      expect(leaveProcess.processCategory).toBe('人事');
+      expect(leaveProcess.confidence).toBeGreaterThan(0.8);
+      expect(leaveProcess.endpoints).toHaveLength(2);
+      expect(leaveProcess.fields).toHaveLength(4);
+
+      const expenseProcess = result.extractedProcesses.find(
+        (p) => p.processCode === 'EXPENSE_CLAIM',
+      );
+      expect(expenseProcess).toBeDefined();
+      expect(expenseProcess.processName).toBe('费用报销');
+      expect(expenseProcess.processCategory).toBe('财务');
+
+      // 验证字段提取
+      const leaveTypeField = leaveProcess.fields.find(
+        (f) => f.fieldCode === 'leave_type',
+      );
+      expect(leaveTypeField).toBeDefined();
+      expect(leaveTypeField.fieldType).toBe('select');
+      expect(leaveTypeField.required).toBe(true);
+      expect(leaveTypeField.options).toEqual(['事假', '病假', '年假']);
+
+      // 5. 确认并发布
+      const publishResponse = await request(app.getHttpServer())
+        .post(`/api/v1/bootstrap/jobs/${bootstrapJobId}/confirm-parse`)
+        .send({
+          parseJobId,
+          action: 'publish',
+          comment: 'E2E测试自动发布',
+        })
+        .expect(200);
+
+      expect(publishResponse.body.data.publishedProcesses).toBe(2);
+      expect(publishResponse.body.data.publishedFields).toBeGreaterThan(0);
+      expect(publishResponse.body.data.publishedTemplateIds).toHaveLength(2);
+
+      // 6. 验证数据库记录
+      const parseJob = await prisma.parseJob.findUnique({
+        where: { id: parseJobId },
+      });
+      expect(parseJob).toBeDefined();
+      expect(parseJob.status).toMatch(/COMPLETED|REVIEW_REQUIRED/);
+
+      const extractedProcesses = await prisma.extractedProcess.findMany({
+        where: { parseJobId },
+      });
+      expect(extractedProcesses).toHaveLength(2);
+
+      const publishedTemplates = await prisma.processTemplate.findMany({
+        where: {
+          id: { in: publishResponse.body.data.publishedTemplateIds },
+        },
+      });
+      expect(publishedTemplates).toHaveLength(2);
+      expect(publishedTemplates.every((t) => t.status === 'published')).toBe(true);
+    }, 600000); // 10分钟超时
+  });
+
+  describe('错误处理', () => {
+    it('应该处理无效的文档格式', async () => {
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/bootstrap/jobs/${bootstrapJobId}/parse-document`)
+        .send({
+          documentType: 'invalid',
+          documentContent: '{}',
+        })
+        .expect(400);
+
+      expect(response.body.message).toContain('不支持的文档类型');
+    });
+
+    it('应该处理缺少必填参数', async () => {
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/bootstrap/jobs/${bootstrapJobId}/parse-document`)
+        .send({
+          documentType: 'openapi',
+        })
+        .expect(400);
+
+      expect(response.body.message).toContain('必须提供documentContent或documentUrl');
+    });
+
+    it('应该处理解析失败的情况', async () => {
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/bootstrap/jobs/${bootstrapJobId}/parse-document`)
+        .send({
+          documentType: 'openapi',
+          documentContent: 'invalid json',
+        })
+        .expect(500);
+
+      expect(response.body.message).toContain('解析失败');
+    });
+  });
+
+  describe('缓存机制', () => {
+    it('应该复用相同文档的解析结果', async () => {
+      const testDocument = {
+        openapi: '3.0.0',
+        paths: {
+          '/api/v1/test': {
+            get: { summary: 'Test' },
+          },
+        },
+      };
+
+      // 第一次解析
+      const firstResponse = await request(app.getHttpServer())
+        .post(`/api/v1/bootstrap/jobs/${bootstrapJobId}/parse-document`)
+        .send({
+          documentType: 'openapi',
+          documentContent: JSON.stringify(testDocument),
+        })
+        .expect(200);
+
+      const firstParseJobId = firstResponse.body.data.parseJobId;
+
+      // 等待解析完成
+      await new Promise((resolve) => setTimeout(resolve, 10000));
+
+      // 第二次解析相同文档
+      const secondResponse = await request(app.getHttpServer())
+        .post(`/api/v1/bootstrap/jobs/${bootstrapJobId}/parse-document`)
+        .send({
+          documentType: 'openapi',
+          documentContent: JSON.stringify(testDocument),
+        })
+        .expect(200);
+
+      const secondParseJobId = secondResponse.body.data.parseJobId;
+
+      // 验证返回的是缓存结果
+      expect(firstParseJobId).toBe(secondParseJobId);
+    });
+  });
+
+  describe('重新解析', () => {
+    it('应该支持调整参数后重新解析', async () => {
+      const testDocument = {
+        openapi: '3.0.0',
+        paths: {
+          '/api/v1/leave/submit': {
+            post: { summary: '提交请假' },
+          },
+        },
+      };
+
+      // 第一次解析（高阈值）
+      const firstResponse = await request(app.getHttpServer())
+        .post(`/api/v1/bootstrap/jobs/${bootstrapJobId}/parse-document`)
+        .send({
+          documentType: 'openapi',
+          documentContent: JSON.stringify(testDocument),
+          parseOptions: {
+            confidenceThreshold: 0.9,
+          },
+        })
+        .expect(200);
+
+      const firstParseJobId = firstResponse.body.data.parseJobId;
+
+      // 等待解析完成
+      await new Promise((resolve) => setTimeout(resolve, 10000));
+
+      // 重新解析（低阈值）
+      const reparseResponse = await request(app.getHttpServer())
+        .post(`/api/v1/bootstrap/jobs/${bootstrapJobId}/reparse`)
+        .send({
+          parseJobId: firstParseJobId,
+          parseOptions: {
+            confidenceThreshold: 0.7,
+          },
+        })
+        .expect(200);
+
+      const newParseJobId = reparseResponse.body.data.parseJobId;
+      expect(newParseJobId).not.toBe(firstParseJobId);
+    });
+  });
+
+  describe('并发处理', () => {
+    it('应该支持多个并发解析任务', async () => {
+      const documents = [
+        { openapi: '3.0.0', paths: { '/api/v1/test1': { get: {} } } },
+        { openapi: '3.0.0', paths: { '/api/v1/test2': { get: {} } } },
+        { openapi: '3.0.0', paths: { '/api/v1/test3': { get: {} } } },
+      ];
+
+      const promises = documents.map((doc) =>
+        request(app.getHttpServer())
+          .post(`/api/v1/bootstrap/jobs/${bootstrapJobId}/parse-document`)
+          .send({
+            documentType: 'openapi',
+            documentContent: JSON.stringify(doc),
+          }),
+      );
+
+      const responses = await Promise.all(promises);
+
+      responses.forEach((response) => {
+        expect(response.status).toBe(200);
+        expect(response.body.data.parseJobId).toBeDefined();
+      });
+    });
+  });
+
+  describe('性能测试', () => {
+    it('应该在合理时间内完成小文档解析', async () => {
+      const testDocument = {
+        openapi: '3.0.0',
+        paths: {
+          '/api/v1/leave/submit': {
+            post: {
+              summary: '提交请假',
+              requestBody: {
+                content: {
+                  'application/json': {
+                    schema: {
+                      properties: {
+                        leave_type: { type: 'string' },
+                        start_date: { type: 'string', format: 'date' },
+                      },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      };
+
+      const startTime = Date.now();
+
+      const response = await request(app.getHttpServer())
+        .post(`/api/v1/bootstrap/jobs/${bootstrapJobId}/parse-document`)
+        .send({
+          documentType: 'openapi',
+          documentContent: JSON.stringify(testDocument),
+        })
+        .expect(200);
+
+      const parseJobId = response.body.data.parseJobId;
+
+      // 等待解析完成
+      let status = 'PARSING';
+      while (status === 'PARSING') {
+        await new Promise((resolve) => setTimeout(resolve, 2000));
+
+        const statusResponse = await request(app.getHttpServer())
+          .get(`/api/v1/bootstrap/jobs/${bootstrapJobId}/parse-status`)
+          .query({ parseJobId });
+
+        status = statusResponse.body.data.status;
+      }
+
+      const endTime = Date.now();
+      const duration = endTime - startTime;
+
+      // 小文档应该在2分钟内完成
+      expect(duration).toBeLessThan(120000);
+    }, 180000);
+  });
+});

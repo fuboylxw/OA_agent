@@ -15,6 +15,7 @@ import { SubmissionModule } from './modules/submission/submission.module';
 import { RuleModule } from './modules/rule/rule.module';
 import { StatusModule } from './modules/status/status.module';
 import { DashboardModule } from './modules/dashboard/dashboard.module';
+import { AuthModule } from './modules/auth/auth.module';
 import { CommonModule } from './modules/common/common.module';
 import { MCPModule } from './modules/mcp/mcp.module';
 import { HealthController } from './health.controller';
@@ -51,6 +52,7 @@ import { HealthController } from './health.controller';
     SubmissionModule,
     StatusModule,
     DashboardModule,
+    AuthModule,
     MCPModule,
   ],
   controllers: [HealthController],

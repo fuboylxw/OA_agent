@@ -12,20 +12,44 @@ const QUICK_ACTIONS = [
   { label: '查看进度', icon: 'fa-chart-bar', color: 'text-orange-600 bg-orange-100', message: '查看我的申请进度' },
 ];
 
+interface ActionButton {
+  label: string;
+  action: string;
+  type: 'primary' | 'default' | 'danger';
+}
+
+interface ChatMessage {
+  role: string;
+  content: string;
+  actionButtons?: ActionButton[];
+  formData?: Record<string, any>;
+  processStatus?: string;
+}
+
 interface ChatSession {
   id: string;
   title: string;
   lastMessage: string;
-  timestamp: Date;
+  messageCount: number;
+  timestamp: string;
+}
+
+// 获取用户信息
+function getUserInfo() {
+  if (typeof window === 'undefined') return { userId: 'test-user-001', tenantId: '8ac5d38e-08ea-4fcd-b976-2ccb3df9a82c' };
+  return {
+    userId: localStorage.getItem('userId') || 'test-user-001',
+    tenantId: localStorage.getItem('tenantId') || '8ac5d38e-08ea-4fcd-b976-2ccb3df9a82c',
+  };
 }
 
 export default function ChatPage() {
-  const [messages, setMessages] = useState<Array<{ role: string; content: string }>>([]);
+  const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sessionId, setSessionId] = useState<string | null>(null);
   const [loading, setLoading] = useState(false);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
-  const [showHistory, setShowHistory] = useState(false);
+  const [showHistory, setShowHistory] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
 
@@ -39,9 +63,9 @@ export default function ChatPage() {
 
   const loadSessions = async () => {
     try {
-      const userId = localStorage.getItem('userId') || 'default-user';
+      const { userId, tenantId } = getUserInfo();
       const response = await axios.get(`${API_URL}/api/v1/assistant/sessions`, {
-        params: { userId },
+        params: { tenantId, userId },
       });
       setSessions(response.data || []);
     } catch (error) {
@@ -52,9 +76,20 @@ export default function ChatPage() {
   const loadSession = async (id: string) => {
     try {
       const response = await axios.get(`${API_URL}/api/v1/assistant/sessions/${id}/messages`);
-      setMessages(response.data || []);
+      const rawMessages = response.data || [];
+      // 将后端消息格式转为前端格式，过滤掉按钮动作消息
+      const formatted: ChatMessage[] = rawMessages
+        .filter((m: any) => !m.content.startsWith('__ACTION_'))
+        .map((m: any) => ({
+          role: m.role,
+          content: m.content,
+          actionButtons: m.metadata?.actionButtons,
+          formData: m.metadata?.formData,
+          processStatus: m.metadata?.processStatus,
+        }));
+      setMessages(formatted);
       setSessionId(id);
-      setShowHistory(false);
+      setSidebarOpen(false);
     } catch (error) {
       console.error('Failed to load session:', error);
     }
@@ -70,23 +105,32 @@ export default function ChatPage() {
     const msg = text || input.trim();
     if (!msg) return;
 
-    const userMessage = { role: 'user', content: msg };
+    const userMessage: ChatMessage = { role: 'user', content: msg };
     setMessages((prev) => [...prev, userMessage]);
     setInput('');
     setLoading(true);
 
     try {
+      const { userId, tenantId } = getUserInfo();
       const response = await axios.post(`${API_URL}/api/v1/assistant/chat`, {
+        tenantId,
+        userId,
         sessionId,
         message: msg,
-        userId: localStorage.getItem('userId') || 'default-user',
       });
 
       const data = response.data;
       setSessionId(data.sessionId);
-      setMessages((prev) => [...prev, { role: 'assistant', content: data.message }]);
 
-      // Reload sessions to update history
+      const assistantMsg: ChatMessage = {
+        role: 'assistant',
+        content: data.message,
+        actionButtons: data.actionButtons,
+        formData: data.formData,
+        processStatus: data.processStatus,
+      };
+      setMessages((prev) => [...prev, assistantMsg]);
+
       loadSessions();
     } catch {
       setMessages((prev) => [...prev, { role: 'assistant', content: '抱歉，服务暂时不可用，请稍后重试。' }]);
@@ -95,16 +139,140 @@ export default function ChatPage() {
     }
   };
 
-  const formatTime = (date: Date) => {
+  // 处理按钮点击
+  const handleActionButton = (action: string) => {
+    const actionMap: Record<string, string> = {
+      confirm: '__ACTION_CONFIRM__',
+      cancel: '__ACTION_CANCEL__',
+      modify: '__ACTION_MODIFY__',
+    };
+    const msg = actionMap[action] || action;
+    sendMessage(msg);
+  };
+
+  const formatTime = (date: string) => {
     const now = new Date();
-    const diff = now.getTime() - new Date(date).getTime();
+    const d = new Date(date);
+    const diff = now.getTime() - d.getTime();
     const days = Math.floor(diff / (1000 * 60 * 60 * 24));
 
     if (days === 0) return '今天';
     if (days === 1) return '昨天';
     if (days < 7) return `${days}天前`;
-    return new Date(date).toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
+    return d.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
   };
+
+  const getButtonStyle = (type: string) => {
+    switch (type) {
+      case 'primary':
+        return 'bg-blue-600 hover:bg-blue-700 text-white';
+      case 'danger':
+        return 'bg-white hover:bg-red-50 text-red-600 border border-red-200';
+      default:
+        return 'bg-white hover:bg-gray-50 text-gray-700 border border-gray-200';
+    }
+  };
+
+  // 侧边栏内容（复用于桌面和移动端）
+  const SidebarContent = ({ onAction }: { onAction?: () => void }) => (
+    <>
+      <div className="p-4 flex-shrink-0">
+        <button
+          onClick={() => { createNewChat(); onAction?.(); }}
+          className="w-full bg-blue-600 hover:bg-blue-700 text-white text-sm py-2.5 rounded-lg flex items-center justify-center gap-2 transition-colors"
+        >
+          <i className="fas fa-plus"></i>
+          新建对话
+        </button>
+      </div>
+
+      <div className="flex border-b border-gray-200 px-4">
+        <button
+          onClick={() => setShowHistory(true)}
+          className={`flex-1 py-2 text-sm font-medium border-b-2 transition-colors ${
+            showHistory ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          历史对话
+        </button>
+        <button
+          onClick={() => setShowHistory(false)}
+          className={`flex-1 py-2 text-sm font-medium border-b-2 transition-colors ${
+            !showHistory ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'
+          }`}
+        >
+          快捷操作
+        </button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto">
+        {showHistory ? (
+          <div className="p-2">
+            {sessions.length === 0 ? (
+              <div className="text-center py-8 px-4">
+                <i className="fas fa-history text-gray-300 text-2xl mb-2"></i>
+                <p className="text-sm text-gray-500">暂无历史对话</p>
+              </div>
+            ) : (
+              <div className="space-y-1">
+                {sessions.map((session) => (
+                  <button
+                    key={session.id}
+                    onClick={() => { loadSession(session.id); onAction?.(); }}
+                    className={`w-full text-left px-3 py-2.5 rounded-lg hover:bg-gray-50 transition-all group ${
+                      sessionId === session.id ? 'bg-blue-50' : ''
+                    }`}
+                  >
+                    <div className="flex items-start gap-2">
+                      <i className="fas fa-comment-dots text-gray-400 text-xs mt-1 flex-shrink-0"></i>
+                      <div className="flex-1 min-w-0">
+                        <p className="text-sm font-medium text-gray-900 truncate">
+                          {session.title || '新对话'}
+                        </p>
+                        <p className="text-xs text-gray-500 truncate mt-0.5">
+                          {session.messageCount}条消息
+                        </p>
+                        <p className="text-xs text-gray-400 mt-1">
+                          {formatTime(session.timestamp)}
+                        </p>
+                      </div>
+                    </div>
+                  </button>
+                ))}
+              </div>
+            )}
+          </div>
+        ) : (
+          <div className="p-4">
+            <div className="space-y-1.5">
+              {QUICK_ACTIONS.map((action) => (
+                <button
+                  key={action.label}
+                  onClick={() => { sendMessage(action.message); onAction?.(); }}
+                  className="w-full text-left px-3 py-2 rounded-lg text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 transition-all flex items-center gap-2.5"
+                >
+                  <div className={`w-6 h-6 rounded-md flex items-center justify-center ${action.color}`}>
+                    <i className={`fas ${action.icon} text-xs`}></i>
+                  </div>
+                  {action.label}
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="p-4 border-t border-gray-200 flex-shrink-0">
+        <div className="flex flex-wrap gap-1.5">
+          {['发起申请', '查进度', '撤回', '催办'].map((intent) => (
+            <span key={intent} className="inline-block px-2 py-0.5 bg-blue-50 text-blue-600 text-xs rounded-full">
+              {intent}
+            </span>
+          ))}
+        </div>
+      </div>
+    </>
+  );
 
   return (
     <div className="h-full flex">
@@ -122,7 +290,6 @@ export default function ChatPage() {
           sidebarOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-        {/* Close Button */}
         <div className="p-4 flex items-center justify-between border-b border-gray-200">
           <h2 className="text-base font-semibold text-gray-900">菜单</h2>
           <button
@@ -132,229 +299,12 @@ export default function ChatPage() {
             <i className="fas fa-times text-gray-500"></i>
           </button>
         </div>
-
-        {/* New Chat Button */}
-        <div className="p-4 flex-shrink-0">
-          <button
-            onClick={() => {
-              createNewChat();
-              setSidebarOpen(false);
-            }}
-            className="w-full bg-blue-600 hover:bg-blue-700 text-white text-sm py-2.5 rounded-lg flex items-center justify-center gap-2 transition-colors"
-          >
-            <i className="fas fa-plus"></i>
-            新建对话
-          </button>
-        </div>
-
-        {/* Tab Switcher */}
-        <div className="flex border-b border-gray-200 px-4">
-          <button
-            onClick={() => setShowHistory(false)}
-            className={`flex-1 py-2 text-sm font-medium border-b-2 transition-colors ${
-              !showHistory
-                ? 'border-blue-600 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            快捷操作
-          </button>
-          <button
-            onClick={() => setShowHistory(true)}
-            className={`flex-1 py-2 text-sm font-medium border-b-2 transition-colors ${
-              showHistory
-                ? 'border-blue-600 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            历史对话
-          </button>
-        </div>
-
-        {/* Content Area */}
-        <div className="flex-1 overflow-y-auto">
-          {!showHistory ? (
-            // Quick Actions
-            <div className="p-4">
-              <div className="space-y-1.5">
-                {QUICK_ACTIONS.map((action) => (
-                  <button
-                    key={action.label}
-                    onClick={() => {
-                      sendMessage(action.message);
-                      setSidebarOpen(false);
-                    }}
-                    className="w-full text-left px-3 py-2 rounded-lg text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 transition-all flex items-center gap-2.5"
-                  >
-                    <div className={`w-6 h-6 rounded-md flex items-center justify-center ${action.color}`}>
-                      <i className={`fas ${action.icon} text-xs`}></i>
-                    </div>
-                    {action.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : (
-            // History Sessions
-            <div className="p-2">
-              {sessions.length === 0 ? (
-                <div className="text-center py-8 px-4">
-                  <i className="fas fa-history text-gray-300 text-2xl mb-2"></i>
-                  <p className="text-sm text-gray-500">暂无历史对话</p>
-                </div>
-              ) : (
-                <div className="space-y-1">
-                  {sessions.map((session) => (
-                    <button
-                      key={session.id}
-                      onClick={() => {
-                        loadSession(session.id);
-                        setSidebarOpen(false);
-                      }}
-                      className={`w-full text-left px-3 py-2.5 rounded-lg hover:bg-gray-50 transition-all group ${
-                        sessionId === session.id ? 'bg-blue-50' : ''
-                      }`}
-                    >
-                      <div className="flex items-start gap-2">
-                        <i className="fas fa-comment-dots text-gray-400 text-xs mt-1 flex-shrink-0"></i>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium text-gray-900 truncate">
-                            {session.title || '新对话'}
-                          </p>
-                          <p className="text-xs text-gray-500 truncate mt-0.5">
-                            {session.lastMessage}
-                          </p>
-                          <p className="text-xs text-gray-400 mt-1">
-                            {formatTime(session.timestamp)}
-                          </p>
-                        </div>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Bottom Info */}
-        <div className="p-4 border-t border-gray-200 flex-shrink-0">
-          <div className="flex flex-wrap gap-1.5">
-            {['发起申请', '查进度', '撤回', '催办'].map((intent) => (
-              <span key={intent} className="inline-block px-2 py-0.5 bg-blue-50 text-blue-600 text-xs rounded-full">
-                {intent}
-              </span>
-            ))}
-          </div>
-        </div>
+        <SidebarContent onAction={() => setSidebarOpen(false)} />
       </div>
 
-      {/* Sidebar */}
+      {/* Desktop Sidebar */}
       <div className="w-64 bg-white border-r border-gray-200 flex-shrink-0 hidden lg:flex flex-col">
-        <div className="p-4 flex-shrink-0">
-          <button
-            onClick={createNewChat}
-            className="w-full bg-blue-600 hover:bg-blue-700 text-white text-sm py-2.5 rounded-lg flex items-center justify-center gap-2 transition-colors"
-          >
-            <i className="fas fa-plus"></i>
-            新建对话
-          </button>
-        </div>
-
-        {/* Tab Switcher */}
-        <div className="flex border-b border-gray-200 px-4">
-          <button
-            onClick={() => setShowHistory(false)}
-            className={`flex-1 py-2 text-sm font-medium border-b-2 transition-colors ${
-              !showHistory
-                ? 'border-blue-600 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            快捷操作
-          </button>
-          <button
-            onClick={() => setShowHistory(true)}
-            className={`flex-1 py-2 text-sm font-medium border-b-2 transition-colors ${
-              showHistory
-                ? 'border-blue-600 text-blue-600'
-                : 'border-transparent text-gray-500 hover:text-gray-700'
-            }`}
-          >
-            历史对话
-          </button>
-        </div>
-
-        {/* Content Area */}
-        <div className="flex-1 overflow-y-auto">
-          {!showHistory ? (
-            // Quick Actions
-            <div className="p-4">
-              <div className="space-y-1.5">
-                {QUICK_ACTIONS.map((action) => (
-                  <button
-                    key={action.label}
-                    onClick={() => sendMessage(action.message)}
-                    className="w-full text-left px-3 py-2 rounded-lg text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 transition-all flex items-center gap-2.5"
-                  >
-                    <div className={`w-6 h-6 rounded-md flex items-center justify-center ${action.color}`}>
-                      <i className={`fas ${action.icon} text-xs`}></i>
-                    </div>
-                    {action.label}
-                  </button>
-                ))}
-              </div>
-            </div>
-          ) : (
-            // History Sessions
-            <div className="p-2">
-              {sessions.length === 0 ? (
-                <div className="text-center py-8 px-4">
-                  <i className="fas fa-history text-gray-300 text-2xl mb-2"></i>
-                  <p className="text-sm text-gray-500">暂无历史对话</p>
-                </div>
-              ) : (
-                <div className="space-y-1">
-                  {sessions.map((session) => (
-                    <button
-                      key={session.id}
-                      onClick={() => loadSession(session.id)}
-                      className={`w-full text-left px-3 py-2.5 rounded-lg hover:bg-gray-50 transition-all group ${
-                        sessionId === session.id ? 'bg-blue-50' : ''
-                      }`}
-                    >
-                      <div className="flex items-start gap-2">
-                        <i className="fas fa-comment-dots text-gray-400 text-xs mt-1 flex-shrink-0"></i>
-                        <div className="flex-1 min-w-0">
-                          <p className="text-sm font-medium text-gray-900 truncate">
-                            {session.title || '新对话'}
-                          </p>
-                          <p className="text-xs text-gray-500 truncate mt-0.5">
-                            {session.lastMessage}
-                          </p>
-                          <p className="text-xs text-gray-400 mt-1">
-                            {formatTime(session.timestamp)}
-                          </p>
-                        </div>
-                      </div>
-                    </button>
-                  ))}
-                </div>
-              )}
-            </div>
-          )}
-        </div>
-
-        {/* Bottom Info */}
-        <div className="p-4 border-t border-gray-200 flex-shrink-0">
-          <div className="flex flex-wrap gap-1.5">
-            {['发起申请', '查进度', '撤回', '催办'].map((intent) => (
-              <span key={intent} className="inline-block px-2 py-0.5 bg-blue-50 text-blue-600 text-xs rounded-full">
-                {intent}
-              </span>
-            ))}
-          </div>
-        </div>
+        <SidebarContent />
       </div>
 
       {/* Main Chat Area */}
@@ -419,24 +369,41 @@ export default function ChatPage() {
             )}
 
             {messages.map((msg, idx) => (
-              <div
-                key={idx}
-                className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}
-              >
-                {msg.role === 'assistant' && (
-                  <div className="w-7 h-7 rounded-lg bg-blue-600 flex items-center justify-center mr-2.5 flex-shrink-0 mt-0.5">
-                    <i className="fas fa-robot text-white text-xs"></i>
+              <div key={idx}>
+                <div className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                  {msg.role === 'assistant' && (
+                    <div className="w-7 h-7 rounded-lg bg-blue-600 flex items-center justify-center mr-2.5 flex-shrink-0 mt-0.5">
+                      <i className="fas fa-robot text-white text-xs"></i>
+                    </div>
+                  )}
+                  <div
+                    className={`max-w-[75%] rounded-2xl px-3.5 py-2.5 ${
+                      msg.role === 'user'
+                        ? 'bg-blue-600 text-white'
+                        : 'bg-white border border-gray-200 shadow-sm'
+                    }`}
+                  >
+                    <p className="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}</p>
+                  </div>
+                </div>
+
+                {/* 渲染操作按钮 */}
+                {msg.role === 'assistant' && msg.actionButtons && msg.actionButtons.length > 0 && (
+                  <div className="flex justify-start ml-9 mt-2">
+                    <div className="flex gap-2">
+                      {msg.actionButtons.map((btn) => (
+                        <button
+                          key={btn.action}
+                          onClick={() => handleActionButton(btn.action)}
+                          disabled={loading}
+                          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${getButtonStyle(btn.type)}`}
+                        >
+                          {btn.label}
+                        </button>
+                      ))}
+                    </div>
                   </div>
                 )}
-                <div
-                  className={`max-w-[75%] rounded-2xl px-3.5 py-2.5 ${
-                    msg.role === 'user'
-                      ? 'bg-blue-600 text-white'
-                      : 'bg-white border border-gray-200 shadow-sm'
-                  }`}
-                >
-                  <p className="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}</p>
-                </div>
               </div>
             ))}
 

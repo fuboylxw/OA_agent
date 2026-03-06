@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { ApiDocParserAgent } from './agents/api-doc-parser.agent';
 import { WorkflowApiIdentifierAgent } from './agents/workflow-api-identifier.agent';
@@ -39,6 +39,8 @@ export interface ApiUploadResult {
  */
 @Injectable()
 export class ApiUploadService {
+  private readonly logger = new Logger(ApiUploadService.name);
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly apiDocParser: ApiDocParserAgent,
@@ -51,41 +53,41 @@ export class ApiUploadService {
    * 上传并处理API文件
    */
   async uploadAndProcess(dto: UploadApiFileDto): Promise<ApiUploadResult> {
-    console.log(`[ApiUpload] Starting upload for connector ${dto.connectorId}`);
-
-    // 1. 解析API文档
-    console.log(`[ApiUpload] Step 1: Parsing API documentation`);
-    const parsedDoc = await this.apiDocParser.execute(
+    this.logger.log(`Starting upload for connector ${dto.connectorId}`);
+    const parsedDocResult = await this.apiDocParser.execute(
       {
         docType: dto.docType,
         docContent: dto.docContent,
         oaUrl: dto.oaUrl,
       },
-      { traceId: `upload-${Date.now()}` },
+      { tenantId: dto.tenantId, traceId: `upload-${Date.now()}` },
     );
 
-    console.log(`[ApiUpload] Parsed ${parsedDoc.endpoints.length} endpoints`);
+    if (!parsedDocResult.success || !parsedDocResult.data) {
+      throw new Error(`Failed to parse API doc: ${parsedDocResult.error}`);
+    }
 
-    // 2. 识别办事流程接口
-    console.log(`[ApiUpload] Step 2: Identifying workflow APIs`);
-    const identificationResult = await this.workflowIdentifier.execute(
-      { endpoints: parsedDoc.endpoints },
-      { traceId: `upload-${Date.now()}` },
+    const parsedDoc = parsedDocResult.data;
+    this.logger.log(`Parsed ${parsedDoc.endpoints?.length || 0} endpoints`);
+    const identificationResultWrapper = await this.workflowIdentifier.execute(
+      { endpoints: parsedDoc.endpoints || [] },
+      { tenantId: dto.tenantId, traceId: `upload-${Date.now()}` },
     );
 
-    console.log(
-      `[ApiUpload] Identified ${identificationResult.workflowApis.length} workflow APIs`,
-    );
+    if (!identificationResultWrapper.success || !identificationResultWrapper.data) {
+      throw new Error(`Failed to identify workflow APIs: ${identificationResultWrapper.error}`);
+    }
 
-    // 3. 验证接口（如果启用）
+    const identificationResult = identificationResultWrapper.data;
+    this.logger.log(`Identified ${identificationResult.workflowApis?.length || 0} workflow APIs`);
+
     const validationResults: any[] = [];
     if (dto.autoValidate) {
-      console.log(`[ApiUpload] Step 3: Validating workflow APIs`);
-      for (const workflowApi of identificationResult.workflowApis) {
+      for (const workflowApi of identificationResult.workflowApis || []) {
         try {
           const validationResult = await this.apiValidator.execute(
             {
-              baseUrl: parsedDoc.baseUrl,
+              baseUrl: parsedDoc.baseUrl || dto.oaUrl,
               authConfig: dto.authConfig,
               endpoint: {
                 path: workflowApi.path,
@@ -94,19 +96,16 @@ export class ApiUploadService {
                 requestBody: workflowApi.requestBody,
               },
             },
-            { traceId: `upload-${Date.now()}` },
+            { tenantId: dto.tenantId, traceId: `upload-${Date.now()}` },
           );
 
           validationResults.push({
             path: workflowApi.path,
             method: workflowApi.method,
-            ...validationResult,
+            ...(validationResult.data || {}),
           });
         } catch (error: any) {
-          console.error(
-            `[ApiUpload] Validation failed for ${workflowApi.path}:`,
-            error.message,
-          );
+          this.logger.error(`Validation failed for ${workflowApi.path}: ${error.message}`);
           validationResults.push({
             path: workflowApi.path,
             method: workflowApi.method,
@@ -117,55 +116,45 @@ export class ApiUploadService {
       }
     }
 
-    // 4. 存储到数据库
-    console.log(`[ApiUpload] Step 4: Storing workflow APIs to database`);
     const storedApis = await this.storeWorkflowApis(
       dto.tenantId,
       dto.connectorId,
-      identificationResult.workflowApis,
+      identificationResult.workflowApis || [],
       validationResults,
     );
 
-    // 5. 自动生成MCP工具（如果启用）
     const mcpTools: any[] = [];
     if (dto.autoGenerateMcp) {
-      console.log(`[ApiUpload] Step 5: Generating MCP tools`);
-      for (const workflowApi of identificationResult.workflowApis) {
+      for (const workflowApi of identificationResult.workflowApis || []) {
         try {
           const mcpTool = await this.mcpToolGenerator.generateFromWorkflowApi(
             dto.tenantId,
             dto.connectorId,
             workflowApi,
-            parsedDoc.baseUrl,
+            parsedDoc.baseUrl || dto.oaUrl,
             dto.authConfig,
           );
           mcpTools.push(mcpTool);
         } catch (error: any) {
-          console.error(
-            `[ApiUpload] MCP tool generation failed for ${workflowApi.path}:`,
-            error.message,
-          );
+          this.logger.error(`MCP tool generation failed for ${workflowApi.path}: ${error.message}`);
         }
       }
     }
 
     const result: ApiUploadResult = {
       uploadId: `upload-${Date.now()}`,
-      totalEndpoints: parsedDoc.endpoints.length,
-      workflowEndpoints: identificationResult.workflowApis.length,
+      totalEndpoints: parsedDoc.endpoints?.length || 0,
+      workflowEndpoints: identificationResult.workflowApis?.length || 0,
       validatedEndpoints: validationResults.filter(v => v.isAccessible).length,
       generatedMcpTools: mcpTools.length,
-      workflowApis: identificationResult.workflowApis,
+      workflowApis: identificationResult.workflowApis || [],
       validationResults,
       mcpTools,
     };
 
-    console.log(`[ApiUpload] Upload completed:`, {
-      totalEndpoints: result.totalEndpoints,
-      workflowEndpoints: result.workflowEndpoints,
-      validatedEndpoints: result.validatedEndpoints,
-      generatedMcpTools: result.generatedMcpTools,
-    });
+    this.logger.log(
+      `Upload completed: ${result.totalEndpoints} endpoints, ${result.workflowEndpoints} workflow, ${result.generatedMcpTools} MCP tools`,
+    );
 
     return result;
   }

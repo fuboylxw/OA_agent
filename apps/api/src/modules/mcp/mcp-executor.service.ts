@@ -1,9 +1,16 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import axios, { AxiosRequestConfig } from 'axios';
 
+const ALLOWED_TRANSFORMS = new Set([
+  'toString', 'toNumber', 'toBoolean',
+  'toUpperCase', 'toLowerCase', 'toDate', 'toArray',
+]);
+
 @Injectable()
 export class MCPExecutorService {
+  private readonly logger = new Logger(MCPExecutorService.name);
+
   constructor(private readonly prisma: PrismaService) {}
 
   /**
@@ -28,8 +35,13 @@ export class MCPExecutorService {
       throw new Error(`MCP tool ${toolName} is disabled`);
     }
 
-    console.log(`[MCP Executor] Executing tool: ${toolName}`);
-    console.log(`[MCP Executor] Input params:`, params);
+    this.logger.log(`Executing tool: ${toolName}`);
+
+    // Check if Mock mode is enabled
+    if (process.env.MOCK_MCP === 'true') {
+      this.logger.log(`Mock mode enabled for tool: ${toolName}`);
+      return this.getMockResponse(toolName, params, tool);
+    }
 
     // 2. Apply parameter mapping
     const mappedParams = this.applyParamMapping(
@@ -37,23 +49,16 @@ export class MCPExecutorService {
       tool.paramMapping as any,
     );
 
-    console.log(`[MCP Executor] Mapped params:`, mappedParams);
-
     // 3. Build HTTP request
     const request = this.buildRequest(tool, mappedParams);
 
-    console.log(`[MCP Executor] HTTP request:`, {
-      method: request.method,
-      url: request.url,
-      headers: request.headers,
-    });
+    this.logger.debug(`HTTP ${request.method} ${request.url}`);
 
     // 4. Execute HTTP request
     try {
       const response = await axios(request);
 
-      console.log(`[MCP Executor] Response status:`, response.status);
-      console.log(`[MCP Executor] Response data:`, response.data);
+      this.logger.debug(`Response status: ${response.status}`);
 
       // 5. Apply response mapping
       const mappedResponse = this.applyResponseMapping(
@@ -61,14 +66,9 @@ export class MCPExecutorService {
         tool.responseMapping as any,
       );
 
-      console.log(`[MCP Executor] Mapped response:`, mappedResponse);
-
       return mappedResponse;
     } catch (error: any) {
-      console.error(`[MCP Executor] Request failed:`, error.message);
-      if (error.response) {
-        console.error(`[MCP Executor] Error response:`, error.response.data);
-      }
+      this.logger.error(`Tool ${toolName} execution failed: ${error.message}`);
       throw new Error(`MCP tool execution failed: ${error.message}`);
     }
   }
@@ -138,6 +138,11 @@ export class MCPExecutorService {
    * Apply transformation to value
    */
   private applyTransform(value: any, transform: string): any {
+    if (!ALLOWED_TRANSFORMS.has(transform)) {
+      this.logger.warn(`Unknown transform "${transform}" ignored`);
+      return value;
+    }
+
     switch (transform) {
       case 'toString':
         return String(value);
@@ -154,17 +159,6 @@ export class MCPExecutorService {
       case 'toArray':
         return Array.isArray(value) ? value : [value];
       default:
-        // Custom transform function (eval - use with caution)
-        if (transform.startsWith('function:')) {
-          const funcBody = transform.replace('function:', '');
-          try {
-            const func = new Function('value', `return ${funcBody}`);
-            return func(value);
-          } catch (error) {
-            console.error(`Transform function error:`, error);
-            return value;
-          }
-        }
         return value;
     }
   }
@@ -265,5 +259,71 @@ export class MCPExecutorService {
     }
 
     return template;
+  }
+
+  /**
+   * Get mock response for testing
+   */
+  private getMockResponse(toolName: string, params: Record<string, any>, tool: any): any {
+
+    const category = tool.category;
+    const timestamp = Date.now();
+
+    // Generate mock response based on tool category
+    switch (category) {
+      case 'submit':
+        return {
+          success: true,
+          submissionId: `MOCK-${timestamp}`,
+          status: 'submitted',
+          message: '申请已提交成功（模拟）',
+          data: {
+            id: `MOCK-${timestamp}`,
+            status: 'pending_approval',
+            createdAt: new Date().toISOString(),
+            ...params
+          }
+        };
+
+      case 'query':
+        return {
+          success: true,
+          data: {
+            id: params.submissionId || `MOCK-${timestamp}`,
+            status: 'pending_approval',
+            currentApprover: '张经理',
+            submitTime: new Date().toISOString(),
+            ...params
+          }
+        };
+
+      case 'cancel':
+        return {
+          success: true,
+          message: '申请已撤回（模拟）',
+          data: {
+            id: params.submissionId,
+            status: 'cancelled',
+            cancelledAt: new Date().toISOString()
+          }
+        };
+
+      case 'urge':
+        return {
+          success: true,
+          message: '催办成功（模拟）',
+          data: {
+            id: params.submissionId,
+            urgedAt: new Date().toISOString()
+          }
+        };
+
+      default:
+        return {
+          success: true,
+          message: '操作成功（模拟）',
+          data: params
+        };
+    }
   }
 }

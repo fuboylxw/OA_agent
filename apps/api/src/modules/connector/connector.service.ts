@@ -72,8 +72,63 @@ export class ConnectorService {
   }
 
   async delete(id: string) {
-    return this.prisma.connector.delete({
+    // 获取 connector 信息
+    const connector = await this.prisma.connector.findUnique({
       where: { id },
+      include: {
+        processTemplates: {
+          select: { id: true },
+        },
+      },
+    });
+
+    if (!connector) {
+      throw new NotFoundException('Connector not found');
+    }
+
+    const templateIds = connector.processTemplates.map((t) => t.id);
+
+    // 使用事务进行级联删除
+    return this.prisma.$transaction(async (tx) => {
+      // 1. 删除所有相关的 Submission 的状态记录
+      if (templateIds.length > 0) {
+        const submissions = await tx.submission.findMany({
+          where: { templateId: { in: templateIds } },
+          select: { id: true },
+        });
+        const submissionIds = submissions.map((s) => s.id);
+
+        if (submissionIds.length > 0) {
+          await tx.submissionStatus.deleteMany({
+            where: { submissionId: { in: submissionIds } },
+          });
+        }
+
+        // 2. 删除所有相关的 Submission
+        await tx.submission.deleteMany({
+          where: { templateId: { in: templateIds } },
+        });
+
+        // 3. 删除所有相关的 ProcessDraft
+        await tx.processDraft.deleteMany({
+          where: { templateId: { in: templateIds } },
+        });
+
+        // 4. 删除所有相关的 ProcessTemplate
+        await tx.processTemplate.deleteMany({
+          where: { id: { in: templateIds } },
+        });
+      }
+
+      // 5. 删除所有相关的 MCPTool
+      await tx.mCPTool.deleteMany({
+        where: { connectorId: id },
+      });
+
+      // 6. 最后删除 Connector
+      return tx.connector.delete({
+        where: { id },
+      });
     });
   }
 

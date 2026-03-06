@@ -1,27 +1,24 @@
 import { Process, Processor } from '@nestjs/bull';
 import { Job } from 'bull';
-import { Injectable } from '@nestjs/common';
-import { PrismaClient } from '@prisma/client';
+import { Injectable, Logger } from '@nestjs/common';
+import { PrismaService } from '../services/prisma.service';
 import axios from 'axios';
 import { ApiAnalyzerAgent, BusinessProcess } from '../agents/api-analyzer.agent';
 
 @Processor('bootstrap')
 @Injectable()
 export class BootstrapProcessor {
-  private prisma: PrismaClient;
-  private apiAnalyzer: ApiAnalyzerAgent;
+  private readonly logger = new Logger(BootstrapProcessor.name);
+  private readonly apiAnalyzer = new ApiAnalyzerAgent();
 
-  constructor() {
-    this.prisma = new PrismaClient();
-    this.apiAnalyzer = new ApiAnalyzerAgent();
-  }
+  constructor(private readonly prisma: PrismaService) {}
 
   @Process('process')
   async handleBootstrap(job: Job<{ jobId: string }>) {
     const { jobId } = job.data;
 
     try {
-      console.log(`[Bootstrap Worker] Processing job ${jobId}`);
+      this.logger.log(`Processing job ${jobId}`);
 
       const bootstrapJob = await this.prisma.bootstrapJob.findUnique({
         where: { id: jobId },
@@ -32,85 +29,69 @@ export class BootstrapProcessor {
         throw new Error(`Job ${jobId} not found`);
       }
 
-      // CREATED -> DISCOVERING
       await this.transitionState(jobId, 'DISCOVERING');
       const apiDoc = await this.runDiscovery(bootstrapJob);
 
-      // DISCOVERING -> PARSING
       await this.transitionState(jobId, 'PARSING');
       const parsedEndpoints = await this.runParsing(bootstrapJob, apiDoc);
 
-      // PARSING -> NORMALIZING
       await this.transitionState(jobId, 'NORMALIZING');
       await this.runNormalization(jobId, parsedEndpoints);
 
-      // NORMALIZING -> COMPILING (generate MCP tools)
       await this.transitionState(jobId, 'COMPILING');
       await this.runMCPGeneration(bootstrapJob, parsedEndpoints);
 
-      // COMPILING -> REPLAYING
       await this.transitionState(jobId, 'REPLAYING');
       await this.runReplay(jobId);
 
-      // REPLAYING -> REVIEW
       await this.transitionState(jobId, 'REVIEW');
 
-      console.log(`[Bootstrap Worker] Job ${jobId} completed, status: REVIEW`);
+      this.logger.log(`Job ${jobId} completed, status: REVIEW`);
       return { success: true };
     } catch (error: any) {
-      console.error(`[Bootstrap Worker] Job ${jobId} failed:`, error.message);
+      this.logger.error(`Job ${jobId} failed: ${error.message}`);
       await this.transitionState(jobId, 'FAILED').catch(() => {});
       throw error;
     }
   }
 
-  /**
-   * Step 1: Discovery - fetch API doc content
-   */
   private async runDiscovery(bootstrapJob: any): Promise<string | null> {
-    console.log(`[Bootstrap Worker] Running discovery for ${bootstrapJob.oaUrl}`);
+    this.logger.log(`Running discovery for ${bootstrapJob.oaUrl}`);
 
-    // Check if API doc content was provided inline
     const docSource = bootstrapJob.sources.find(
       (s: any) => s.sourceContent && ['openapi', 'swagger', 'custom'].includes(s.sourceType),
     );
 
     if (docSource?.sourceContent) {
-      console.log(`[Bootstrap Worker] Using inline API doc (${docSource.sourceType})`);
+      this.logger.log(`Using inline API doc (${docSource.sourceType})`);
       return docSource.sourceContent;
     }
 
-    // Try to fetch from openApiUrl
     const openApiSource = bootstrapJob.sources.find(
       (s: any) => s.sourceType === 'openapi' && s.sourceUrl,
     );
 
     if (openApiSource?.sourceUrl) {
       try {
-        console.log(`[Bootstrap Worker] Fetching API doc from ${openApiSource.sourceUrl}`);
         const response = await axios.get(openApiSource.sourceUrl, { timeout: 30000 });
         const content = typeof response.data === 'string'
           ? response.data
           : JSON.stringify(response.data, null, 2);
-        console.log(`[Bootstrap Worker] Fetched API doc (${content.length} chars)`);
+        this.logger.log(`Fetched API doc (${content.length} chars)`);
         return content;
       } catch (error: any) {
-        console.warn(`[Bootstrap Worker] Failed to fetch API doc: ${error.message}`);
+        this.logger.warn(`Failed to fetch API doc: ${error.message}`);
       }
     }
 
-    // If O2OA system, try to discover via API
     if (bootstrapJob.oaUrl?.includes('x_desktop')) {
       return await this.discoverO2OAApis(bootstrapJob.oaUrl);
     }
 
-    console.log(`[Bootstrap Worker] No API doc found, will use mock data`);
+    this.logger.log(`No API doc found, will use mock data`);
     return null;
   }
 
-  /**
-   * Discover O2OA APIs by probing known endpoints
-   */
   private async discoverO2OAApis(oaUrl: string): Promise<string> {
     const baseUrl = new URL(oaUrl).origin;
     const token = process.env.O2OA_TOKEN;
@@ -122,7 +103,6 @@ export class BootstrapProcessor {
     const headers = { 'x-token': token, 'Content-Type': 'application/json' };
     const endpoints: any[] = [];
 
-    // Probe O2OA known API endpoints
     const o2oaApis = [
       { path: '/x_processplatform_assemble_surface/jaxrs/application/list', method: 'GET', desc: '获取应用列表' },
       { path: '/x_processplatform_assemble_surface/jaxrs/process/list/application/{applicationId}', method: 'GET', desc: '获取流程列表' },
@@ -137,7 +117,6 @@ export class BootstrapProcessor {
       { path: '/x_organization_assemble_express/jaxrs/department/list', method: 'GET', desc: '获取部门列表' },
     ];
 
-    // Verify which endpoints are accessible
     for (const api of o2oaApis) {
       const testPath = api.path.replace(/\{[^}]+\}/g, 'test');
       try {
@@ -149,14 +128,12 @@ export class BootstrapProcessor {
           validateStatus: (status) => status < 500,
         });
         endpoints.push(api);
-        console.log(`[Bootstrap Worker] O2OA endpoint verified: ${api.method} ${api.path}`);
+        this.logger.debug(`O2OA endpoint verified: ${api.method} ${api.path}`);
       } catch {
-        // Endpoint not accessible, still add it as known
         endpoints.push(api);
       }
     }
 
-    // Also discover actual applications and processes
     try {
       const appsResponse = await axios.get(
         `${baseUrl}/x_processplatform_assemble_surface/jaxrs/application/list`,
@@ -165,7 +142,7 @@ export class BootstrapProcessor {
 
       if (appsResponse.data.type === 'success') {
         const apps = appsResponse.data.data || [];
-        console.log(`[Bootstrap Worker] Found ${apps.length} O2OA applications`);
+        this.logger.log(`Found ${apps.length} O2OA applications`);
 
         for (const app of apps) {
           try {
@@ -177,7 +154,6 @@ export class BootstrapProcessor {
             if (processResponse.data.type === 'success') {
               const processes = processResponse.data.data || [];
               for (const proc of processes) {
-                // Add process-specific submit endpoint
                 endpoints.push({
                   path: `/x_processplatform_assemble_surface/jaxrs/work/process/${proc.id}`,
                   method: 'POST',
@@ -195,26 +171,17 @@ export class BootstrapProcessor {
         }
       }
     } catch (error: any) {
-      console.warn(`[Bootstrap Worker] Failed to discover O2OA apps: ${error.message}`);
+      this.logger.warn(`Failed to discover O2OA apps: ${error.message}`);
     }
 
-    // Build a pseudo-OpenAPI doc from discovered endpoints
     const openApiDoc = {
       openapi: '3.0.0',
-      info: {
-        title: 'O2OA API',
-        version: '8.0',
-        description: 'Auto-discovered O2OA REST API endpoints',
-      },
+      info: { title: 'O2OA API', version: '8.0', description: 'Auto-discovered O2OA REST API endpoints' },
       servers: [{ url: baseUrl }],
       paths: {} as any,
       components: {
         securitySchemes: {
-          'x-token': {
-            type: 'apiKey',
-            in: 'header',
-            name: 'x-token',
-          },
+          'x-token': { type: 'apiKey', in: 'header', name: 'x-token' },
         },
       },
     };
@@ -240,264 +207,68 @@ export class BootstrapProcessor {
           'x-application-id': ep.applicationId,
           'x-application-name': ep.applicationName,
         } : {}),
-        responses: {
-          '200': { description: 'Success' },
-        },
+        responses: { '200': { description: 'Success' } },
       };
     }
 
     return JSON.stringify(openApiDoc, null, 2);
   }
 
-  /**
-   * Step 2: Parse API doc with LLM Agent - identify business processes
-   */
   private async runParsing(bootstrapJob: any, apiDoc: string | null): Promise<BusinessProcess[]> {
-    console.log(`[Bootstrap Worker] Analyzing API documentation with LLM Agent`);
-
     if (!apiDoc) {
-      console.log(`[Bootstrap Worker] No API doc found`);
+      this.logger.log(`No API doc found, skipping parsing`);
       return [];
     }
 
+    this.logger.log(`Analyzing API documentation with LLM Agent`);
     const baseUrl = bootstrapJob.oaUrl ? new URL(bootstrapJob.oaUrl).origin : undefined;
 
-    // Use API Analyzer Agent to identify business processes
     const result = await this.apiAnalyzer.execute(
-      {
-        docContent: apiDoc,
-        oaUrl: bootstrapJob.oaUrl,
-        baseUrl,
-      },
-      {
-        tenantId: bootstrapJob.tenantId,
-        traceId: bootstrapJob.id,
-      },
+      { docContent: apiDoc, oaUrl: bootstrapJob.oaUrl, baseUrl },
+      { tenantId: bootstrapJob.tenantId, traceId: bootstrapJob.id },
     );
 
     if (!result.success || !result.data) {
-      console.error(`[Bootstrap Worker] API Analyzer failed: ${result.error}`);
+      this.logger.error(`API Analyzer failed: ${result.error}`);
       return [];
     }
 
-    console.log(
-      `[Bootstrap Worker] Identified ${result.data.processes.length} business processes, ${result.data.totalEndpoints} endpoints`,
+    this.logger.log(
+      `Identified ${result.data.processes.length} business processes, ${result.data.totalEndpoints} endpoints`,
     );
-
     return result.data.processes;
   }
 
-  /**
-   * Parse O2OA custom API documentation format
-   */
-  private parseO2OADoc(doc: any): any[] {
-    const endpoints: any[] = [];
-
-    for (const module of doc.modules || []) {
-      const baseUrl = module.baseUrl || '';
-      const moduleName = module.name || '';
-      const moduleTitle = module.title || moduleName;
-
-      for (const action of module.actions || []) {
-        const actionName = action.name || '';
-
-        for (const method of action.methods || []) {
-          const uri = method.uri || '';
-          const httpMethod = (method.method || 'GET').toUpperCase();
-          const methodName = method.name || '';
-
-          // Build full path: baseUrl + /jaxrs/ + uri
-          const fullPath = `${baseUrl}/jaxrs/${uri}`.replace(/\/+/g, '/');
-
-          // Extract path parameters from URI (e.g., {clueId}, {page}, {size})
-          const pathParams: any[] = [];
-          const paramMatches = uri.matchAll(/\{([^}]+)\}/g);
-          for (const match of paramMatches) {
-            pathParams.push({
-              name: match[1],
-              type: 'string',
-              required: true,
-              description: `Path parameter: ${match[1]}`,
-              in: 'path',
-            });
-          }
-
-          // For POST/PUT methods with JSON body, add a generic body parameter
-          const bodyParams: any[] = [];
-          if (['POST', 'PUT', 'PATCH'].includes(httpMethod) && method.enctype === 'application/json') {
-            bodyParams.push({
-              name: 'body',
-              type: 'object',
-              required: true,
-              description: 'Request body',
-              in: 'body',
-            });
-          }
-
-          endpoints.push({
-            path: fullPath,
-            method: httpMethod,
-            description: `${moduleTitle} - ${actionName}.${methodName}`,
-            parameters: [...pathParams, ...bodyParams],
-            moduleName,
-            moduleTitle,
-            actionName,
-            methodName,
-          });
-        }
-      }
-    }
-
-    console.log(`[Bootstrap Worker] Parsed ${endpoints.length} endpoints from O2OA doc`);
-    return endpoints;
-  }
-
-  /**
-   * Parse OpenAPI document structurally
-   */
-  private parseOpenAPIDoc(doc: any): any[] {
-    const endpoints: any[] = [];
-    const baseUrl = doc.servers?.[0]?.url || '';
-
-    for (const [path, pathItem] of Object.entries(doc.paths || {})) {
-      for (const [method, operation] of Object.entries(pathItem as any)) {
-        if (!['get', 'post', 'put', 'patch', 'delete'].includes(method)) continue;
-
-        const op = operation as any;
-        endpoints.push({
-          path,
-          method: method.toUpperCase(),
-          description: op.summary || op.description || `${method.toUpperCase()} ${path}`,
-          parameters: (op.parameters || []).map((p: any) => ({
-            name: p.name,
-            type: p.schema?.type || 'string',
-            required: p.required || false,
-            description: p.description || '',
-            in: p.in || 'query',
-          })),
-          requestBody: op.requestBody?.content?.['application/json']?.schema,
-          processId: op['x-process-id'],
-          processName: op['x-process-name'],
-          applicationId: op['x-application-id'],
-          applicationName: op['x-application-name'],
-        });
-      }
-    }
-
-    console.log(`[Bootstrap Worker] Parsed ${endpoints.length} endpoints from OpenAPI`);
-    return endpoints;
-  }
-
-  /**
-   * Parse with LLM for custom documentation
-   */
-  private async parseWithLLM(docContent: string, bootstrapJob: any): Promise<any[]> {
-    console.log(`[Bootstrap Worker] Parsing with LLM`);
-
-    try {
-      const llm = LLMClientFactory.createFromEnv();
-
-      const prompt = `你是一个 API 文档解析专家。请分析以下 OA 系统的 API 文档，提取所有可用的 API 端点。
-
-OA 系统地址：${bootstrapJob.oaUrl || 'unknown'}
-
-文档内容：
-${docContent.substring(0, 8000)}
-
-请提取所有 API 端点，以 JSON 数组格式返回：
-[
-  {
-    "path": "API 路径",
-    "method": "HTTP 方法",
-    "description": "端点描述",
-    "parameters": [
-      { "name": "参数名", "type": "string", "required": true, "description": "描述" }
-    ]
-  }
-]
-
-只返回 JSON 数组，不要其他内容。`;
-
-      const result = await llm.chat([{ role: 'user', content: prompt }]);
-
-      // Extract JSON from response
-      const responseText = result.content || '';
-      const jsonMatch = responseText.match(/\[[\s\S]*\]/);
-      if (jsonMatch) {
-        const parsed = JSON.parse(jsonMatch[0]);
-        console.log(`[Bootstrap Worker] LLM parsed ${parsed.length} endpoints`);
-        return parsed;
-      }
-    } catch (error: any) {
-      console.error(`[Bootstrap Worker] LLM parsing failed:`, error.message);
-    }
-
-    return this.generateMockEndpoints();
-  }
-
-  /**
-   * Generate mock endpoints as fallback
-   */
-  private generateMockEndpoints(): any[] {
-    return [
-      {
-        path: '/api/submit',
-        method: 'POST',
-        description: '提交申请',
-        parameters: [
-          { name: 'title', type: 'string', required: true, description: '申请标题' },
-          { name: 'content', type: 'string', required: false, description: '申请内容' },
-        ],
-      },
-      {
-        path: '/api/status/{id}',
-        method: 'GET',
-        description: '查询申请状态',
-        parameters: [
-          { name: 'id', type: 'string', required: true, description: '申请ID' },
-        ],
-      },
-    ];
-  }
-
-  /**
-   * Step 3: Normalize - create FlowIRs and FieldIRs from business processes
-   */
   private async runNormalization(jobId: string, processes: BusinessProcess[]) {
-    console.log(`[Bootstrap Worker] Running normalization for ${processes.length} business processes`);
+    this.logger.log(`Normalizing ${processes.length} business processes`);
 
-    for (const process of processes) {
-      // Create FlowIR for each business process
+    for (const proc of processes) {
       await this.prisma.flowIR.create({
         data: {
           bootstrapJobId: jobId,
-          flowCode: process.processCode,
-          flowName: process.processName,
-          flowCategory: process.category,
-          entryUrl: process.endpoints[0]?.path,
-          submitUrl: process.endpoints.find((e) => e.method === 'POST')?.path,
-          queryUrl: process.endpoints.find((e) => e.method === 'GET')?.path,
+          flowCode: proc.processCode,
+          flowName: proc.processName,
+          flowCategory: proc.category,
+          entryUrl: proc.endpoints[0]?.path,
+          submitUrl: proc.endpoints.find((e) => e.method === 'POST')?.path,
+          queryUrl: proc.endpoints.find((e) => e.method === 'GET')?.path,
           metadata: {
-            description: process.description,
-            endpointCount: process.endpoints.length,
+            description: proc.description,
+            endpointCount: proc.endpoints.length,
           },
         },
       });
 
-      // Create FieldIRs from endpoint parameters
-      const allParams = process.endpoints.flatMap((e) => e.parameters || []);
       const uniqueParams = new Map<string, any>();
-      for (const p of allParams) {
-        if (!uniqueParams.has(p.name)) {
-          uniqueParams.set(p.name, p);
-        }
+      for (const p of proc.endpoints.flatMap((e) => e.parameters || [])) {
+        if (!uniqueParams.has(p.name)) uniqueParams.set(p.name, p);
       }
 
       for (const [, param] of uniqueParams) {
         await this.prisma.fieldIR.create({
           data: {
             bootstrapJobId: jobId,
-            flowCode: process.processCode,
+            flowCode: proc.processCode,
             fieldKey: param.name,
             fieldLabel: param.description || param.name,
             fieldType: param.type || 'string',
@@ -509,7 +280,6 @@ ${docContent.substring(0, 8000)}
 
     const totalEndpoints = processes.reduce((sum, p) => sum + p.endpoints.length, 0);
 
-    // Create bootstrap report
     await this.prisma.bootstrapReport.create({
       data: {
         bootstrapJobId: jobId,
@@ -517,30 +287,24 @@ ${docContent.substring(0, 8000)}
         coverage: 0.9,
         confidence: 0.95,
         risk: 'low',
-        evidence: [
-          {
-            type: 'llm_analysis',
-            description: `LLM Agent identified ${processes.length} business processes with ${totalEndpoints} endpoints`,
-            confidence: 0.95,
-          },
-        ],
+        evidence: [{
+          type: 'llm_analysis',
+          description: `LLM Agent identified ${processes.length} business processes with ${totalEndpoints} endpoints`,
+          confidence: 0.95,
+        }],
         recommendation: `Successfully identified ${processes.length} business processes. Ready for MCP tool generation.`,
       },
     });
 
-    console.log(`[Bootstrap Worker] Normalization complete: ${processes.length} business processes`);
+    this.logger.log(`Normalization complete: ${processes.length} processes, ${totalEndpoints} endpoints`);
   }
 
-  /**
-   * Step 4: Generate MCP tools from business processes
-   */
   private async runMCPGeneration(bootstrapJob: any, processes: BusinessProcess[]) {
     const totalEndpoints = processes.reduce((sum, p) => sum + p.endpoints.length, 0);
-    console.log(`[Bootstrap Worker] Generating MCP tools from ${processes.length} processes (${totalEndpoints} endpoints)`);
+    this.logger.log(`Generating MCP tools from ${processes.length} processes (${totalEndpoints} endpoints)`);
 
     const baseUrl = bootstrapJob.oaUrl ? new URL(bootstrapJob.oaUrl).origin : 'http://localhost';
 
-    // Create a connector first
     const connector = await this.prisma.connector.create({
       data: {
         tenantId: bootstrapJob.tenantId,
@@ -548,26 +312,19 @@ ${docContent.substring(0, 8000)}
         oaType: 'hybrid',
         baseUrl,
         authType: 'apikey',
-        authConfig: {
-          token: process.env.O2OA_TOKEN || '',
-          headerName: 'x-token',
-        },
+        authConfig: { token: process.env.O2OA_TOKEN || '', headerName: 'x-token' },
         oclLevel: 'OCL3',
         status: 'active',
       },
     });
 
-    console.log(`[Bootstrap Worker] Created connector: ${connector.id}`);
-
     let toolCount = 0;
     const usedNames = new Set<string>();
 
-    // Generate MCP tools for each endpoint in each process
-    for (const process of processes) {
-      for (const endpoint of process.endpoints) {
-        let toolName = this.generateToolNameFromEndpoint(process.processCode, endpoint);
+    for (const proc of processes) {
+      for (const endpoint of proc.endpoints) {
+        let toolName = this.generateToolName(proc.processCode, endpoint);
 
-        // Ensure uniqueness
         if (usedNames.has(toolName)) {
           let suffix = 2;
           while (usedNames.has(`${toolName}_${suffix}`)) suffix++;
@@ -576,8 +333,6 @@ ${docContent.substring(0, 8000)}
         usedNames.add(toolName);
 
         const category = this.categorizeEndpoint(endpoint);
-
-        // Build tool schema
         const properties: Record<string, any> = {};
         const required: string[] = [];
 
@@ -586,23 +341,13 @@ ${docContent.substring(0, 8000)}
             type: param.type || 'string',
             description: param.description || param.name,
           };
-          if (param.required) {
-            required.push(param.name);
-          }
+          if (param.required) required.push(param.name);
         }
 
-        // Build param mapping
         const paramMapping: Record<string, string> = {};
         for (const param of endpoint.parameters || []) {
           paramMapping[param.name] = param.name;
         }
-
-        // Build response mapping
-        const responseMapping: Record<string, string> = {
-          success: 'type',
-          data: 'data',
-          message: 'message',
-        };
 
         try {
           await this.prisma.mCPTool.create({
@@ -610,24 +355,24 @@ ${docContent.substring(0, 8000)}
               tenantId: bootstrapJob.tenantId,
               connectorId: connector.id,
               toolName,
-              toolDescription: `${process.processName} - ${endpoint.description}`,
+              toolDescription: `${proc.processName} - ${endpoint.description}`,
               toolSchema: { type: 'object', properties, required },
               apiEndpoint: endpoint.path,
               httpMethod: endpoint.method,
               headers: { 'x-token': process.env.O2OA_TOKEN || '' },
               bodyTemplate: null as any,
               paramMapping,
-              responseMapping,
-              flowCode: process.processCode,
+              responseMapping: { success: 'type', data: 'data', message: 'message' },
+              flowCode: proc.processCode,
               category,
-              testInput: this.generateTestInputFromParams(endpoint.parameters),
+              testInput: this.generateTestInput(endpoint.parameters),
               testOutput: null as any,
             },
           });
           toolCount++;
         } catch (error: any) {
           if (error.code === 'P2002') {
-            console.warn(`[Bootstrap Worker] Skipping duplicate tool: ${toolName}`);
+            this.logger.warn(`Skipping duplicate tool: ${toolName}`);
           } else {
             throw error;
           }
@@ -635,30 +380,31 @@ ${docContent.substring(0, 8000)}
       }
     }
 
-    // Generate adapter code
     await this.prisma.adapterBuild.create({
       data: {
         bootstrapJobId: bootstrapJob.id,
         adapterType: 'mcp',
-        generatedCode: `// MCP-based adapter: ${toolCount} tools generated for ${processes.length} business processes\n// Tools are stored in mcp_tools table\n// Use MCPExecutorService to execute tools`,
+        generatedCode: `// MCP-based adapter: ${toolCount} tools generated for ${processes.length} business processes`,
         buildStatus: 'success',
       },
     });
 
-    console.log(`[Bootstrap Worker] Generated ${toolCount} MCP tools for ${processes.length} business processes`);
+    this.logger.log(`Generated ${toolCount} MCP tools`);
   }
 
-  /**
-   * Step 5: Replay validation
-   */
   private async runReplay(jobId: string) {
-    console.log(`[Bootstrap Worker] Running replay validation`);
-
-    const tools = await this.prisma.mCPTool.findMany({
-      where: { tenantId: { not: undefined } },
+    // Query only tools associated with this job's connector
+    const connector = await this.prisma.connector.findFirst({
+      where: { name: { startsWith: `Bootstrap-${jobId.substring(0, 8)}` } },
       orderBy: { createdAt: 'desc' },
-      take: 50,
     });
+
+    const tools = connector
+      ? await this.prisma.mCPTool.findMany({
+          where: { connectorId: connector.id },
+          take: 50,
+        })
+      : [];
 
     for (const tool of tools) {
       await this.prisma.replayCase.create({
@@ -671,15 +417,13 @@ ${docContent.substring(0, 8000)}
       });
     }
 
-    console.log(`[Bootstrap Worker] Created ${tools.length} replay cases`);
+    this.logger.log(`Created ${tools.length} replay cases`);
   }
 
-  private generateToolName(ep: any): string {
+  private generateToolName(processCode: string, ep: any): string {
     const method = ep.method.toLowerCase();
 
-    // For O2OA endpoints, use module short name + action + method name
     if (ep.moduleName && ep.actionName && ep.methodName) {
-      // e.g. x_ai_assemble_control -> ai
       const moduleShort = ep.moduleName
         .replace(/^x_/, '')
         .replace(/_assemble_\w+$/, '')
@@ -691,12 +435,14 @@ ${docContent.substring(0, 8000)}
         .substring(0, 120);
     }
 
-    // Fallback: use path segments
     const pathParts = ep.path
       .split('/')
       .filter((p: string) => p && !p.startsWith('{'));
-    const resource = pathParts.join('_') || 'resource';
-    return `${method}_${resource}`.replace(/[^a-z0-9_]/gi, '_').toLowerCase().substring(0, 120);
+    const resource = pathParts.slice(-2).join('_') || 'resource';
+    return `${processCode}_${method}_${resource}`
+      .replace(/[^a-z0-9_]/gi, '_')
+      .toLowerCase()
+      .substring(0, 120);
   }
 
   private categorizeEndpoint(ep: any): string {
@@ -713,9 +459,9 @@ ${docContent.substring(0, 8000)}
     return 'other';
   }
 
-  private generateTestInput(ep: any): Record<string, any> {
+  private generateTestInput(params: any[] | undefined): Record<string, any> {
     const input: Record<string, any> = {};
-    for (const param of ep.parameters || []) {
+    for (const param of params || []) {
       if (param.required) {
         input[param.name] = param.type === 'number' ? 1 : 'test';
       }
@@ -724,14 +470,10 @@ ${docContent.substring(0, 8000)}
   }
 
   private async transitionState(jobId: string, newState: string) {
-    console.log(`[Bootstrap Worker] ${jobId} -> ${newState}`);
+    this.logger.debug(`${jobId} -> ${newState}`);
     await this.prisma.bootstrapJob.update({
       where: { id: jobId },
       data: { status: newState },
     });
-  }
-
-  async onModuleDestroy() {
-    await this.prisma.$disconnect();
   }
 }

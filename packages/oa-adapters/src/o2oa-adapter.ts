@@ -110,7 +110,7 @@ export class O2OAAdapter implements OAAdapter {
           }
         }
       } catch (error) {
-        console.warn(`Failed to get processes for app ${app.id}:`, error);
+        console.warn(`[O2OAAdapter] Failed to get processes for app ${app.id}: ${error}`);
       }
     }
 

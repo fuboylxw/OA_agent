@@ -98,10 +98,11 @@ export class PermissionService {
         return { passed: true, reason: '无策略限制，默认允许查看' };
       }
       // For submit and other actions, check basic role
-      if (user.roles.includes('admin') || user.roles.includes('flow_manager')) {
+      const userRoles = Array.isArray(user.roles) ? user.roles : JSON.parse(user.roles as string);
+      if (userRoles.includes('admin') || userRoles.includes('flow_manager')) {
         return { passed: true, reason: '管理员角色，默认允许' };
       }
-      if (user.roles.includes('user') && ['submit', 'cancel'].includes(input.action)) {
+      if (userRoles.includes('user') && ['submit', 'cancel'].includes(input.action)) {
         return { passed: true, reason: '普通用户，允许提交和撤回' };
       }
       return { passed: false, reason: '无匹配的权限策略' };
@@ -134,8 +135,9 @@ export class PermissionService {
         return null; // This policy doesn't apply to this action
       }
 
-      if (allowedRoles && user.roles.some((r: string) => allowedRoles.includes(r))) {
-        return { passed: true, reason: `角色 ${user.roles.join(',')} 匹配策略 ${policy.id}` };
+      const userRoles = Array.isArray(user.roles) ? user.roles : JSON.parse(user.roles as string);
+      if (allowedRoles && userRoles.some((r: string) => allowedRoles.includes(r))) {
+        return { passed: true, reason: `角色 ${userRoles.join(',')} 匹配策略 ${policy.id}` };
       }
 
       return null;

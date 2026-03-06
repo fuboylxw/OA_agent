@@ -4,6 +4,7 @@ import { ApiDocumentParserAgent, ParseDocumentOptions } from './agents/api-docum
 import { createHash } from 'crypto';
 
 export interface CreateParseJobDto {
+  tenantId: string;
   bootstrapJobId: string;
   documentType: string;
   documentUrl?: string;
@@ -62,13 +63,14 @@ export class DocumentParserService {
     // 创建解析任务
     const parseJob = await this.prisma.parseJob.create({
       data: {
+        tenantId: dto.tenantId,
         bootstrapJobId: dto.bootstrapJobId,
         documentType: dto.documentType,
         documentUrl: dto.documentUrl,
         documentHash,
         status: 'PENDING',
         progress: 0,
-        parseOptions: dto.parseOptions || {},
+        parseOptions: dto.parseOptions || {} as any,
         warnings: [],
         errors: [],
       },
@@ -386,15 +388,42 @@ export class DocumentParserService {
     // 获取bootstrap job信息
     const parseJob = await this.prisma.parseJob.findUnique({
       where: { id: process.parseJobId },
-      include: { bootstrapJob: true },
+      include: {
+        bootstrapJob: {
+          include: {
+            tenant: {
+              include: {
+                connectors: true
+              }
+            }
+          }
+        }
+      },
     });
 
     const tenantId = parseJob.bootstrapJob.tenantId;
+
+    // 获取或创建默认连接器
+    let connector = parseJob.bootstrapJob.tenant.connectors[0];
+    if (!connector) {
+      connector = await this.prisma.connector.create({
+        data: {
+          tenantId,
+          name: 'Default Connector',
+          oaType: 'openapi',
+          baseUrl: 'http://localhost',
+          authType: 'none',
+          authConfig: {},
+          oclLevel: 'OCL3',
+        },
+      });
+    }
 
     // 创建ProcessTemplate
     const template = await this.prisma.processTemplate.create({
       data: {
         tenantId,
+        connectorId: connector.id,
         processCode: process.processCode,
         processName: process.processName,
         processCategory: process.processCategory,
@@ -402,9 +431,14 @@ export class DocumentParserService {
         version: 1,
         status: 'published',
         falLevel: 'F3', // 默认F3
-        fields: process.fields,
-        endpoints: process.endpoints,
-        rules: [],
+        schema: {
+          fields: process.fields,
+        },
+        uiHints: {
+          endpoints: process.endpoints,
+        },
+        rules: null,
+        permissions: null,
       },
     });
 
@@ -450,7 +484,8 @@ export class DocumentParserService {
 
     // 创建新的解析任务
     return this.createParseJob({
-      bootstrapJobId,
+      tenantId: oldParseJob.tenantId,
+      bootstrapJobId: oldParseJob.bootstrapJobId,
       documentType: oldParseJob.documentType,
       documentContent,
       parseOptions: newOptions || (oldParseJob.parseOptions as any),

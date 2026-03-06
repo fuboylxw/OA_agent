@@ -1,5 +1,5 @@
 import { NestFactory } from '@nestjs/core';
-import { ValidationPipe } from '@nestjs/common';
+import { Logger, ValidationPipe } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import * as bodyParser from 'body-parser';
@@ -36,10 +36,11 @@ async function bootstrap() {
   const document = SwaggerModule.createDocument(app, config);
   SwaggerModule.setup('api/docs', app, document);
 
+  const logger = new Logger('Bootstrap');
   const port = process.env.API_PORT || 3001;
   await app.listen(port);
-  console.log(`🚀 API server running on http://localhost:${port}`);
-  console.log(`📚 API docs available at http://localhost:${port}/api/docs`);
+  logger.log(`API server running on http://localhost:${port}`);
+  logger.log(`API docs available at http://localhost:${port}/api/docs`);
 }
 
 bootstrap();

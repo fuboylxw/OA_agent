@@ -47,15 +47,17 @@ export class FlowAgent {
         score += 0.8;
       }
 
-      // Partial keyword matching
-      const nameChars = lowerName.split('');
-      let matchedChars = 0;
-      for (const char of nameChars) {
-        if (lowerMessage.includes(char)) {
-          matchedChars++;
+      // Word-level substring matching (split name into meaningful segments)
+      const nameSegments = lowerName.split(/[\s_\-\/]+/).filter(s => s.length >= 2);
+      let matchedSegments = 0;
+      for (const segment of nameSegments) {
+        if (lowerMessage.includes(segment)) {
+          matchedSegments++;
         }
       }
-      score += (matchedChars / nameChars.length) * 0.5;
+      if (nameSegments.length > 0) {
+        score += (matchedSegments / nameSegments.length) * 0.5;
+      }
 
       // Category matching
       if (flow.processCategory && lowerMessage.includes(flow.processCategory.toLowerCase())) {
