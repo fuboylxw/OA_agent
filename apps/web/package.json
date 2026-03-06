@@ -10,12 +10,14 @@
     "test": "jest"
   },
   "dependencies": {
+    "@fortawesome/fontawesome-free": "^7.2.0",
+    "@uniflow/shared-types": "workspace:*",
+    "axios": "^1.6.5",
+    "lucide-react": "^0.577.0",
     "next": "^14.1.0",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
-    "axios": "^1.6.5",
-    "zod": "^3.22.4",
-    "@uniflow/shared-types": "workspace:*"
+    "zod": "^3.22.4"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

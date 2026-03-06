@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { BaseAgent, AgentContext, AgentConfig, LLMClientFactory } from '@uniflow/agent-kernel';
 import { z } from 'zod';
 
@@ -55,6 +55,7 @@ export class WorkflowApiIdentifierAgent extends BaseAgent<
   WorkflowApiIdentifierInput,
   WorkflowApiIdentifierOutput
 > {
+  private readonly logger = new Logger(WorkflowApiIdentifierAgent.name);
   private llmClient = LLMClientFactory.createFromEnv();
 
   constructor() {
@@ -71,16 +72,16 @@ export class WorkflowApiIdentifierAgent extends BaseAgent<
     input: WorkflowApiIdentifierInput,
     context: AgentContext,
   ): Promise<WorkflowApiIdentifierOutput> {
-    console.log(`[WorkflowApiIdentifier] Analyzing ${input.endpoints.length} endpoints`);
+    this.logger.log(`Analyzing ${input.endpoints.length} endpoints`);
 
     // 先用规则过滤明显的非办事流程接口
     const candidates = this.ruleBasedFilter(input.endpoints);
-    console.log(`[WorkflowApiIdentifier] ${candidates.length} candidates after rule-based filtering`);
+    this.logger.log(`${candidates.length} candidates after rule-based filtering`);
 
     // 使用LLM进行智能识别
     const result = await this.identifyWithLLM(candidates);
 
-    console.log(`[WorkflowApiIdentifier] Identified ${result.workflowApis.length} workflow APIs`);
+    this.logger.log(`Identified ${result.workflowApis.length} workflow APIs`);
 
     return result;
   }
@@ -190,7 +191,7 @@ ${JSON.stringify(endpoints, null, 2)}
         nonWorkflowApis: parsed.nonWorkflowApis || [],
       };
     } catch (error: any) {
-      console.error(`[WorkflowApiIdentifier] LLM identification failed:`, error.message);
+      this.logger.error(`LLM identification failed: ${error.message}`);
 
       // Fallback: return empty result
       return {

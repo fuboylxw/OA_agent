@@ -2,6 +2,16 @@ import { IsOptional, IsString, IsUrl, IsIn } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 
 export class CreateBootstrapJobDto {
+  @ApiProperty({ required: false, description: '租户ID' })
+  @IsOptional()
+  @IsString()
+  tenantId?: string;
+
+  @ApiProperty({ required: false, description: 'OA 系统名称' })
+  @IsOptional()
+  @IsString()
+  name?: string;
+
   @ApiProperty({ required: false, description: 'OA 系统地址' })
   @IsOptional()
   @IsUrl({ require_tld: false })

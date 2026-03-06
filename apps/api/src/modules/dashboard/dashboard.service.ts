@@ -29,30 +29,30 @@ export class DashboardService {
       recentSubmissions,
       recentBootstrapJobs,
     ] = await Promise.all([
-      this.prisma.submission.count({ where: { tenantId } }),
+      this.prisma.submission.count({ where: { tenantId, userId } }),
       this.prisma.submission.count({
-        where: { tenantId, createdAt: { gte: startOfMonth } },
+        where: { tenantId, userId, createdAt: { gte: startOfMonth } },
       }),
       this.prisma.processTemplate.count({
         where: { tenantId, status: 'published' },
       }),
       this.prisma.connector.count({ where: { tenantId } }),
       this.prisma.submission.count({
-        where: { tenantId, status: 'pending' },
+        where: { tenantId, userId, status: { in: ['pending', 'submitted'] } },
       }),
       this.prisma.connector.findMany({
         where: { tenantId },
         select: { status: true },
       }),
       this.prisma.submission.findMany({
-        where: { tenantId },
+        where: { tenantId, userId },
         orderBy: { createdAt: 'desc' },
         take: 5,
         select: {
           id: true,
           status: true,
           createdAt: true,
-          formData: true,
+          templateId: true,
         },
       }),
       this.prisma.bootstrapJob.findMany({
@@ -73,11 +73,19 @@ export class DashboardService {
       ? Math.round((activeConnectors / connectors.length) * 100)
       : 100;
 
+    // Get template names for recent submissions
+    const templateIds = [...new Set(recentSubmissions.map(s => s.templateId))];
+    const templates = await this.prisma.processTemplate.findMany({
+      where: { id: { in: templateIds } },
+      select: { id: true, processName: true },
+    });
+    const templateMap = new Map(templates.map(t => [t.id, t.processName]));
+
     // Build recent activity
     const recentActivity = [
       ...recentSubmissions.map((s) => ({
         id: s.id,
-        title: (s.formData as any)?.title || '提交申请',
+        title: templateMap.get(s.templateId) || '提交申请',
         type: 'submission',
         status: s.status,
         createdAt: s.createdAt.toISOString(),

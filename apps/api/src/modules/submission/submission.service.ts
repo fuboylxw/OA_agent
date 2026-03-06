@@ -224,7 +224,7 @@ export class SubmissionService {
   }
 
   async getSubmission(id: string) {
-    return this.prisma.submission.findUnique({
+    const submission = await this.prisma.submission.findUnique({
       where: { id },
       include: {
         user: {
@@ -240,17 +240,102 @@ export class SubmissionService {
         },
       },
     });
+
+    if (!submission) return null;
+
+    const template = await this.prisma.processTemplate.findUnique({
+      where: { id: submission.templateId },
+    });
+
+    return {
+      ...submission,
+      processCode: template?.processCode,
+      processName: template?.processName,
+      processCategory: template?.processCategory,
+      statusText: this.getStatusText(submission.status),
+      formDataWithLabels: this.buildFormDataWithLabels(
+        submission.formData as Record<string, any>,
+        template,
+      ),
+    };
   }
 
   async listSubmissions(tenantId: string, userId?: string) {
-    return this.prisma.submission.findMany({
+    const submissions = await this.prisma.submission.findMany({
       where: {
         tenantId,
         ...(userId && { userId }),
       },
+      include: {
+        user: {
+          select: { id: true, username: true, displayName: true },
+        },
+      },
       orderBy: { createdAt: 'desc' },
       take: 50,
     });
+
+    const templateIds = [...new Set(submissions.map(s => s.templateId))];
+    const templates = await this.prisma.processTemplate.findMany({
+      where: { id: { in: templateIds } },
+    });
+    const templateMap = new Map(templates.map(t => [t.id, t]));
+
+    return submissions.map(s => {
+      const template = templateMap.get(s.templateId);
+
+      return {
+        id: s.id,
+        oaSubmissionId: s.oaSubmissionId,
+        processCode: template?.processCode,
+        processName: template?.processName,
+        processCategory: template?.processCategory,
+        status: s.status,
+        statusText: this.getStatusText(s.status),
+        formData: s.formData,
+        formDataWithLabels: this.buildFormDataWithLabels(
+          s.formData as Record<string, any>,
+          template,
+        ),
+        user: s.user,
+        submittedAt: s.submittedAt,
+        createdAt: s.createdAt,
+      };
+    });
+  }
+
+  private buildFormDataWithLabels(
+    formData: Record<string, any>,
+    template: any | null | undefined,
+  ) {
+    const schema = template?.schema as any;
+    const fields: any[] = schema?.fields || [];
+
+    return Object.entries(formData).map(([key, value]) => {
+      const field = fields.find((f: any) => f.key === key);
+      let displayValue = value;
+      if (field?.options && Array.isArray(field.options)) {
+        const option = field.options.find((o: any) => o.value === value);
+        if (option) displayValue = option.label;
+      }
+      return {
+        key,
+        label: field?.label || key,
+        value,
+        displayValue,
+        type: field?.type || 'text',
+      };
+    });
+  }
+
+  private getStatusText(status: string): string {
+    const map: Record<string, string> = {
+      pending: '待处理',
+      submitted: '已提交',
+      failed: '提交失败',
+      cancelled: '已取消',
+    };
+    return map[status] || status;
   }
 
   async cancel(submissionId: string, userId: string, traceId: string) {

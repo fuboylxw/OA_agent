@@ -1,4 +1,4 @@
-import { Controller, Post, Body, Get, Param, Query, Delete, HttpException, HttpStatus } from '@nestjs/common';
+import { Controller, Post, Body, Get, Param, Query, Delete, HttpException, HttpStatus, Logger } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
 import { AssistantService } from './assistant.service';
 import { IsString, IsOptional } from 'class-validator';
@@ -55,8 +55,10 @@ class ChatResponseDto {
 }
 
 @ApiTags('assistant')
-@Controller('v1/assistant')
+@Controller('assistant')
 export class AssistantController {
+  private readonly logger = new Logger(AssistantController.name);
+
   constructor(private readonly assistantService: AssistantService) {}
 
   @Post('chat')
@@ -90,7 +92,7 @@ export class AssistantController {
         message: dto.message,
       });
     } catch (error: any) {
-      console.error('[AssistantController] chat error:', error.message);
+      this.logger.error(`Chat error: ${error.message}`);
 
       // Handle specific errors
       if (error.message?.includes('User not found')) {
@@ -133,7 +135,7 @@ export class AssistantController {
 
       return await this.assistantService.listSessions(resolvedTenantId, resolvedUserId);
     } catch (error: any) {
-      console.error('[AssistantController] listSessions error:', error.message);
+      this.logger.error(`listSessions error: ${error.message}`);
       throw new HttpException(
         error.message || 'Failed to list sessions',
         HttpStatus.INTERNAL_SERVER_ERROR
@@ -154,7 +156,7 @@ export class AssistantController {
     try {
       return await this.assistantService.getMessages(sessionId);
     } catch (error: any) {
-      console.error('[AssistantController] getMessages error:', error.message);
+      this.logger.error(`getMessages error: ${error.message}`);
       throw new HttpException(
         error.message || 'Failed to get messages',
         HttpStatus.INTERNAL_SERVER_ERROR
@@ -176,7 +178,7 @@ export class AssistantController {
       await this.assistantService.deleteSession(sessionId);
       return { success: true, message: '会话已删除' };
     } catch (error: any) {
-      console.error('[AssistantController] deleteSession error:', error.message);
+      this.logger.error(`deleteSession error: ${error.message}`);
       throw new HttpException(
         error.message || 'Failed to delete session',
         HttpStatus.INTERNAL_SERVER_ERROR
@@ -198,7 +200,7 @@ export class AssistantController {
       await this.assistantService.resetSession(sessionId);
       return { success: true, message: '会话上下文已重置' };
     } catch (error: any) {
-      console.error('[AssistantController] resetSession error:', error.message);
+      this.logger.error(`resetSession error: ${error.message}`);
       throw new HttpException(
         error.message || 'Failed to reset session',
         HttpStatus.INTERNAL_SERVER_ERROR

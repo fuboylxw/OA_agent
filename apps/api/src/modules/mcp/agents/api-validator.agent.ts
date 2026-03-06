@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { BaseAgent, AgentContext, AgentConfig, LLMClientFactory } from '@uniflow/agent-kernel';
 import { z } from 'zod';
 import axios from 'axios';
@@ -55,6 +55,7 @@ export class ApiValidatorAgent extends BaseAgent<
   ApiValidatorInput,
   ApiValidatorOutput
 > {
+  private readonly logger = new Logger(ApiValidatorAgent.name);
   private llmClient = LLMClientFactory.createFromEnv();
 
   constructor() {
@@ -71,7 +72,7 @@ export class ApiValidatorAgent extends BaseAgent<
     input: ApiValidatorInput,
     context: AgentContext,
   ): Promise<ApiValidatorOutput> {
-    console.log(`[ApiValidator] Validating ${input.endpoint.method} ${input.endpoint.path}`);
+    this.logger.log(`Validating ${input.endpoint.method} ${input.endpoint.path}`);
 
     const startTime = Date.now();
     let validationResult: any = {
@@ -116,7 +117,7 @@ export class ApiValidatorAgent extends BaseAgent<
         validationResult,
       };
     } catch (error: any) {
-      console.error(`[ApiValidator] Validation failed:`, error.message);
+      this.logger.error(`Validation failed: ${error.message}`);
 
       validationResult.recommendation = `验证失败: ${error.message}`;
 
@@ -183,7 +184,7 @@ export class ApiValidatorAgent extends BaseAgent<
 
       return { exists, authValid, statusCode: headResponse.status };
     } catch (error: any) {
-      console.error(`[ApiValidator] Endpoint test failed:`, error.message);
+      this.logger.error(`Endpoint test failed: ${error.message}`);
       return { exists: false, authValid: false };
     }
   }

@@ -1,18 +1,50 @@
 'use client';
 
 import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import axios from 'axios';
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 export default function LoginPage() {
   const [username, setUsername] = useState('');
   const [password, setPassword] = useState('');
-  const router = useRouter();
+  const [error, setError] = useState('');
+  const [loading, setLoading] = useState(false);
 
   const handleLogin = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (username && password) {
-      localStorage.setItem('userId', username);
-      router.push('/chat');
+    if (!username || !password) return;
+
+    setError('');
+    setLoading(true);
+
+    try {
+      const response = await axios.post(`${API_URL}/api/v1/auth/login`, {
+        username,
+        password,
+      });
+
+      const { userId, displayName, roles, tenantId } = response.data;
+
+      localStorage.setItem('userId', userId);
+      localStorage.setItem('username', username);
+      localStorage.setItem('displayName', displayName);
+      localStorage.setItem('roles', JSON.stringify(roles));
+      localStorage.setItem('tenantId', tenantId);
+
+      // 写入 cookie，供服务端读取
+      const maxAge = 60 * 60 * 24 * 7;
+      document.cookie = `roles=${encodeURIComponent(JSON.stringify(roles))};path=/;max-age=${maxAge}`;
+      document.cookie = `userId=${encodeURIComponent(userId)};path=/;max-age=${maxAge}`;
+      document.cookie = `tenantId=${encodeURIComponent(tenantId)};path=/;max-age=${maxAge}`;
+      document.cookie = `displayName=${encodeURIComponent(displayName)};path=/;max-age=${maxAge}`;
+
+      // 硬跳转，让服务端重新渲染 layout 读取 cookie
+      window.location.href = '/';
+    } catch (err: any) {
+      setError(err.response?.data?.message || '登录失败，请检查用户名和密码');
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -23,7 +55,6 @@ export default function LoginPage() {
 
       <div className="relative z-10 w-full max-w-md px-6">
         <div className="bg-white rounded-xl shadow-sm border border-gray-200 p-8">
-          {/* Logo */}
           <div className="text-center mb-8">
             <div className="w-16 h-16 rounded-2xl bg-blue-600 flex items-center justify-center mx-auto mb-4">
               <i className="fas fa-bolt text-white text-2xl"></i>
@@ -31,6 +62,13 @@ export default function LoginPage() {
             <h1 className="text-3xl font-bold text-gray-900 font-['Pacifico']">UniFlow</h1>
             <p className="text-gray-500 mt-2">智能办公助手 · 登录</p>
           </div>
+
+          {error && (
+            <div className="mb-4 px-4 py-3 bg-red-50 border border-red-200 rounded-lg text-sm text-red-600 flex items-center gap-2">
+              <i className="fas fa-exclamation-circle"></i>
+              {error}
+            </div>
+          )}
 
           <form className="space-y-5" onSubmit={handleLogin}>
             <div>
@@ -65,34 +103,21 @@ export default function LoginPage() {
               />
             </div>
 
-            <div className="flex items-center justify-between text-sm">
-              <label className="flex items-center gap-2 text-gray-500 cursor-pointer">
-                <input type="checkbox" className="w-4 h-4 rounded border-gray-300 accent-blue-600" />
-                记住我
-              </label>
-              <a href="#" className="text-blue-600 hover:text-blue-800">
-                忘记密码？
-              </a>
-            </div>
-
-            <button type="submit" className="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-lg text-sm font-medium transition-colors">
-              登录
+            <button
+              type="submit"
+              disabled={loading}
+              className="w-full bg-blue-600 hover:bg-blue-700 text-white py-3 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+            >
+              {loading ? '登录中...' : '登录'}
             </button>
           </form>
 
           <div className="mt-6 text-center">
-            <p className="text-gray-500 text-sm">
-              还没有账号？
-              <a href="#" className="text-blue-600 hover:text-blue-800 ml-1">
-                联系管理员开通
-              </a>
+            <p className="text-gray-400 text-xs">
+              测试账号：admin / admin（管理员）、testuser / testuser（普通用户）
             </p>
           </div>
         </div>
-
-        <p className="text-center text-gray-400 text-xs mt-6">
-          面向高校的 AI 智能办公平台
-        </p>
       </div>
     </div>
   );

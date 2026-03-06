@@ -33,6 +33,7 @@ model Tenant {
   permissionPolicies PermissionPolicy[]
   chatSessions       ChatSession[]
   mcpTools           MCPTool[]
+  parseJobs          ParseJob[]
 
   @@map("tenants")
 }
@@ -66,6 +67,7 @@ model User {
 model BootstrapJob {
   id              String   @id @default(uuid())
   tenantId        String
+  name            String?
   status          String   @default("CREATED") // CREATED -> DISCOVERING -> PARSING -> NORMALIZING -> COMPILING -> REPLAYING -> REVIEW -> PUBLISHED
   oaUrl           String?
   sourceBundleUrl String?
@@ -86,6 +88,7 @@ model BootstrapJob {
   adapterBuilds   AdapterBuild[]
   replayCases     ReplayCase[]
   driftEvents     DriftEvent[]
+  parseJobs       ParseJob[]
 
   @@index([tenantId, status])
   @@map("bootstrap_jobs")
@@ -323,6 +326,7 @@ model ProcessTemplate {
   processCode     String // 流程编码，如 "travel_expense"
   processName     String
   processCategory String? // 流程分类
+  description     String?  @db.Text // 流程描述
   version         Int      @default(1)
   status          String   @default("draft") // draft, published, archived
   falLevel        String // F0-F4
@@ -559,4 +563,72 @@ model MCPTool {
   @@index([flowCode])
   @@index([category])
   @@map("mcp_tools")
+}
+
+// ============================================================
+// API Document Parser (智能体API文档解析)
+// ============================================================
+
+model ParseJob {
+  id              String   @id @default(uuid())
+  tenantId        String
+  bootstrapJobId  String
+  tenant          Tenant       @relation(fields: [tenantId], references: [id])
+  bootstrapJob    BootstrapJob @relation(fields: [bootstrapJobId], references: [id])
+
+  documentType    String   // openapi/swagger/postman/har
+  documentUrl     String?
+  documentHash    String   // 文档内容哈希，用于缓存
+
+  status          String   // PENDING/PARSING/COMPLETED/FAILED/REVIEW_REQUIRED
+  progress        Int      @default(0)
+
+  parseOptions    Json     // 解析选项
+  parseResult     Json?    // 解析结果
+  parseMetadata   Json?    // 元数据（耗时、token等）
+
+  warnings        Json     @default("[]") // 警告信息
+  errors          Json     @default("[]") // 错误信息
+
+  reviewedBy      String?
+  reviewedAt      DateTime?
+  reviewComment   String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+  completedAt     DateTime?
+
+  extractedProcesses ExtractedProcess[]
+
+  @@index([tenantId])
+  @@index([bootstrapJobId])
+  @@index([status])
+  @@index([documentHash])
+  @@map("parse_jobs")
+}
+
+model ExtractedProcess {
+  id              String   @id @default(uuid())
+  parseJobId      String
+  parseJob        ParseJob @relation(fields: [parseJobId], references: [id])
+
+  processCode     String
+  processName     String
+  processCategory String
+  description     String?
+
+  confidence      Float    // 0-1
+  endpoints       Json     // API端点信息
+  fields          Json     // 字段定义
+
+  status          String   // EXTRACTED/REVIEWED/PUBLISHED/REJECTED
+  publishedTemplateId String?
+
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  @@index([parseJobId])
+  @@index([processCode])
+  @@index([status])
+  @@map("extracted_processes")
 }

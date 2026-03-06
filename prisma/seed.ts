@@ -23,13 +23,13 @@ async function main() {
   // Create admin user
   const adminUser = await prisma.user.upsert({
     where: { tenantId_username: { tenantId: tenant.id, username: 'admin' } },
-    update: {},
+    update: { roles: ['admin', 'flow_manager'] },
     create: {
       tenantId: tenant.id,
       username: 'admin',
       email: 'admin@example.com',
       displayName: 'Administrator',
-      roles: JSON.stringify(['admin', 'flow_manager']),
+      roles: ['admin', 'flow_manager'],
       status: 'active',
     },
   });
@@ -39,13 +39,13 @@ async function main() {
   // Create test user
   const testUser = await prisma.user.upsert({
     where: { tenantId_username: { tenantId: tenant.id, username: 'testuser' } },
-    update: {},
+    update: { roles: ['user'] },
     create: {
       tenantId: tenant.id,
       username: 'testuser',
       email: 'test@example.com',
       displayName: 'Test User',
-      roles: JSON.stringify(['user']),
+      roles: ['user'],
       status: 'active',
     },
   });

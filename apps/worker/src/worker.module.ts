@@ -1,8 +1,10 @@
-import { Module } from '@nestjs/common';
+import { Module, Global } from '@nestjs/common';
 import { BullModule } from '@nestjs/bull';
 import { ConfigModule } from '@nestjs/config';
+import { PrismaService } from './services/prisma.service';
 import { BootstrapProcessor } from './processors/bootstrap.processor';
 
+@Global()
 @Module({
   imports: [
     ConfigModule.forRoot({ isGlobal: true }),
@@ -19,8 +21,7 @@ import { BootstrapProcessor } from './processors/bootstrap.processor';
       { name: 'status' },
     ),
   ],
-  providers: [
-    BootstrapProcessor,
-  ],
+  providers: [PrismaService, BootstrapProcessor],
+  exports: [PrismaService],
 })
-export class WorkerModule {}{}
+export class WorkerModule {}

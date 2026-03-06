@@ -48,7 +48,17 @@ export class DocumentParserController {
     @Param('id') bootstrapJobId: string,
     @Body() dto: ParseDocumentDto,
   ) {
+    // 从 bootstrapJob 获取 tenantId
+    const bootstrapJob = await this.parserService['prisma'].bootstrapJob.findUnique({
+      where: { id: bootstrapJobId },
+    });
+
+    if (!bootstrapJob) {
+      throw new Error('Bootstrap job not found');
+    }
+
     const parseJob = await this.parserService.createParseJob({
+      tenantId: bootstrapJob.tenantId,
       bootstrapJobId,
       ...dto,
     });

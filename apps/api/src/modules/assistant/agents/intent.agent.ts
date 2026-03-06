@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { ChatIntent } from '@uniflow/shared-types';
 import { LLMClientFactory, LLMMessage, buildSystemPrompt } from '@uniflow/agent-kernel';
 
@@ -50,6 +50,7 @@ Respond in JSON format:
 
 @Injectable()
 export class IntentAgent {
+  private readonly logger = new Logger(IntentAgent.name);
   private llmClient = LLMClientFactory.createFromEnv();
   private useLLM = process.env.USE_LLM_FOR_INTENT !== 'false'; // Default to true
 
@@ -92,7 +93,7 @@ export class IntentAgent {
         extractedEntities: result.entities || {},
       };
     } catch (error: any) {
-      console.error('LLM intent detection failed, falling back to rules:', error.message);
+      this.logger.warn(`LLM intent detection failed, falling back to rules: ${error.message}`);
       return this.detectIntentWithRules(message, context);
     }
   }

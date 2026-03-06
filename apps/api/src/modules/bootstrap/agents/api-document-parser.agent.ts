@@ -541,7 +541,8 @@ ${JSON.stringify(endpointSummaries, null, 2)}
 
       for (const [endpoint, methods] of Object.entries(paths)) {
         for (const [method, operation] of Object.entries(methods as any)) {
-          const requestBody = operation.requestBody?.content?.['application/json']?.schema;
+          const operationObj = operation as any;
+          const requestBody = operationObj.requestBody?.content?.['application/json']?.schema;
           if (requestBody?.properties) {
             for (const [fieldName, fieldSchema] of Object.entries(
               requestBody.properties,
@@ -575,7 +576,8 @@ ${JSON.stringify(endpointSummaries, null, 2)}
           // 将链接内容添加到字段定义中
           const methods = paths[link.endpoint];
           for (const [method, operation] of Object.entries(methods as any)) {
-            const requestBody = operation.requestBody?.content?.['application/json']?.schema;
+            const operationObj = operation as any;
+            const requestBody = operationObj.requestBody?.content?.['application/json']?.schema;
             if (requestBody?.properties?.[link.field]) {
               requestBody.properties[link.field]['x-options-data'] = linkContent;
               this.logger.log(`成功获取 ${link.endpoint}.${link.field} 的选项数据`);
@@ -667,6 +669,9 @@ ${JSON.stringify(endpointSummaries, null, 2)}
         parseTime: 0,
         llmModel: results[0]?.metadata.llmModel || 'claude-opus-4-6',
         llmTokens: 0,
+        totalEndpoints: 0,
+        businessEndpoints: 0,
+        filteredEndpoints: 0,
       },
     };
 

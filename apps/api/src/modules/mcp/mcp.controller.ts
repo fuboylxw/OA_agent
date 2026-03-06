@@ -69,7 +69,7 @@ export class MCPController {
   @ApiConsumes('multipart/form-data')
   @UseInterceptors(FileInterceptor('file'))
   async uploadApiFile(
-    @UploadedFile() file: Express.Multer.File,
+    @UploadedFile() file: any,
     @Body() body: {
       tenantId: string;
       connectorId: string;

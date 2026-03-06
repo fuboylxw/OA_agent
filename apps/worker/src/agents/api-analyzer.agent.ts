@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { BaseAgent, AgentContext, AgentConfig, LLMClientFactory, BaseLLMClient } from '@uniflow/agent-kernel';
 import { z } from 'zod';
 import axios from 'axios';
@@ -92,6 +93,7 @@ const SYSTEM_PROMPT = `你是 OA 系统 API 分析专家。你的任务是从 AP
 // ============================================================
 
 export class ApiAnalyzerAgent extends BaseAgent<ApiAnalyzerInput, ApiAnalyzerOutput> {
+  private readonly logger = new Logger(ApiAnalyzerAgent.name);
   private llmClient: BaseLLMClient;
 
   constructor() {
@@ -112,18 +114,18 @@ export class ApiAnalyzerAgent extends BaseAgent<ApiAnalyzerInput, ApiAnalyzerOut
     if (doc.modules && Array.isArray(doc.modules)) {
       // O2OA custom format: process in batches
       const batches = this.createBatches(doc.modules, 5);
-      console.log(`[API Analyzer] Processing ${doc.modules.length} modules in ${batches.length} batches`);
+      this.logger.log(`Processing ${doc.modules.length} modules in ${batches.length} batches`);
 
       for (let i = 0; i < batches.length; i++) {
         const batch = batches[i];
         const moduleNames = batch.map((m: any) => m.title || m.name).join(', ');
-        console.log(`[API Analyzer] Analyzing batch ${i + 1}/${batches.length}: ${moduleNames}`);
+        this.logger.log(`Analyzing batch ${i + 1}/${batches.length}: ${moduleNames}`);
 
         const batchProcesses = await this.analyzeBatch(batch, input.baseUrl);
         allProcesses.push(...batchProcesses);
 
         for (const bp of batchProcesses) {
-          console.log(`[API Analyzer] Identified: ${bp.processName} (${bp.processCode}) - ${bp.endpoints.length} endpoints`);
+          this.logger.log(`Identified: ${bp.processName} (${bp.processCode}) - ${bp.endpoints.length} endpoints`);
         }
       }
     } else if (doc.openapi || doc.swagger) {
@@ -133,7 +135,7 @@ export class ApiAnalyzerAgent extends BaseAgent<ApiAnalyzerInput, ApiAnalyzerOut
     }
 
     const totalEndpoints = allProcesses.reduce((sum, p) => sum + p.endpoints.length, 0);
-    console.log(`[API Analyzer] Total: ${allProcesses.length} business processes, ${totalEndpoints} endpoints`);
+    this.logger.log(`Total: ${allProcesses.length} business processes, ${totalEndpoints} endpoints`);
 
     return {
       processes: allProcesses,
@@ -195,7 +197,7 @@ ${JSON.stringify(moduleSummaries, null, 2)}
 
       return this.parseProcessesFromLLM(response.content, modules);
     } catch (error: any) {
-      console.error(`[API Analyzer] LLM analysis failed for batch:`, error.message);
+      this.logger.error(`LLM analysis failed for batch: ${error.message}`);
       return [];
     }
   }
@@ -237,7 +239,7 @@ ${JSON.stringify(chunk, null, 2)}`;
         const processes = this.parseProcessesFromLLM(response.content);
         allProcesses.push(...processes);
       } catch (error: any) {
-        console.error(`[API Analyzer] LLM analysis failed for OpenAPI chunk:`, error.message);
+        this.logger.error(`LLM analysis failed for OpenAPI chunk: ${error.message}`);
       }
     }
 
@@ -258,7 +260,7 @@ ${JSON.stringify(chunk, null, 2)}`;
     // Try to extract JSON array
     const arrayMatch = jsonStr.match(/\[[\s\S]*\]/);
     if (!arrayMatch) {
-      console.warn(`[API Analyzer] No JSON array found in LLM response`);
+      this.logger.warn(`No JSON array found in LLM response`);
       return [];
     }
 
@@ -288,7 +290,7 @@ ${JSON.stringify(chunk, null, 2)}`;
           })),
         }));
     } catch (error: any) {
-      console.error(`[API Analyzer] Failed to parse LLM JSON:`, error.message);
+      this.logger.error(`Failed to parse LLM JSON: ${error.message}`);
       return [];
     }
   }
@@ -321,10 +323,10 @@ ${JSON.stringify(chunk, null, 2)}`;
           });
           const reachable = response.status < 500;
           results.set(key, { reachable, statusCode: response.status });
-          console.log(`[API Analyzer] Validating: ${key}... ${reachable ? 'OK' : 'FAIL'} (${response.status})`);
+          this.logger.log(`Validating: ${key}... ${reachable ? 'OK' : 'FAIL'} (${response.status})`);
         } catch {
           results.set(key, { reachable: false });
-          console.log(`[API Analyzer] Validating: ${key}... UNREACHABLE`);
+          this.logger.log(`Validating: ${key}... UNREACHABLE`);
         }
       }
     }

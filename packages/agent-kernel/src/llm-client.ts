@@ -249,15 +249,37 @@ export class LLMClientFactory {
 
   static createFromEnv(): BaseLLMClient {
     const provider = (process.env.LLM_PROVIDER || 'openai') as LLMProvider;
-    const apiKey = process.env.OPENAI_API_KEY || process.env.ANTHROPIC_API_KEY || process.env.AZURE_OPENAI_API_KEY;
-    const baseURL = process.env.OPENAI_BASE_URL || process.env.ANTHROPIC_BASE_URL || process.env.AZURE_OPENAI_ENDPOINT;
-    const model = process.env.OPENAI_MODEL || process.env.ANTHROPIC_MODEL || 'gpt-4-turbo-preview';
+
+    const providerEnvMap: Record<string, { apiKey: string; baseURL: string; model: string }> = {
+      openai: {
+        apiKey: process.env.OPENAI_API_KEY || '',
+        baseURL: process.env.OPENAI_BASE_URL || '',
+        model: process.env.OPENAI_MODEL || 'gpt-4-turbo-preview',
+      },
+      anthropic: {
+        apiKey: process.env.ANTHROPIC_API_KEY || '',
+        baseURL: process.env.ANTHROPIC_BASE_URL || 'https://api.anthropic.com',
+        model: process.env.ANTHROPIC_MODEL || 'claude-sonnet-4-6',
+      },
+      'azure-openai': {
+        apiKey: process.env.AZURE_OPENAI_API_KEY || '',
+        baseURL: process.env.AZURE_OPENAI_ENDPOINT || '',
+        model: process.env.AZURE_OPENAI_MODEL || 'gpt-4',
+      },
+      ollama: {
+        apiKey: '',
+        baseURL: process.env.OLLAMA_BASE_URL || 'http://localhost:11434',
+        model: process.env.OLLAMA_MODEL || 'llama2',
+      },
+    };
+
+    const envConfig = providerEnvMap[provider] || providerEnvMap.openai;
 
     return this.create({
       provider,
-      apiKey,
-      baseURL,
-      model,
+      apiKey: envConfig.apiKey || undefined,
+      baseURL: envConfig.baseURL || undefined,
+      model: envConfig.model,
       temperature: parseFloat(process.env.LLM_TEMPERATURE || '0.7'),
       maxTokens: parseInt(process.env.LLM_MAX_TOKENS || '2000', 10),
     });
