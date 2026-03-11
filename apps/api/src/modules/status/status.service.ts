@@ -1,19 +1,27 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { PrismaService } from '../common/prisma.service';
 import { AuditService } from '../audit/audit.service';
-import { AdapterFactory } from '@uniflow/oa-adapters';
+import { AdapterRuntimeService } from '../adapter-runtime/adapter-runtime.service';
+import { buildStatusEventRemoteId } from '@uniflow/shared-types';
+import { mapExternalStatusToSubmissionStatus } from '../common/submission-status.util';
 
 @Injectable()
 export class StatusService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
+    private readonly adapterRuntimeService: AdapterRuntimeService,
   ) {}
 
   async queryStatus(submissionId: string, traceId: string) {
     const submission = await this.prisma.submission.findUnique({
       where: { id: submissionId },
       include: {
+        events: {
+          orderBy: { eventTime: 'desc' },
+          take: 20,
+        },
         statusRecords: {
           orderBy: { queriedAt: 'desc' },
           take: 20,
@@ -27,19 +35,78 @@ export class StatusService {
 
     // If we have an OA submission ID, query the OA system
     let oaStatus = null;
+    let effectiveStatus = submission.status;
+    let effectiveStatusRecords = submission.statusRecords;
+    let effectiveEvents = submission.events;
     if (submission.oaSubmissionId) {
-      const adapter = AdapterFactory.createMockAdapter('openapi', []);
+      const template = await this.prisma.processTemplate.findUnique({
+        where: { id: submission.templateId },
+      });
+      const adapter = template
+        ? await this.adapterRuntimeService.createAdapterForConnector(template.connectorId, [])
+        : null;
+      if (!adapter) {
+        throw new NotFoundException('Connector not found for submission');
+      }
       const result = await adapter.queryStatus(submission.oaSubmissionId);
       oaStatus = result;
+      const queriedAt = new Date();
+      const mappedStatus = mapExternalStatusToSubmissionStatus(result.status, submission.status);
+      const statusRecord = {
+        id: `status-${submission.id}-${queriedAt.getTime()}`,
+        submissionId: submission.id,
+        status: result.status,
+        statusDetail: result as any,
+        queriedAt,
+      };
+      const statusEvent = {
+        id: `event-${submission.id}-${queriedAt.getTime()}`,
+        tenantId: submission.tenantId,
+        submissionId: submission.id,
+        eventType: 'status_polled',
+        eventSource: 'oa_pull',
+        remoteEventId: buildStatusEventRemoteId(submission.oaSubmissionId, result as Record<string, any>),
+        eventTime: queriedAt,
+        status: result.status,
+        payload: result as any,
+        createdAt: queriedAt,
+      };
 
-      // Record status query
-      await this.prisma.submissionStatus.create({
+      const eventCreated = await this.createSubmissionEvent({
         data: {
+          tenantId: submission.tenantId,
           submissionId: submission.id,
+          eventType: 'status_polled',
+          eventSource: 'oa_pull',
+          remoteEventId: statusEvent.remoteEventId,
+          eventTime: queriedAt,
           status: result.status,
-          statusDetail: result as any,
+          payload: result as any,
         },
       });
+      if (eventCreated) {
+        await this.prisma.submissionStatus.create({
+          data: {
+            submissionId: submission.id,
+            status: result.status,
+            statusDetail: result as any,
+          },
+        });
+      }
+      await this.prisma.submission.update({
+        where: { id: submission.id },
+        data: {
+          status: mappedStatus,
+        },
+      });
+
+      effectiveStatus = mappedStatus;
+      effectiveStatusRecords = eventCreated
+        ? [statusRecord, ...submission.statusRecords]
+        : submission.statusRecords;
+      effectiveEvents = eventCreated
+        ? [statusEvent, ...submission.events]
+        : submission.events;
     }
 
     await this.auditService.createLog({
@@ -54,11 +121,16 @@ export class StatusService {
 
     return {
       submissionId: submission.id,
-      status: submission.status,
+      status: effectiveStatus,
       oaSubmissionId: submission.oaSubmissionId,
       oaStatus,
-      timeline: this.buildTimeline(submission),
-      statusRecords: submission.statusRecords,
+      timeline: this.buildTimeline({
+        ...submission,
+        status: effectiveStatus,
+        statusRecords: effectiveStatusRecords,
+        events: effectiveEvents,
+      }),
+      statusRecords: effectiveStatusRecords,
     };
   }
 
@@ -83,6 +155,9 @@ export class StatusService {
     const submission = await this.prisma.submission.findUnique({
       where: { id: submissionId },
       include: {
+        events: {
+          orderBy: { eventTime: 'asc' },
+        },
         statusRecords: {
           orderBy: { queriedAt: 'asc' },
         },
@@ -130,9 +205,36 @@ export class StatusService {
       }
     }
 
+    if (submission.events) {
+      for (const event of submission.events) {
+        timeline.push({
+          timestamp: event.eventTime,
+          status: event.status,
+          description: `事件: ${event.eventType}`,
+        });
+      }
+    }
+
     // Sort by timestamp
     timeline.sort((a, b) => new Date(a.timestamp).getTime() - new Date(b.timestamp).getTime());
 
     return timeline;
+  }
+  private async createSubmissionEvent(input: {
+    data: Prisma.SubmissionEventUncheckedCreateInput;
+  }) {
+    try {
+      await this.prisma.submissionEvent.create(input);
+      return true;
+    } catch (error) {
+      if (this.isDuplicateSubmissionEventError(error)) {
+        return false;
+      }
+      throw error;
+    }
+  }
+
+  private isDuplicateSubmissionEventError(error: unknown) {
+    return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
   }
 }

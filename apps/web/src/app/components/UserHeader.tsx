@@ -23,7 +23,11 @@ export default function UserHeader() {
 
     setDisplayName(name || userId);
     setInitial((name || userId).charAt(0).toUpperCase());
-    setRoles(rolesStr ? JSON.parse(rolesStr) : ['user']);
+    try {
+      setRoles(rolesStr ? JSON.parse(rolesStr) : ['user']);
+    } catch {
+      setRoles(['user']);
+    }
   }, [router]);
 
   useEffect(() => {

@@ -16,5 +16,11 @@ export default async function SubmissionsPage() {
     submissions = await res.json();
   } catch { /* ignore */ }
 
-  return <SubmissionsContent initialSubmissions={submissions} />;
+  return (
+    <SubmissionsContent
+      initialSubmissions={submissions}
+      tenantId={tenantId}
+      userId={userId}
+    />
+  );
 }

@@ -1,8 +1,35 @@
-import { Controller, Post, Body, Get, Param, Query, Delete, HttpException, HttpStatus, Logger } from '@nestjs/common';
-import { ApiTags, ApiOperation, ApiResponse } from '@nestjs/swagger';
+import { Controller, Post, Body, Get, Param, Query, Delete, HttpException, HttpStatus, Logger, UseInterceptors, UploadedFiles } from '@nestjs/common';
+import { ApiTags, ApiOperation, ApiResponse, ApiConsumes } from '@nestjs/swagger';
+import { FilesInterceptor } from '@nestjs/platform-express';
+import { diskStorage } from 'multer';
+import { extname, join } from 'path';
+import { existsSync, mkdirSync } from 'fs';
 import { AssistantService } from './assistant.service';
-import { IsString, IsOptional } from 'class-validator';
+import { IsString, IsOptional, IsArray } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+
+// 上传目录
+const UPLOAD_DIR = join(process.cwd(), 'uploads', 'chat-attachments');
+if (!existsSync(UPLOAD_DIR)) {
+  mkdirSync(UPLOAD_DIR, { recursive: true });
+}
+
+class ChatAttachment {
+  @ApiProperty({ description: '文件ID' })
+  fileId: string;
+
+  @ApiProperty({ description: '原始文件名' })
+  fileName: string;
+
+  @ApiProperty({ description: '文件大小（字节）' })
+  fileSize: number;
+
+  @ApiProperty({ description: '文件MIME类型' })
+  mimeType: string;
+
+  @ApiProperty({ description: '文件存储路径' })
+  filePath: string;
+}
 
 class ChatDto {
   @ApiProperty({ required: false, description: '会话ID，不提供则创建新会话' })
@@ -23,6 +50,11 @@ class ChatDto {
   @IsOptional()
   @IsString()
   tenantId?: string;
+
+  @ApiProperty({ required: false, description: '附件列表' })
+  @IsOptional()
+  @IsArray()
+  attachments?: ChatAttachment[];
 }
 
 class ChatResponseDto {
@@ -90,6 +122,7 @@ export class AssistantController {
         userId,
         sessionId: dto.sessionId,
         message: dto.message,
+        attachments: dto.attachments,
       });
     } catch (error: any) {
       this.logger.error(`Chat error: ${error.message}`);
@@ -206,5 +239,44 @@ export class AssistantController {
         HttpStatus.INTERNAL_SERVER_ERROR
       );
     }
+  }
+
+  @Post('upload')
+  @ApiOperation({
+    summary: '上传聊天附件',
+    description: '上传文件作为聊天附件（如报销发票、请假证明等），最多5个文件，单文件最大10MB'
+  })
+  @ApiConsumes('multipart/form-data')
+  @UseInterceptors(FilesInterceptor('files', 5, {
+    storage: diskStorage({
+      destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
+      filename: (_req, file, cb) => {
+        const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
+        const ext = extname(file.originalname);
+        cb(null, `${uniqueSuffix}${ext}`);
+      },
+    }),
+    limits: { fileSize: 10 * 1024 * 1024 },
+    fileFilter: (_req, file, cb) => {
+      const allowed = /\.(jpg|jpeg|png|gif|pdf|doc|docx|xls|xlsx|ppt|pptx|txt|zip|rar)$/i;
+      if (allowed.test(extname(file.originalname))) {
+        cb(null, true);
+      } else {
+        cb(new HttpException('不支持的文件类型', HttpStatus.BAD_REQUEST), false);
+      }
+    },
+  }))
+  async uploadFiles(@UploadedFiles() files: Express.Multer.File[]) {
+    if (!files || files.length === 0) {
+      throw new HttpException('请选择要上传的文件', HttpStatus.BAD_REQUEST);
+    }
+
+    return files.map(file => ({
+      fileId: file.filename.replace(extname(file.filename), ''),
+      fileName: file.originalname,
+      fileSize: file.size,
+      mimeType: file.mimetype,
+      filePath: file.path,
+    }));
   }
 }

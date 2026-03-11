@@ -7,6 +7,7 @@ import { RuleModule } from '../rule/rule.module';
 import { PermissionModule } from '../permission/permission.module';
 import { ProcessLibraryModule } from '../process-library/process-library.module';
 import { ConnectorModule } from '../connector/connector.module';
+import { AdapterRuntimeModule } from '../adapter-runtime/adapter-runtime.module';
 
 @Module({
   imports: [
@@ -16,6 +17,7 @@ import { ConnectorModule } from '../connector/connector.module';
     PermissionModule,
     ProcessLibraryModule,
     ConnectorModule,
+    AdapterRuntimeModule,
   ],
   controllers: [SubmissionController],
   providers: [SubmissionService],

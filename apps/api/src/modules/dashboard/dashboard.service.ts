@@ -1,5 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
+import { ACTIVE_SUBMISSION_STATUSES } from '../common/submission-status.util';
 
 @Injectable()
 export class DashboardService {
@@ -38,7 +39,7 @@ export class DashboardService {
       }),
       this.prisma.connector.count({ where: { tenantId } }),
       this.prisma.submission.count({
-        where: { tenantId, userId, status: { in: ['pending', 'submitted'] } },
+        where: { tenantId, userId, status: { in: [...ACTIVE_SUBMISSION_STATUSES] } },
       }),
       this.prisma.connector.findMany({
         where: { tenantId },

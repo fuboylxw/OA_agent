@@ -15,6 +15,7 @@ describe('E2E: Bootstrap Flow', () => {
 
     app = moduleFixture.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+    app.setGlobalPrefix('api/v1');
     await app.init();
 
     prisma = app.get<PrismaService>(PrismaService);
@@ -91,6 +92,7 @@ describe('E2E: Chat to Submit Flow', () => {
 
     app = moduleFixture.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+    app.setGlobalPrefix('api/v1');
     await app.init();
   });
 
@@ -187,6 +189,7 @@ describe('E2E: Submission Actions', () => {
 
     app = moduleFixture.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+    app.setGlobalPrefix('api/v1');
     await app.init();
 
     // Create a test submission

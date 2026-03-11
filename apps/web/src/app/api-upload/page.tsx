@@ -1,7 +1,16 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Upload, FileText, CheckCircle, XCircle, Loader2 } from 'lucide-react';
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+
+interface ConnectorOption {
+  id: string;
+  name: string;
+  baseUrl: string;
+  status: string;
+}
 
 interface UploadResult {
   uploadId: string;
@@ -16,6 +25,9 @@ interface UploadResult {
 
 export default function ApiUploadPage() {
   const [file, setFile] = useState<File | null>(null);
+  const [tenantId, setTenantId] = useState('');
+  const [connectorId, setConnectorId] = useState('');
+  const [connectors, setConnectors] = useState<ConnectorOption[]>([]);
   const [docType, setDocType] = useState<'openapi' | 'swagger' | 'postman' | 'custom'>('openapi');
   const [oaUrl, setOaUrl] = useState('');
   const [authType, setAuthType] = useState('apikey');
@@ -23,8 +35,72 @@ export default function ApiUploadPage() {
   const [autoValidate, setAutoValidate] = useState(true);
   const [autoGenerateMcp, setAutoGenerateMcp] = useState(true);
   const [uploading, setUploading] = useState(false);
+  const [loadingConnectors, setLoadingConnectors] = useState(false);
   const [result, setResult] = useState<UploadResult | null>(null);
   const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const storedTenantId = localStorage.getItem('tenantId') || '';
+    setTenantId(storedTenantId);
+  }, []);
+
+  useEffect(() => {
+    if (!tenantId) {
+      setConnectors([]);
+      setConnectorId('');
+      setError(null);
+      return;
+    }
+
+    void fetchConnectors(tenantId);
+  }, [tenantId]);
+
+  useEffect(() => {
+    if (!connectorId || oaUrl) {
+      return;
+    }
+
+    const connector = connectors.find((item) => item.id === connectorId);
+    if (connector?.baseUrl) {
+      setOaUrl(connector.baseUrl);
+    }
+  }, [connectorId, connectors, oaUrl]);
+
+  const fetchConnectors = async (currentTenantId: string) => {
+    setLoadingConnectors(true);
+
+    try {
+      setError(null);
+      const response = await fetch(
+        `${API_URL}/api/v1/connectors?tenantId=${encodeURIComponent(currentTenantId)}`,
+      );
+
+      if (!response.ok) {
+        throw new Error('连接器加载失败');
+      }
+
+      const data = await response.json();
+      const connectorList = Array.isArray(data) ? data : [];
+
+      setConnectors(connectorList);
+      setConnectorId((currentConnectorId) => {
+        if (connectorList.some((item) => item.id === currentConnectorId)) {
+          return currentConnectorId;
+        }
+        return connectorList[0]?.id || '';
+      });
+    } catch (err: any) {
+      setConnectors([]);
+      setConnectorId('');
+      setError(err.message || '连接器加载失败');
+    } finally {
+      setLoadingConnectors(false);
+    }
+  };
 
   const handleFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     if (e.target.files && e.target.files[0]) {
@@ -38,8 +114,26 @@ export default function ApiUploadPage() {
       return;
     }
 
+    if (!tenantId) {
+      setError('请输入租户 ID');
+      return;
+    }
+
+    if (!connectorId) {
+      setError('请选择连接器');
+      return;
+    }
+
     if (!oaUrl) {
       setError('请输入OA系统URL');
+      return;
+    }
+
+    let parsedAuthConfig = {};
+    try {
+      parsedAuthConfig = authConfig ? JSON.parse(authConfig) : {};
+    } catch {
+      setError('认证配置不是合法 JSON');
       return;
     }
 
@@ -50,24 +144,25 @@ export default function ApiUploadPage() {
     try {
       const formData = new FormData();
       formData.append('file', file);
-      formData.append('tenantId', 'default-tenant'); // 从上下文获取
-      formData.append('connectorId', 'default-connector'); // 从选择器获取
+      formData.append('tenantId', tenantId);
+      formData.append('connectorId', connectorId);
       formData.append('docType', docType);
       formData.append('oaUrl', oaUrl);
       formData.append('authConfig', JSON.stringify({
         type: authType,
-        ...JSON.parse(authConfig || '{}'),
+        ...parsedAuthConfig,
       }));
       formData.append('autoValidate', autoValidate.toString());
       formData.append('autoGenerateMcp', autoGenerateMcp.toString());
 
-      const response = await fetch('/api/mcp/upload-api', {
+      const response = await fetch(`${API_URL}/api/v1/mcp/upload-api`, {
         method: 'POST',
         body: formData,
       });
 
       if (!response.ok) {
-        throw new Error('上传失败');
+        const payload = await response.json().catch(() => null);
+        throw new Error(payload?.message || '上传失败');
       }
 
       const data = await response.json();
@@ -109,6 +204,50 @@ export default function ApiUploadPage() {
                 </div>
               )}
             </div>
+          </div>
+
+          <div>
+            <label className="block text-sm font-medium mb-2">租户 ID</label>
+            <input
+              type="text"
+              value={tenantId}
+              onChange={(e) => setTenantId(e.target.value)}
+              placeholder="请输入租户 ID"
+              className="w-full px-3 py-2 border border-gray-300 rounded-md"
+            />
+          </div>
+
+          <div>
+            <div className="flex items-center justify-between mb-2">
+              <label className="block text-sm font-medium">连接器</label>
+              <button
+                type="button"
+                onClick={() => void fetchConnectors(tenantId)}
+                disabled={!tenantId || loadingConnectors}
+                className="text-sm text-blue-600 disabled:text-gray-400"
+              >
+                {loadingConnectors ? '加载中...' : '刷新列表'}
+              </button>
+            </div>
+            <select
+              value={connectorId}
+              onChange={(e) => setConnectorId(e.target.value)}
+              disabled={!tenantId || loadingConnectors || connectors.length === 0}
+              className="w-full px-3 py-2 border border-gray-300 rounded-md disabled:bg-gray-100"
+            >
+              <option value="">
+                {tenantId ? '请选择连接器' : '请先输入租户 ID'}
+              </option>
+              {connectors.map((connector) => (
+                <option key={connector.id} value={connector.id}>
+                  {connector.name}
+                  {connector.status !== 'active' ? '（停用）' : ''}
+                </option>
+              ))}
+            </select>
+            {tenantId && !loadingConnectors && connectors.length === 0 && (
+              <p className="mt-2 text-sm text-amber-600">当前租户下没有可用连接器。</p>
+            )}
           </div>
 
           {/* 文档类型 */}

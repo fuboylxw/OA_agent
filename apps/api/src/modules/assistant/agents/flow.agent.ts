@@ -1,4 +1,5 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
+import { LLMClientFactory, LLMMessage } from '@uniflow/agent-kernel';
 
 interface FlowInfo {
   processCode: string;
@@ -16,8 +17,38 @@ interface FlowMatchResult {
   clarificationQuestion?: string;
 }
 
+const FLOW_MATCH_SYSTEM_PROMPT = `你是一个 OA 办公系统的流程匹配助手。
+
+## 任务
+根据用户的自然语言消息，从可用流程列表中匹配最合适的流程。
+
+## 规则
+1. 理解用户意图的语义，不要只做关键词匹配
+2. 用户可能用口语化、简略的方式表达，例如"请个假"="请假申请"，"报个账"="财务报销"，"申请项目"="项目申请"
+3. 如果能明确匹配到一个流程，返回该流程
+4. 如果用户表达模糊，可能匹配多个流程，返回 needsClarification=true 并给出澄清问题
+5. 如果完全无法匹配任何流程，返回 needsClarification=true 并列出可用流程供用户选择
+
+## 输出格式（JSON）
+匹配成功：
+{
+  "matched": true,
+  "processCode": "LEAVE_REQUEST",
+  "processName": "请假申请",
+  "confidence": 0.95
+}
+
+需要澄清：
+{
+  "matched": false,
+  "clarificationQuestion": "您是想办理"请假申请"还是"财务报销"？"
+}`;
+
 @Injectable()
 export class FlowAgent {
+  private readonly logger = new Logger(FlowAgent.name);
+  private llmClient = LLMClientFactory.createFromEnv();
+
   async matchFlow(
     intent: string,
     message: string,
@@ -30,89 +61,98 @@ export class FlowAgent {
       };
     }
 
-    // Score each flow based on keyword matching
-    const scored = availableFlows.map(flow => {
-      let score = 0;
-      const lowerMessage = message.toLowerCase();
-      const lowerName = flow.processName.toLowerCase();
-      const lowerCode = flow.processCode.toLowerCase();
-
-      // Exact name match
-      if (lowerMessage.includes(lowerName)) {
-        score += 1.0;
-      }
-
-      // Code match
-      if (lowerMessage.includes(lowerCode)) {
-        score += 0.8;
-      }
-
-      // Word-level substring matching (split name into meaningful segments)
-      const nameSegments = lowerName.split(/[\s_\-\/]+/).filter(s => s.length >= 2);
-      let matchedSegments = 0;
-      for (const segment of nameSegments) {
-        if (lowerMessage.includes(segment)) {
-          matchedSegments++;
-        }
-      }
-      if (nameSegments.length > 0) {
-        score += (matchedSegments / nameSegments.length) * 0.5;
-      }
-
-      // Category matching
-      if (flow.processCategory && lowerMessage.includes(flow.processCategory.toLowerCase())) {
-        score += 0.3;
-      }
-
-      // Common keyword associations
-      const associations: Record<string, string[]> = {
-        travel_expense: ['差旅', '报销', '出差', '机票', '酒店', '交通'],
-        leave_request: ['请假', '休假', '年假', '病假', '事假'],
-        purchase_request: ['采购', '购买', '物品', '设备'],
-        meeting_room: ['会议室', '预约', '会议', '开会'],
-        business_trip: ['出差', '差旅', '外出'],
-      };
-
-      const keywords = associations[flow.processCode] || [];
-      for (const keyword of keywords) {
-        if (message.includes(keyword)) {
-          score += 0.6;
-          break;
-        }
-      }
-
-      return { flow, score };
-    });
-
-    // Sort by score
-    scored.sort((a, b) => b.score - a.score);
-
-    const best = scored[0];
-
-    // If confidence is too low, ask for clarification
-    if (best.score < 0.3) {
-      const suggestions = scored.slice(0, 3).map(s => s.flow.processName);
-      return {
-        needsClarification: true,
-        clarificationQuestion: `我不太确定您想办理哪个流程。您是想办理以下哪个？\n${suggestions.map((s, i) => `${i + 1}. ${s}`).join('\n')}`,
-      };
+    try {
+      return await this.matchFlowWithLLM(message, availableFlows);
+    } catch (error: any) {
+      this.logger.warn(`LLM 流程匹配失败，回退到简单匹配: ${error.message}`);
+      return this.matchFlowFallback(message, availableFlows);
     }
+  }
 
-    // If top two are very close, ask for clarification
-    if (scored.length > 1 && scored[1].score > best.score * 0.8) {
-      return {
-        needsClarification: true,
-        clarificationQuestion: `您是想办理"${best.flow.processName}"还是"${scored[1].flow.processName}"？`,
-      };
+  private async matchFlowWithLLM(
+    message: string,
+    availableFlows: FlowInfo[],
+  ): Promise<FlowMatchResult> {
+    const flowList = availableFlows
+      .map(f => `- ${f.processCode} | ${f.processName} | 分类: ${f.processCategory}`)
+      .join('\n');
+
+    const userPrompt = `可用流程列表：
+${flowList}
+
+用户消息："${message}"
+
+请判断用户想办理哪个流程，返回 JSON。`;
+
+    const messages: LLMMessage[] = [
+      { role: 'system', content: FLOW_MATCH_SYSTEM_PROMPT },
+      { role: 'user', content: userPrompt },
+    ];
+
+    const response = await this.llmClient.chat(messages);
+
+    let jsonStr = response.content.trim();
+    if (jsonStr.startsWith('```')) {
+      jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
+    }
+    const result = JSON.parse(jsonStr);
+
+    if (result.matched && result.processCode) {
+      const flow = availableFlows.find(f => f.processCode === result.processCode);
+      if (flow) {
+        this.logger.log(`LLM 匹配流程: ${flow.processName} (${flow.processCode}), 置信度: ${result.confidence}`);
+        return {
+          matchedFlow: {
+            processCode: flow.processCode,
+            processName: flow.processName,
+            confidence: result.confidence || 0.9,
+          },
+          needsClarification: false,
+        };
+      }
     }
 
     return {
-      matchedFlow: {
-        processCode: best.flow.processCode,
-        processName: best.flow.processName,
-        confidence: Math.min(best.score, 1.0),
-      },
-      needsClarification: false,
+      needsClarification: true,
+      clarificationQuestion: result.clarificationQuestion
+        || `请问您想办理哪个流程？\n${availableFlows.map((f, i) => `${i + 1}. ${f.processName}`).join('\n')}`,
+    };
+  }
+
+  /**
+   * LLM 不可用时的简单回退匹配
+   */
+  private matchFlowFallback(message: string, availableFlows: FlowInfo[]): FlowMatchResult {
+    for (const flow of availableFlows) {
+      const name = flow.processName;
+      // 消息包含流程名，或流程名中的任意两个连续字出现在消息中
+      if (message.includes(name)) {
+        return {
+          matchedFlow: {
+            processCode: flow.processCode,
+            processName: flow.processName,
+            confidence: 0.9,
+          },
+          needsClarification: false,
+        };
+      }
+      for (let i = 0; i <= name.length - 2; i++) {
+        if (message.includes(name.substring(i, i + 2))) {
+          return {
+            matchedFlow: {
+              processCode: flow.processCode,
+              processName: flow.processName,
+              confidence: 0.6,
+            },
+            needsClarification: false,
+          };
+        }
+      }
+    }
+
+    return {
+      needsClarification: true,
+      clarificationQuestion: `请问您想办理哪个流程？\n${availableFlows.map((f, i) => `${i + 1}. ${f.processName}`).join('\n')}`,
     };
   }
 }

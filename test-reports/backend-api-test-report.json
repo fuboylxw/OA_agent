@@ -1,10 +1,10 @@
 {
-  "timestamp": "2026-03-05T07:41:49.126Z",
+  "timestamp": "2026-03-09T06:40:00.786Z",
   "summary": {
-    "total": 7,
-    "success": 6,
-    "failed": 1,
-    "successRate": 85.71
+    "total": 8,
+    "success": 8,
+    "failed": 0,
+    "successRate": 100
   },
   "results": [
     {
@@ -12,36 +12,299 @@
       "method": "GET",
       "status": "success",
       "statusCode": 200,
-      "responseTime": 29,
+      "responseTime": 16,
       "data": {
         "status": "ok",
-        "timestamp": "2026-03-05T07:41:49.023Z",
+        "timestamp": "2026-03-09T06:39:50.570Z",
         "service": "uniflow-oa-api"
       }
     },
     {
       "endpoint": "API上传 (JSON)",
       "method": "POST",
-      "status": "failed",
-      "responseTime": 37,
-      "statusCode": 500,
-      "error": "Request failed with status code 500"
+      "status": "success",
+      "statusCode": 201,
+      "responseTime": 10181,
+      "data": {
+        "uploadId": "upload-1773038400753",
+        "totalEndpoints": 3,
+        "workflowEndpoints": 2,
+        "validatedEndpoints": 0,
+        "generatedMcpTools": 2,
+        "workflowApis": [
+          {
+            "path": "/leave/submit",
+            "method": "POST",
+            "description": "提交请假申请",
+            "workflowType": "leave_request",
+            "workflowCategory": "请假",
+            "confidence": 0.98,
+            "reason": "端点用于提交请假申请，属于员工日常办公业务的流程发起操作（提交/申请），符合办事流程接口特征。",
+            "parameters": [],
+            "requestBody": {
+              "type": "object",
+              "required": [
+                "startDate",
+                "endDate",
+                "reason"
+              ],
+              "properties": {
+                "startDate": {
+                  "type": "string",
+                  "format": "date"
+                },
+                "endDate": {
+                  "type": "string",
+                  "format": "date"
+                },
+                "reason": {
+                  "type": "string"
+                },
+                "leaveType": {
+                  "type": "string"
+                }
+              }
+            },
+            "responses": {
+              "200": {
+                "description": "Success"
+              }
+            }
+          },
+          {
+            "path": "/expense/submit",
+            "method": "POST",
+            "description": "提交报销申请",
+            "workflowType": "expense_claim",
+            "workflowCategory": "报销",
+            "confidence": 0.98,
+            "reason": "端点用于提交报销申请，属于员工日常办公业务的流程发起操作（提交/申请），符合办事流程接口特征。",
+            "parameters": [],
+            "requestBody": {
+              "type": "object",
+              "required": [
+                "amount",
+                "category"
+              ],
+              "properties": {
+                "amount": {
+                  "type": "number"
+                },
+                "category": {
+                  "type": "string"
+                },
+                "description": {
+                  "type": "string"
+                }
+              }
+            },
+            "responses": {
+              "200": {
+                "description": "Success"
+              }
+            }
+          }
+        ],
+        "validationResults": [],
+        "mcpTools": [
+          {
+            "id": "dc5097d9-3f97-41b9-bafc-d30338cdd7be",
+            "tenantId": "8ac5d38e-08ea-4fcd-b976-2ccb3df9a82c",
+            "connectorId": "db06eea0-f7a2-4145-8abc-b804461b8b17",
+            "toolName": "leave_request_submit",
+            "toolDescription": "提交请假申请",
+            "toolSchema": {
+              "type": "object",
+              "required": [
+                "startDate",
+                "endDate",
+                "reason"
+              ],
+              "properties": {
+                "reason": {
+                  "type": "string",
+                  "description": "reason"
+                },
+                "endDate": {
+                  "type": "string",
+                  "description": "endDate"
+                },
+                "leaveType": {
+                  "type": "string",
+                  "description": "leaveType"
+                },
+                "startDate": {
+                  "type": "string",
+                  "description": "startDate"
+                }
+              }
+            },
+            "apiEndpoint": "/leave/submit",
+            "httpMethod": "POST",
+            "headers": {
+              "X-API-Key": "{{apiKey}}",
+              "Content-Type": "application/json"
+            },
+            "bodyTemplate": {
+              "reason": "{{reason}}",
+              "endDate": "{{endDate}}",
+              "leaveType": "{{leaveType}}",
+              "startDate": "{{startDate}}"
+            },
+            "paramMapping": {
+              "reason": "reason",
+              "endDate": "endDate",
+              "leaveType": "leaveType",
+              "startDate": "startDate"
+            },
+            "responseMapping": {
+              "code": "response.code",
+              "data": "response.data",
+              "message": "response.message",
+              "success": "response.success"
+            },
+            "flowCode": "leave_request",
+            "category": "submit",
+            "enabled": true,
+            "testInput": {
+              "reason": "test_value",
+              "endDate": "test_value",
+              "startDate": "test_value"
+            },
+            "testOutput": null,
+            "createdAt": "2026-03-09T06:20:30.624Z",
+            "updatedAt": "2026-03-09T06:40:00.748Z"
+          },
+          {
+            "id": "494b314c-5834-44ff-a89b-2ab96e4de333",
+            "tenantId": "8ac5d38e-08ea-4fcd-b976-2ccb3df9a82c",
+            "connectorId": "db06eea0-f7a2-4145-8abc-b804461b8b17",
+            "toolName": "expense_claim_submit",
+            "toolDescription": "提交报销申请",
+            "toolSchema": {
+              "type": "object",
+              "required": [
+                "amount",
+                "category"
+              ],
+              "properties": {
+                "amount": {
+                  "type": "number",
+                  "description": "amount"
+                },
+                "category": {
+                  "type": "string",
+                  "description": "category"
+                },
+                "description": {
+                  "type": "string",
+                  "description": "description"
+                }
+              }
+            },
+            "apiEndpoint": "/expense/submit",
+            "httpMethod": "POST",
+            "headers": {
+              "X-API-Key": "{{apiKey}}",
+              "Content-Type": "application/json"
+            },
+            "bodyTemplate": {
+              "amount": "{{amount}}",
+              "category": "{{category}}",
+              "description": "{{description}}"
+            },
+            "paramMapping": {
+              "amount": "amount",
+              "category": "category",
+              "description": "description"
+            },
+            "responseMapping": {
+              "code": "response.code",
+              "data": "response.data",
+              "message": "response.message",
+              "success": "response.success"
+            },
+            "flowCode": "expense_claim",
+            "category": "submit",
+            "enabled": true,
+            "testInput": {
+              "amount": 100,
+              "category": "test_value"
+            },
+            "testOutput": null,
+            "createdAt": "2026-03-09T06:38:23.864Z",
+            "updatedAt": "2026-03-09T06:40:00.752Z"
+          }
+        ]
+      }
     },
     {
       "endpoint": "获取上传历史",
       "method": "GET",
       "status": "success",
       "statusCode": 200,
-      "responseTime": 48,
-      "data": []
+      "responseTime": 6,
+      "data": [
+        {
+          "id": "5ef6a7c7-4563-4604-81f5-2592f28063fa",
+          "processCode": "expense_claim",
+          "processName": "提交报销申请",
+          "processCategory": "报销",
+          "status": "draft",
+          "falLevel": "F1",
+          "uiHints": {
+            "apiPath": "/expense/submit",
+            "apiMethod": "POST",
+            "confidence": 0.98,
+            "validationResult": null
+          },
+          "createdAt": "2026-03-09T06:38:23.734Z",
+          "updatedAt": "2026-03-09T06:40:00.736Z"
+        },
+        {
+          "id": "52978792-ca8e-4480-8a5b-34e961e1be73",
+          "processCode": "leave_request",
+          "processName": "提交请假申请",
+          "processCategory": "请假",
+          "status": "published",
+          "falLevel": "F2",
+          "uiHints": {
+            "apiPath": "/leave/submit",
+            "apiMethod": "POST",
+            "confidence": 0.98,
+            "validationResult": null
+          },
+          "createdAt": "2026-03-09T06:20:30.621Z",
+          "updatedAt": "2026-03-09T06:40:00.727Z"
+        }
+      ]
     },
     {
       "endpoint": "列出MCP工具",
       "method": "GET",
       "status": "success",
       "statusCode": 200,
-      "responseTime": 5,
-      "data": []
+      "responseTime": 2,
+      "data": [
+        {
+          "id": "494b314c-5834-44ff-a89b-2ab96e4de333",
+          "toolName": "expense_claim_submit",
+          "toolDescription": "提交报销申请",
+          "category": "submit",
+          "flowCode": "expense_claim",
+          "enabled": true,
+          "createdAt": "2026-03-09T06:38:23.864Z"
+        },
+        {
+          "id": "dc5097d9-3f97-41b9-bafc-d30338cdd7be",
+          "toolName": "leave_request_submit",
+          "toolDescription": "提交请假申请",
+          "category": "submit",
+          "flowCode": "leave_request",
+          "enabled": true,
+          "createdAt": "2026-03-09T06:20:30.624Z"
+        }
+      ]
     },
     {
       "endpoint": "按分类查询MCP工具",
@@ -49,23 +312,910 @@
       "status": "success",
       "statusCode": 200,
       "responseTime": 2,
-      "data": []
+      "data": [
+        {
+          "id": "494b314c-5834-44ff-a89b-2ab96e4de333",
+          "toolName": "expense_claim_submit",
+          "toolDescription": "提交报销申请",
+          "category": "submit",
+          "flowCode": "expense_claim",
+          "enabled": true,
+          "createdAt": "2026-03-09T06:38:23.864Z"
+        },
+        {
+          "id": "dc5097d9-3f97-41b9-bafc-d30338cdd7be",
+          "toolName": "leave_request_submit",
+          "toolDescription": "提交请假申请",
+          "category": "submit",
+          "flowCode": "leave_request",
+          "enabled": true,
+          "createdAt": "2026-03-09T06:20:30.624Z"
+        }
+      ]
+    },
+    {
+      "endpoint": "获取MCP工具详情",
+      "method": "GET",
+      "status": "success",
+      "statusCode": 200,
+      "responseTime": 4,
+      "data": {
+        "id": "494b314c-5834-44ff-a89b-2ab96e4de333",
+        "tenantId": "8ac5d38e-08ea-4fcd-b976-2ccb3df9a82c",
+        "connectorId": "db06eea0-f7a2-4145-8abc-b804461b8b17",
+        "toolName": "expense_claim_submit",
+        "toolDescription": "提交报销申请",
+        "toolSchema": {
+          "type": "object",
+          "required": [
+            "amount",
+            "category"
+          ],
+          "properties": {
+            "amount": {
+              "type": "number",
+              "description": "amount"
+            },
+            "category": {
+              "type": "string",
+              "description": "category"
+            },
+            "description": {
+              "type": "string",
+              "description": "description"
+            }
+          }
+        },
+        "apiEndpoint": "/expense/submit",
+        "httpMethod": "POST",
+        "headers": {
+          "X-API-Key": "{{apiKey}}",
+          "Content-Type": "application/json"
+        },
+        "bodyTemplate": {
+          "amount": "{{amount}}",
+          "category": "{{category}}",
+          "description": "{{description}}"
+        },
+        "paramMapping": {
+          "amount": "amount",
+          "category": "category",
+          "description": "description"
+        },
+        "responseMapping": {
+          "code": "response.code",
+          "data": "response.data",
+          "message": "response.message",
+          "success": "response.success"
+        },
+        "flowCode": "expense_claim",
+        "category": "submit",
+        "enabled": true,
+        "testInput": {
+          "amount": 100,
+          "category": "test_value"
+        },
+        "testOutput": null,
+        "createdAt": "2026-03-09T06:38:23.864Z",
+        "updatedAt": "2026-03-09T06:40:00.752Z",
+        "connector": {
+          "id": "db06eea0-f7a2-4145-8abc-b804461b8b17",
+          "tenantId": "8ac5d38e-08ea-4fcd-b976-2ccb3df9a82c",
+          "name": "test-connector",
+          "oaType": "openapi",
+          "oaVendor": "Test OA",
+          "oaVersion": "1.0.0",
+          "baseUrl": "https://test-oa.example.com/api",
+          "authType": "apikey",
+          "authConfig": {
+            "type": "apikey",
+            "token": "test-api-key-123",
+            "headerName": "X-API-Key"
+          },
+          "healthCheckUrl": "https://test-oa.example.com/health",
+          "oclLevel": "OCL3",
+          "falLevel": "F2",
+          "status": "active",
+          "lastHealthCheck": null,
+          "createdAt": "2026-03-09T06:18:33.039Z",
+          "updatedAt": "2026-03-09T06:20:30.618Z"
+        }
+      }
     },
     {
       "endpoint": "查询流程库",
       "method": "GET",
       "status": "success",
       "statusCode": 200,
-      "responseTime": 2,
-      "data": []
+      "responseTime": 8,
+      "data": [
+        {
+          "id": "e17ebf20-f0ae-4997-aa8a-c1369d9972e9",
+          "tenantId": "8ac5d38e-08ea-4fcd-b976-2ccb3df9a82c",
+          "connectorId": "be029ad5-126e-49ff-aa0e-db29220d2fee",
+          "remoteProcessId": null,
+          "processCode": "LEAVE_REQUEST",
+          "processName": "请假申请",
+          "processCategory": "人事管理",
+          "description": "用于教师、行政人员请假审批与备案。",
+          "version": 1,
+          "status": "published",
+          "falLevel": "F3",
+          "sourceHash": null,
+          "sourceVersion": null,
+          "reviewStatus": "approved",
+          "changeSummary": null,
+          "supersedesId": null,
+          "schema": {
+            "fields": [
+              {
+                "options": [
+                  {
+                    "label": "事假",
+                    "value": "personal"
+                  },
+                  {
+                    "label": "病假",
+                    "value": "sick"
+                  },
+                  {
+                    "label": "调休",
+                    "value": "compensatory"
+                  }
+                ],
+                "required": true,
+                "fieldCode": "leave_type",
+                "fieldName": "请假类型",
+                "fieldType": "select",
+                "sourceKey": "leaveType",
+                "confidence": 0.99
+              },
+              {
+                "required": true,
+                "fieldCode": "start_date",
+                "fieldName": "开始日期",
+                "fieldType": "date",
+                "sourceKey": "startDate",
+                "confidence": 0.99
+              },
+              {
+                "required": true,
+                "fieldCode": "end_date",
+                "fieldName": "结束日期",
+                "fieldType": "date",
+                "sourceKey": "endDate",
+                "confidence": 0.99
+              },
+              {
+                "required": true,
+                "fieldCode": "days",
+                "fieldName": "请假天数",
+                "fieldType": "number",
+                "sourceKey": "days",
+                "confidence": 0.98,
+                "constraints": {
+                  "min": 0
+                }
+              },
+              {
+                "required": true,
+                "fieldCode": "contact_phone",
+                "fieldName": "联系方式",
+                "fieldType": "text",
+                "sourceKey": "contactPhone",
+                "confidence": 0.99
+              },
+              {
+                "required": true,
+                "fieldCode": "reason",
+                "fieldName": "请假事由",
+                "fieldType": "textarea",
+                "sourceKey": "reason",
+                "confidence": 0.99
+              }
+            ]
+          },
+          "rules": null,
+          "permissions": null,
+          "uiHints": {
+            "endpoints": [
+              {
+                "path": "/api/applications",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "提交请假申请（formCode=leave）"
+              },
+              {
+                "path": "/api/applications/{applicationId}",
+                "method": "GET",
+                "confidence": 0.99,
+                "description": "获取请假申请详情"
+              },
+              {
+                "path": "/api/applications",
+                "method": "GET",
+                "confidence": 0.99,
+                "description": "查询请假申请列表（scope=mine|approval|cc|all）"
+              },
+              {
+                "path": "/api/applications/{applicationId}/approve",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "审批通过请假申请"
+              },
+              {
+                "path": "/api/applications/{applicationId}/reject",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "审批驳回请假申请"
+              },
+              {
+                "path": "/api/applications/{applicationId}/recall",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "撤回请假申请"
+              },
+              {
+                "path": "/api/applications/{applicationId}/attachments",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "补充请假附件"
+              },
+              {
+                "path": "/api/applications/{applicationId}/cc",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "追加抄送对象"
+              },
+              {
+                "path": "/api/applications/{applicationId}/attachments/{attachmentId}",
+                "method": "GET",
+                "confidence": 0.99,
+                "description": "下载请假附件"
+              }
+            ]
+          },
+          "lastSyncedAt": null,
+          "publishedAt": null,
+          "publishedBy": null,
+          "createdAt": "2026-03-08T08:59:16.654Z",
+          "updatedAt": "2026-03-08T08:59:16.654Z",
+          "connector": {
+            "id": "be029ad5-126e-49ff-aa0e-db29220d2fee",
+            "name": "Default Connector",
+            "oaType": "openapi",
+            "oclLevel": "OCL3"
+          }
+        },
+        {
+          "id": "a8dca009-1b99-4aa5-99a5-1ef26db99ecc",
+          "tenantId": "8ac5d38e-08ea-4fcd-b976-2ccb3df9a82c",
+          "connectorId": "be029ad5-126e-49ff-aa0e-db29220d2fee",
+          "remoteProcessId": null,
+          "processCode": "VEHICLE_ACCESS",
+          "processName": "校园进出车申请",
+          "processCategory": "校园安全",
+          "description": "用于校外车辆进入校园、活动车辆通行备案。",
+          "version": 1,
+          "status": "published",
+          "falLevel": "F3",
+          "sourceHash": null,
+          "sourceVersion": null,
+          "reviewStatus": "approved",
+          "changeSummary": null,
+          "supersedesId": null,
+          "schema": {
+            "fields": [
+              {
+                "required": true,
+                "fieldCode": "vehicle_plate",
+                "fieldName": "车牌号",
+                "fieldType": "text",
+                "sourceKey": "vehiclePlate",
+                "confidence": 0.99
+              },
+              {
+                "required": true,
+                "fieldCode": "driver_name",
+                "fieldName": "驾驶员",
+                "fieldType": "text",
+                "sourceKey": "driverName",
+                "confidence": 0.99
+              },
+              {
+                "required": true,
+                "fieldCode": "phone",
+                "fieldName": "联系电话",
+                "fieldType": "text",
+                "sourceKey": "phone",
+                "confidence": 0.99
+              },
+              {
+                "required": true,
+                "fieldCode": "enter_date",
+                "fieldName": "入校时间",
+                "fieldType": "date",
+                "sourceKey": "enterDate",
+                "confidence": 0.97
+              },
+              {
+                "required": true,
+                "fieldCode": "exit_date",
+                "fieldName": "离校时间",
+                "fieldType": "date",
+                "sourceKey": "exitDate",
+                "confidence": 0.97
+              },
+              {
+                "required": true,
+                "fieldCode": "purpose",
+                "fieldName": "入校事由",
+                "fieldType": "textarea",
+                "sourceKey": "purpose",
+                "confidence": 0.99
+              },
+              {
+                "required": true,
+                "fieldCode": "companion_count",
+                "fieldName": "随行人数",
+                "fieldType": "number",
+                "sourceKey": "companionCount",
+                "confidence": 0.99,
+                "constraints": {
+                  "min": 0
+                }
+              }
+            ]
+          },
+          "rules": null,
+          "permissions": null,
+          "uiHints": {
+            "endpoints": [
+              {
+                "path": "/api/applications",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "提交校园进出车申请（formCode=vehicle）"
+              },
+              {
+                "path": "/api/applications/{applicationId}",
+                "method": "GET",
+                "confidence": 0.99,
+                "description": "获取进出车申请详情"
+              },
+              {
+                "path": "/api/applications",
+                "method": "GET",
+                "confidence": 0.99,
+                "description": "查询进出车申请列表"
+              },
+              {
+                "path": "/api/applications/{applicationId}/approve",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "审批通过进出车申请"
+              },
+              {
+                "path": "/api/applications/{applicationId}/reject",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "审批驳回进出车申请"
+              },
+              {
+                "path": "/api/applications/{applicationId}/recall",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "撤回进出车申请"
+              },
+              {
+                "path": "/api/applications/{applicationId}/attachments",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "补充附件材料"
+              },
+              {
+                "path": "/api/applications/{applicationId}/cc",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "追加抄送对象"
+              },
+              {
+                "path": "/api/applications/{applicationId}/attachments/{attachmentId}",
+                "method": "GET",
+                "confidence": 0.99,
+                "description": "下载附件"
+              }
+            ]
+          },
+          "lastSyncedAt": null,
+          "publishedAt": null,
+          "publishedBy": null,
+          "createdAt": "2026-03-08T08:59:16.645Z",
+          "updatedAt": "2026-03-08T08:59:16.645Z",
+          "connector": {
+            "id": "be029ad5-126e-49ff-aa0e-db29220d2fee",
+            "name": "Default Connector",
+            "oaType": "openapi",
+            "oclLevel": "OCL3"
+          }
+        },
+        {
+          "id": "857ef77a-3912-4145-aacd-8f946cb94852",
+          "tenantId": "8ac5d38e-08ea-4fcd-b976-2ccb3df9a82c",
+          "connectorId": "be029ad5-126e-49ff-aa0e-db29220d2fee",
+          "remoteProcessId": null,
+          "processCode": "PROJECT_APPLICATION",
+          "processName": "项目申请",
+          "processCategory": "科研管理",
+          "description": "用于科研项目、教学改革项目等立项申请。",
+          "version": 1,
+          "status": "published",
+          "falLevel": "F3",
+          "sourceHash": null,
+          "sourceVersion": null,
+          "reviewStatus": "approved",
+          "changeSummary": null,
+          "supersedesId": null,
+          "schema": {
+            "fields": [
+              {
+                "required": true,
+                "fieldCode": "project_name",
+                "fieldName": "项目名称",
+                "fieldType": "text",
+                "sourceKey": "projectName",
+                "confidence": 0.99
+              },
+              {
+                "options": [
+                  {
+                    "label": "科研项目",
+                    "value": "research"
+                  },
+                  {
+                    "label": "教改项目",
+                    "value": "teaching"
+                  },
+                  {
+                    "label": "信息化建设",
+                    "value": "digital"
+                  }
+                ],
+                "required": true,
+                "fieldCode": "project_type",
+                "fieldName": "项目类型",
+                "fieldType": "select",
+                "sourceKey": "projectType",
+                "confidence": 0.99
+              },
+              {
+                "required": true,
+                "fieldCode": "leader",
+                "fieldName": "项目负责人",
+                "fieldType": "text",
+                "sourceKey": "leader",
+                "confidence": 0.99
+              },
+              {
+                "required": true,
+                "fieldCode": "budget",
+                "fieldName": "申请预算",
+                "fieldType": "number",
+                "sourceKey": "budget",
+                "confidence": 0.99,
+                "constraints": {
+                  "min": 0
+                }
+              },
+              {
+                "required": true,
+                "fieldCode": "start_date",
+                "fieldName": "开始日期",
+                "fieldType": "date",
+                "sourceKey": "startDate",
+                "confidence": 0.99
+              },
+              {
+                "required": true,
+                "fieldCode": "end_date",
+                "fieldName": "结束日期",
+                "fieldType": "date",
+                "sourceKey": "endDate",
+                "confidence": 0.99
+              },
+              {
+                "required": true,
+                "fieldCode": "summary",
+                "fieldName": "项目概述",
+                "fieldType": "textarea",
+                "sourceKey": "summary",
+                "confidence": 0.99
+              }
+            ]
+          },
+          "rules": null,
+          "permissions": null,
+          "uiHints": {
+            "endpoints": [
+              {
+                "path": "/api/applications",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "提交项目申请（formCode=project）"
+              },
+              {
+                "path": "/api/applications/{applicationId}",
+                "method": "GET",
+                "confidence": 0.99,
+                "description": "获取项目申请详情"
+              },
+              {
+                "path": "/api/applications",
+                "method": "GET",
+                "confidence": 0.99,
+                "description": "查询项目申请列表"
+              },
+              {
+                "path": "/api/applications/{applicationId}/approve",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "审批通过项目申请"
+              },
+              {
+                "path": "/api/applications/{applicationId}/reject",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "审批驳回项目申请"
+              },
+              {
+                "path": "/api/applications/{applicationId}/recall",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "撤回项目申请"
+              },
+              {
+                "path": "/api/applications/{applicationId}/attachments",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "补充项目材料附件"
+              },
+              {
+                "path": "/api/applications/{applicationId}/cc",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "追加抄送对象"
+              },
+              {
+                "path": "/api/applications/{applicationId}/attachments/{attachmentId}",
+                "method": "GET",
+                "confidence": 0.99,
+                "description": "下载项目附件"
+              }
+            ]
+          },
+          "lastSyncedAt": null,
+          "publishedAt": null,
+          "publishedBy": null,
+          "createdAt": "2026-03-08T08:59:16.660Z",
+          "updatedAt": "2026-03-08T08:59:16.660Z",
+          "connector": {
+            "id": "be029ad5-126e-49ff-aa0e-db29220d2fee",
+            "name": "Default Connector",
+            "oaType": "openapi",
+            "oclLevel": "OCL3"
+          }
+        },
+        {
+          "id": "52978792-ca8e-4480-8a5b-34e961e1be73",
+          "tenantId": "8ac5d38e-08ea-4fcd-b976-2ccb3df9a82c",
+          "connectorId": "db06eea0-f7a2-4145-8abc-b804461b8b17",
+          "remoteProcessId": "4789d8fc-6e02-4656-9422-ce83e7b1c01c",
+          "processCode": "leave_request",
+          "processName": "提交请假申请",
+          "processCategory": "请假",
+          "description": null,
+          "version": 1,
+          "status": "published",
+          "falLevel": "F2",
+          "sourceHash": "e1bef4913b3e95005c48bfa1b2d62d1acb2681d173cdf6c24b04812ee4de1ca3",
+          "sourceVersion": null,
+          "reviewStatus": "approved",
+          "changeSummary": null,
+          "supersedesId": null,
+          "schema": {
+            "fields": [
+              {
+                "key": "startDate",
+                "type": "text",
+                "label": "startDate",
+                "required": true,
+                "validation": {
+                  "required": true
+                },
+                "defaultValue": null
+              },
+              {
+                "key": "endDate",
+                "type": "text",
+                "label": "endDate",
+                "required": true,
+                "validation": {
+                  "required": true
+                },
+                "defaultValue": null
+              },
+              {
+                "key": "reason",
+                "type": "text",
+                "label": "reason",
+                "required": true,
+                "validation": {
+                  "required": true
+                },
+                "defaultValue": null
+              },
+              {
+                "key": "leaveType",
+                "type": "text",
+                "label": "leaveType",
+                "required": false,
+                "validation": null,
+                "defaultValue": null
+              }
+            ]
+          },
+          "rules": {
+            "validation": [
+              {
+                "rule": "required",
+                "field": "startDate",
+                "message": "开始日期不能为空"
+              }
+            ]
+          },
+          "permissions": null,
+          "uiHints": {
+            "apiPath": "/leave/submit",
+            "apiMethod": "POST",
+            "confidence": 0.98,
+            "validationResult": null
+          },
+          "lastSyncedAt": "2026-03-09T06:40:00.727Z",
+          "publishedAt": "2026-03-09T06:20:30.620Z",
+          "publishedBy": null,
+          "createdAt": "2026-03-09T06:20:30.621Z",
+          "updatedAt": "2026-03-09T06:40:00.727Z",
+          "connector": {
+            "id": "db06eea0-f7a2-4145-8abc-b804461b8b17",
+            "name": "test-connector",
+            "oaType": "openapi",
+            "oclLevel": "OCL3"
+          }
+        },
+        {
+          "id": "685f1fb8-4973-4734-9568-70391006644c",
+          "tenantId": "8ac5d38e-08ea-4fcd-b976-2ccb3df9a82c",
+          "connectorId": "be029ad5-126e-49ff-aa0e-db29220d2fee",
+          "remoteProcessId": null,
+          "processCode": "REIMBURSEMENT",
+          "processName": "财务报销",
+          "processCategory": "财务审批",
+          "description": "用于差旅、采购、会议等费用报销。",
+          "version": 1,
+          "status": "published",
+          "falLevel": "F3",
+          "sourceHash": null,
+          "sourceVersion": null,
+          "reviewStatus": "approved",
+          "changeSummary": null,
+          "supersedesId": null,
+          "schema": {
+            "fields": [
+              {
+                "required": true,
+                "fieldCode": "title",
+                "fieldName": "报销标题",
+                "fieldType": "text",
+                "sourceKey": "title",
+                "confidence": 0.99
+              },
+              {
+                "options": [
+                  {
+                    "label": "差旅费",
+                    "value": "travel"
+                  },
+                  {
+                    "label": "办公采购",
+                    "value": "purchase"
+                  },
+                  {
+                    "label": "会议费",
+                    "value": "meeting"
+                  }
+                ],
+                "required": true,
+                "fieldCode": "reimbursement_type",
+                "fieldName": "报销类型",
+                "fieldType": "select",
+                "sourceKey": "reimbursementType",
+                "confidence": 0.99
+              },
+              {
+                "required": true,
+                "fieldCode": "amount",
+                "fieldName": "报销金额",
+                "fieldType": "number",
+                "sourceKey": "amount",
+                "confidence": 0.99,
+                "constraints": {
+                  "min": 0
+                }
+              },
+              {
+                "required": true,
+                "fieldCode": "budget_code",
+                "fieldName": "预算编码",
+                "fieldType": "text",
+                "sourceKey": "budgetCode",
+                "confidence": 0.99
+              },
+              {
+                "required": true,
+                "fieldCode": "payee_name",
+                "fieldName": "收款人",
+                "fieldType": "text",
+                "sourceKey": "payeeName",
+                "confidence": 0.99
+              },
+              {
+                "required": true,
+                "fieldCode": "bank_account",
+                "fieldName": "银行卡号",
+                "fieldType": "text",
+                "sourceKey": "bankAccount",
+                "confidence": 0.99
+              },
+              {
+                "required": true,
+                "fieldCode": "reason",
+                "fieldName": "费用说明",
+                "fieldType": "textarea",
+                "sourceKey": "reason",
+                "confidence": 0.99
+              }
+            ]
+          },
+          "rules": null,
+          "permissions": null,
+          "uiHints": {
+            "endpoints": [
+              {
+                "path": "/api/applications",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "提交报销申请（formCode=reimbursement）"
+              },
+              {
+                "path": "/api/applications/{applicationId}",
+                "method": "GET",
+                "confidence": 0.99,
+                "description": "获取报销申请详情"
+              },
+              {
+                "path": "/api/applications",
+                "method": "GET",
+                "confidence": 0.99,
+                "description": "查询报销申请列表"
+              },
+              {
+                "path": "/api/applications/{applicationId}/approve",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "审批通过报销申请"
+              },
+              {
+                "path": "/api/applications/{applicationId}/reject",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "审批驳回报销申请"
+              },
+              {
+                "path": "/api/applications/{applicationId}/recall",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "撤回报销申请"
+              },
+              {
+                "path": "/api/applications/{applicationId}/attachments",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "补充报销凭证附件"
+              },
+              {
+                "path": "/api/applications/{applicationId}/cc",
+                "method": "POST",
+                "confidence": 0.99,
+                "description": "追加抄送对象"
+              },
+              {
+                "path": "/api/applications/{applicationId}/attachments/{attachmentId}",
+                "method": "GET",
+                "confidence": 0.99,
+                "description": "下载报销凭证附件"
+              }
+            ]
+          },
+          "lastSyncedAt": null,
+          "publishedAt": null,
+          "publishedBy": null,
+          "createdAt": "2026-03-08T08:59:16.667Z",
+          "updatedAt": "2026-03-08T08:59:16.667Z",
+          "connector": {
+            "id": "be029ad5-126e-49ff-aa0e-db29220d2fee",
+            "name": "Default Connector",
+            "oaType": "openapi",
+            "oclLevel": "OCL3"
+          }
+        }
+      ]
     },
     {
       "endpoint": "列出连接器",
       "method": "GET",
       "status": "success",
       "statusCode": 200,
-      "responseTime": 3,
-      "data": []
+      "responseTime": 7,
+      "data": [
+        {
+          "id": "db06eea0-f7a2-4145-8abc-b804461b8b17",
+          "tenantId": "8ac5d38e-08ea-4fcd-b976-2ccb3df9a82c",
+          "name": "test-connector",
+          "oaType": "openapi",
+          "oaVendor": "Test OA",
+          "oaVersion": "1.0.0",
+          "baseUrl": "https://test-oa.example.com/api",
+          "authType": "apikey",
+          "authConfig": {
+            "type": "apikey",
+            "token": "test-api-key-123",
+            "headerName": "X-API-Key"
+          },
+          "healthCheckUrl": "https://test-oa.example.com/health",
+          "oclLevel": "OCL3",
+          "falLevel": "F2",
+          "status": "active",
+          "lastHealthCheck": null,
+          "createdAt": "2026-03-09T06:18:33.039Z",
+          "updatedAt": "2026-03-09T06:20:30.618Z",
+          "capability": null,
+          "secretRef": null
+        },
+        {
+          "id": "be029ad5-126e-49ff-aa0e-db29220d2fee",
+          "tenantId": "8ac5d38e-08ea-4fcd-b976-2ccb3df9a82c",
+          "name": "Default Connector",
+          "oaType": "openapi",
+          "oaVendor": "学校OA系统",
+          "oaVersion": null,
+          "baseUrl": "http://127.0.0.1:3210",
+          "authType": "cookie",
+          "authConfig": {
+            "password": "Teacher@123",
+            "username": "teacher",
+            "loginPath": "/api/auth/login"
+          },
+          "healthCheckUrl": null,
+          "oclLevel": "OCL3",
+          "falLevel": null,
+          "status": "active",
+          "lastHealthCheck": null,
+          "createdAt": "2026-03-08T07:38:37.728Z",
+          "updatedAt": "2026-03-08T21:28:24.000Z",
+          "capability": null,
+          "secretRef": null
+        }
+      ]
     }
   ]
 }

@@ -1,0 +1,142 @@
+import { getApiUrl, getServerAuth } from '../../lib/auth';
+import { notFound, redirect } from 'next/navigation';
+
+function formatDate(value?: string | null) {
+  if (!value) return '-';
+  return new Date(value).toLocaleString('zh-CN');
+}
+
+async function readJsonSafely(response: Response) {
+  const text = await response.text();
+  if (!text.trim()) {
+    return null;
+  }
+  return JSON.parse(text);
+}
+
+function renderJson(value: unknown) {
+  if (!value) return '-';
+  return (
+    <pre className="overflow-x-auto rounded-lg bg-gray-50 p-4 text-xs text-gray-700">
+      {JSON.stringify(value, null, 2)}
+    </pre>
+  );
+}
+
+export default async function BootstrapJobDetailPage({
+  params,
+}: {
+  params: { id: string };
+}) {
+  const { userId, roles } = await getServerAuth();
+  if (!userId) redirect('/login');
+  if (!roles.includes('admin')) redirect('/');
+
+  const API_URL = getApiUrl();
+
+  const [jobRes, reportRes] = await Promise.all([
+    fetch(`${API_URL}/api/v1/bootstrap/jobs/${params.id}`, { cache: 'no-store' }),
+    fetch(`${API_URL}/api/v1/bootstrap/jobs/${params.id}/report`, { cache: 'no-store' }),
+  ]);
+
+  if (jobRes.status === 404) {
+    notFound();
+  }
+
+  if (!jobRes.ok) {
+    throw new Error(`Failed to load bootstrap job: ${jobRes.status}`);
+  }
+
+  const job = await readJsonSafely(jobRes);
+  const report = reportRes.ok ? await readJsonSafely(reportRes) : null;
+
+  return (
+    <main className="h-full overflow-y-auto">
+      <div className="mx-auto max-w-6xl px-6 py-8">
+        <div className="mb-6 flex items-center justify-between gap-4">
+          <div>
+            <a href="/bootstrap" className="text-sm text-blue-600 hover:text-blue-800">
+              返回初始化中心
+            </a>
+            <h1 className="mt-2 text-2xl font-bold text-gray-900">
+              {job.name || `初始化任务 ${job.id.slice(0, 8)}`}
+            </h1>
+            <p className="mt-1 text-sm text-gray-600">
+              状态：{job.status} · 创建时间：{formatDate(job.createdAt)}
+            </p>
+          </div>
+          <span className="rounded-full bg-blue-100 px-3 py-1 text-sm font-medium text-blue-700">
+            {job.status}
+          </span>
+        </div>
+
+        <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-3">
+          <div className="rounded-xl border border-gray-200 bg-white p-5">
+            <div className="text-sm text-gray-500">OA 地址</div>
+            <div className="mt-2 break-all text-sm text-gray-900">{job.oaUrl || '-'}</div>
+          </div>
+          <div className="rounded-xl border border-gray-200 bg-white p-5">
+            <div className="text-sm text-gray-500">来源文档</div>
+            <div className="mt-2 break-all text-sm text-gray-900">{job.openApiUrl || '-'}</div>
+          </div>
+          <div className="rounded-xl border border-gray-200 bg-white p-5">
+            <div className="text-sm text-gray-500">租户 ID</div>
+            <div className="mt-2 break-all font-mono text-sm text-gray-900">{job.tenantId}</div>
+          </div>
+        </div>
+
+        <div className="mb-6 rounded-xl border border-gray-200 bg-white p-6">
+          <h2 className="mb-4 text-lg font-semibold text-gray-900">任务明细</h2>
+          <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
+            <div>
+              <div className="mb-2 text-sm font-medium text-gray-700">数据源</div>
+              {job.sources?.length ? (
+                <div className="space-y-3">
+                  {job.sources.map((source: any) => (
+                    <div key={source.id} className="rounded-lg bg-gray-50 p-4 text-sm">
+                      <div className="font-medium text-gray-900">{source.sourceType}</div>
+                      <div className="mt-1 break-all text-gray-600">{source.sourceUrl || '内嵌文档内容'}</div>
+                    </div>
+                  ))}
+                </div>
+              ) : (
+                <div className="text-sm text-gray-500">暂无数据源</div>
+              )}
+            </div>
+            <div>
+              <div className="mb-2 text-sm font-medium text-gray-700">解析产物</div>
+              <div className="grid grid-cols-2 gap-3">
+                <div className="rounded-lg bg-gray-50 p-4">
+                  <div className="text-xs text-gray-500">流程 IR</div>
+                  <div className="mt-1 text-lg font-semibold text-gray-900">{job.flowIRs?.length || 0}</div>
+                </div>
+                <div className="rounded-lg bg-gray-50 p-4">
+                  <div className="text-xs text-gray-500">字段 IR</div>
+                  <div className="mt-1 text-lg font-semibold text-gray-900">{job.fieldIRs?.length || 0}</div>
+                </div>
+                <div className="rounded-lg bg-gray-50 p-4">
+                  <div className="text-xs text-gray-500">规则 IR</div>
+                  <div className="mt-1 text-lg font-semibold text-gray-900">{job.ruleIRs?.length || 0}</div>
+                </div>
+                <div className="rounded-lg bg-gray-50 p-4">
+                  <div className="text-xs text-gray-500">回放用例</div>
+                  <div className="mt-1 text-lg font-semibold text-gray-900">{job.replayCases?.length || 0}</div>
+                </div>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <div className="mb-6 rounded-xl border border-gray-200 bg-white p-6">
+          <h2 className="mb-4 text-lg font-semibold text-gray-900">最新报告</h2>
+          {report ? renderJson(report) : <div className="text-sm text-gray-500">暂无报告</div>}
+        </div>
+
+        <div className="rounded-xl border border-gray-200 bg-white p-6">
+          <h2 className="mb-4 text-lg font-semibold text-gray-900">原始任务数据</h2>
+          {renderJson(job)}
+        </div>
+      </div>
+    </main>
+  );
+}

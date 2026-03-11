@@ -1,13 +1,19 @@
 import { Injectable, BadRequestException, NotFoundException } from '@nestjs/common';
+import { Prisma } from '@prisma/client';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
+import { buildStatusEventRemoteId } from '@uniflow/shared-types';
 import { PrismaService } from '../common/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { RuleService } from '../rule/rule.service';
 import { PermissionService } from '../permission/permission.service';
 import { ProcessLibraryService } from '../process-library/process-library.service';
-import { ConnectorService } from '../connector/connector.service';
-import { AdapterFactory } from '@uniflow/oa-adapters';
+import { AdapterRuntimeService } from '../adapter-runtime/adapter-runtime.service';
+import {
+  getSubmissionStatusText,
+  isActiveSubmissionStatus,
+  mapExternalStatusToSubmissionStatus,
+} from '../common/submission-status.util';
 
 interface SubmitInput {
   tenantId: string;
@@ -32,7 +38,7 @@ export class SubmissionService {
     private readonly ruleService: RuleService,
     private readonly permissionService: PermissionService,
     private readonly processLibraryService: ProcessLibraryService,
-    private readonly connectorService: ConnectorService,
+    private readonly adapterRuntimeService: AdapterRuntimeService,
     @InjectQueue('submit') private readonly submitQueue: Queue,
   ) {}
 
@@ -141,6 +147,17 @@ export class SubmissionService {
         status: 'pending',
       },
     });
+    await this.createSubmissionEvent({
+      tenantId: input.tenantId,
+      submissionId: submission.id,
+      eventType: 'created',
+      eventSource: 'internal',
+      status: 'pending',
+      payload: {
+        draftId: draft.id,
+        processCode: draft.template.processCode,
+      },
+    });
 
     // Update draft status
     await this.prisma.processDraft.update({
@@ -181,12 +198,8 @@ export class SubmissionService {
     const { submissionId, connectorId, processCode, formData, idempotencyKey } = jobData;
 
     try {
-      // Get connector
-      const connector = await this.connectorService.get(connectorId);
-
-      // Create adapter
-      const adapter = AdapterFactory.createMockAdapter(
-        connector.oaType as any,
+      const adapter = await this.adapterRuntimeService.createAdapterForConnector(
+        connectorId,
         [{ flowCode: processCode, flowName: processCode }],
       );
 
@@ -208,15 +221,43 @@ export class SubmissionService {
           submittedAt: result.success ? new Date() : undefined,
         },
       });
+      const persisted = await this.prisma.submission.findUnique({
+        where: { id: submissionId },
+        select: {
+          tenantId: true,
+          oaSubmissionId: true,
+          submitResult: true,
+          status: true,
+        },
+      });
+      if (persisted) {
+        await this.createSubmissionEvent({
+          tenantId: persisted.tenantId,
+          submissionId,
+          eventType: result.success ? 'submitted' : 'submit_failed',
+          eventSource: 'internal',
+          remoteEventId: persisted.oaSubmissionId || undefined,
+          status: persisted.status,
+          payload: persisted.submitResult as Record<string, any> | undefined,
+        });
+      }
 
       return { success: result.success };
     } catch (error: any) {
-      await this.prisma.submission.update({
+      const failedSubmission = await this.prisma.submission.update({
         where: { id: submissionId },
         data: {
           status: 'failed',
           errorMsg: error.message,
         },
+      });
+      await this.createSubmissionEvent({
+        tenantId: failedSubmission.tenantId,
+        submissionId,
+        eventType: 'submit_failed',
+        eventSource: 'internal',
+        status: 'failed',
+        payload: { errorMessage: error.message },
       });
 
       throw error;
@@ -247,12 +288,14 @@ export class SubmissionService {
       where: { id: submission.templateId },
     });
 
+    await this.refreshTrackedSubmissionStatuses([submission], new Map([[submission.templateId, template]]));
+
     return {
       ...submission,
       processCode: template?.processCode,
       processName: template?.processName,
       processCategory: template?.processCategory,
-      statusText: this.getStatusText(submission.status),
+      statusText: getSubmissionStatusText(submission.status),
       formDataWithLabels: this.buildFormDataWithLabels(
         submission.formData as Record<string, any>,
         template,
@@ -281,6 +324,8 @@ export class SubmissionService {
     });
     const templateMap = new Map(templates.map(t => [t.id, t]));
 
+    await this.refreshTrackedSubmissionStatuses(submissions, templateMap);
+
     return submissions.map(s => {
       const template = templateMap.get(s.templateId);
 
@@ -291,7 +336,7 @@ export class SubmissionService {
         processName: template?.processName,
         processCategory: template?.processCategory,
         status: s.status,
-        statusText: this.getStatusText(s.status),
+        statusText: getSubmissionStatusText(s.status),
         formData: s.formData,
         formDataWithLabels: this.buildFormDataWithLabels(
           s.formData as Record<string, any>,
@@ -328,16 +373,6 @@ export class SubmissionService {
     });
   }
 
-  private getStatusText(status: string): string {
-    const map: Record<string, string> = {
-      pending: '待处理',
-      submitted: '已提交',
-      failed: '提交失败',
-      cancelled: '已取消',
-    };
-    return map[status] || status;
-  }
-
   async cancel(submissionId: string, userId: string, traceId: string) {
     const submission = await this.getSubmission(submissionId);
     if (!submission) {
@@ -352,10 +387,29 @@ export class SubmissionService {
       throw new BadRequestException('Submission cannot be cancelled in current status');
     }
 
-    // TODO: Call OA adapter to cancel
+    const template = await this.prisma.processTemplate.findUnique({
+      where: { id: submission.templateId },
+    });
+    const adapter = template
+      ? await this.adapterRuntimeService.createAdapterForConnector(template.connectorId, [
+          { flowCode: submission.processCode, flowName: submission.processName || submission.processCode || 'flow' },
+        ])
+      : null;
+    if (adapter?.cancel && submission.oaSubmissionId) {
+      await adapter.cancel(submission.oaSubmissionId);
+    }
+
     await this.prisma.submission.update({
       where: { id: submissionId },
       data: { status: 'cancelled' },
+    });
+    await this.createSubmissionEvent({
+      tenantId: submission.tenantId,
+      submissionId,
+      eventType: 'cancelled',
+      eventSource: 'user_action',
+      status: 'cancelled',
+      payload: { userId },
     });
 
     await this.auditService.createLog({
@@ -380,7 +434,18 @@ export class SubmissionService {
       throw new BadRequestException('You can only urge your own submissions');
     }
 
-    // TODO: Call OA adapter to urge
+    const template = await this.prisma.processTemplate.findUnique({
+      where: { id: submission.templateId },
+    });
+    const adapter = template
+      ? await this.adapterRuntimeService.createAdapterForConnector(template.connectorId, [
+          { flowCode: submission.processCode, flowName: submission.processName || submission.processCode || 'flow' },
+        ])
+      : null;
+    if (adapter?.urge && submission.oaSubmissionId) {
+      await adapter.urge(submission.oaSubmissionId);
+    }
+
     await this.auditService.createLog({
       tenantId: submission.tenantId,
       traceId,
@@ -403,7 +468,29 @@ export class SubmissionService {
       throw new BadRequestException('You can only supplement your own submissions');
     }
 
-    // TODO: Call OA adapter to supplement
+    const template = await this.prisma.processTemplate.findUnique({
+      where: { id: submission.templateId },
+    });
+    const adapter = template
+      ? await this.adapterRuntimeService.createAdapterForConnector(template.connectorId, [
+          { flowCode: submission.processCode, flowName: submission.processName || submission.processCode || 'flow' },
+        ])
+      : null;
+    if (adapter?.supplement && submission.oaSubmissionId) {
+      await adapter.supplement({
+        submissionId: submission.oaSubmissionId,
+        supplementData,
+      });
+    }
+
+    await this.createSubmissionEvent({
+      tenantId: submission.tenantId,
+      submissionId,
+      eventType: 'supplement_requested',
+      eventSource: 'user_action',
+      status: submission.status,
+      payload: { supplementData },
+    });
     await this.auditService.createLog({
       tenantId: submission.tenantId,
       traceId,
@@ -427,7 +514,30 @@ export class SubmissionService {
       throw new BadRequestException('You can only delegate your own submissions');
     }
 
-    // TODO: Call OA adapter to delegate
+    const template = await this.prisma.processTemplate.findUnique({
+      where: { id: submission.templateId },
+    });
+    const adapter = template
+      ? await this.adapterRuntimeService.createAdapterForConnector(template.connectorId, [
+          { flowCode: submission.processCode, flowName: submission.processName || submission.processCode || 'flow' },
+        ])
+      : null;
+    if (adapter?.delegate && submission.oaSubmissionId) {
+      await adapter.delegate({
+        submissionId: submission.oaSubmissionId,
+        targetUserId,
+        reason,
+      });
+    }
+
+    await this.createSubmissionEvent({
+      tenantId: submission.tenantId,
+      submissionId,
+      eventType: 'delegate_requested',
+      eventSource: 'user_action',
+      status: submission.status,
+      payload: { targetUserId, reason },
+    });
     await this.auditService.createLog({
       tenantId: submission.tenantId,
       traceId,
@@ -439,5 +549,138 @@ export class SubmissionService {
     });
 
     return { success: true, message: '转办成功' };
+  }
+
+  private async createSubmissionEvent(input: {
+    tenantId: string;
+    submissionId: string;
+    eventType: string;
+    eventSource: string;
+    status: string;
+    remoteEventId?: string;
+    payload?: Record<string, any>;
+  }) {
+    return this.prisma.submissionEvent.create({
+      data: {
+        tenantId: input.tenantId,
+        submissionId: input.submissionId,
+        eventType: input.eventType,
+        eventSource: input.eventSource,
+        remoteEventId: input.remoteEventId,
+        eventTime: new Date(),
+        status: input.status,
+        payload: input.payload,
+      },
+    });
+  }
+
+  private async refreshTrackedSubmissionStatuses(
+    submissions: Array<{
+      id: string;
+      tenantId: string;
+      templateId: string;
+      status: string;
+      oaSubmissionId?: string | null;
+      statusRecords?: Array<{
+        id?: string;
+        submissionId?: string;
+        status: string;
+        statusDetail?: any;
+        queriedAt: Date;
+      }>;
+    }>,
+    templateMap: Map<string, { connectorId?: string | null } | null | undefined>,
+  ) {
+    const adapterPromises = new Map<string, Promise<any>>();
+
+    await Promise.allSettled(
+      submissions.map(async (submission) => {
+        if (!isActiveSubmissionStatus(submission.status) || !submission.oaSubmissionId) {
+          return;
+        }
+
+        const template = templateMap.get(submission.templateId);
+        const connectorId = template?.connectorId;
+        if (!connectorId) {
+          return;
+        }
+
+        try {
+          let adapterPromise = adapterPromises.get(connectorId);
+          if (!adapterPromise) {
+            adapterPromise = this.adapterRuntimeService.createAdapterForConnector(connectorId, []);
+            adapterPromises.set(connectorId, adapterPromise);
+          }
+
+          const adapter = await adapterPromise;
+          const result = await adapter.queryStatus(submission.oaSubmissionId);
+          const mappedStatus = mapExternalStatusToSubmissionStatus(result.status, submission.status);
+          const queriedAt = new Date();
+          const remoteEventId = buildStatusEventRemoteId(
+            submission.oaSubmissionId,
+            result as Record<string, any>,
+          );
+
+          const eventCreated = await this.createSubmissionEventIfNew({
+            data: {
+              tenantId: submission.tenantId,
+              submissionId: submission.id,
+              eventType: 'status_list_refreshed',
+              eventSource: 'oa_pull',
+              remoteEventId,
+              eventTime: queriedAt,
+              status: result.status,
+              payload: result as any,
+            },
+          });
+
+          if (eventCreated) {
+            await this.prisma.submissionStatus.create({
+              data: {
+                submissionId: submission.id,
+                status: result.status,
+                statusDetail: result as any,
+              },
+            });
+
+            if (Array.isArray(submission.statusRecords)) {
+              submission.statusRecords = [
+                {
+                  submissionId: submission.id,
+                  status: result.status,
+                  statusDetail: result as any,
+                  queriedAt,
+                },
+                ...submission.statusRecords,
+              ];
+            }
+          }
+
+          if (mappedStatus !== submission.status) {
+            await this.prisma.submission.update({
+              where: { id: submission.id },
+              data: { status: mappedStatus },
+            });
+            submission.status = mappedStatus;
+          }
+        } catch {
+          // Swallow refresh failures so list/detail queries still work.
+        }
+      }),
+    );
+  }
+
+  private async createSubmissionEventIfNew(input: {
+    data: Prisma.SubmissionEventUncheckedCreateInput;
+  }) {
+    try {
+      await this.prisma.submissionEvent.create(input);
+      return true;
+    } catch (error) {
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        return false;
+      }
+      throw error;
+    }
   }
 }

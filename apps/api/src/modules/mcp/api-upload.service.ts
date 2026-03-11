@@ -1,4 +1,5 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
+import { createHash } from 'crypto';
 import { PrismaService } from '../common/prisma.service';
 import { ApiDocParserAgent } from './agents/api-doc-parser.agent';
 import { WorkflowApiIdentifierAgent } from './agents/workflow-api-identifier.agent';
@@ -54,17 +55,41 @@ export class ApiUploadService {
    */
   async uploadAndProcess(dto: UploadApiFileDto): Promise<ApiUploadResult> {
     this.logger.log(`Starting upload for connector ${dto.connectorId}`);
+    if (!dto.docContent?.trim()) {
+      throw new BadRequestException('API document content is required');
+    }
+
+    const connector = await this.prisma.connector.findUnique({
+      where: { id: dto.connectorId },
+      select: { id: true, tenantId: true, baseUrl: true },
+    });
+
+    if (!connector) {
+      throw new NotFoundException(`Connector ${dto.connectorId} not found`);
+    }
+
+    if (connector.tenantId !== dto.tenantId) {
+      throw new BadRequestException(
+        `Connector ${dto.connectorId} does not belong to tenant ${dto.tenantId}`,
+      );
+    }
+
+    const oaBaseUrl = dto.oaUrl || connector.baseUrl;
+    if (!oaBaseUrl) {
+      throw new BadRequestException('OA base URL is required');
+    }
+
     const parsedDocResult = await this.apiDocParser.execute(
       {
         docType: dto.docType,
         docContent: dto.docContent,
-        oaUrl: dto.oaUrl,
+        oaUrl: oaBaseUrl,
       },
       { tenantId: dto.tenantId, traceId: `upload-${Date.now()}` },
     );
 
     if (!parsedDocResult.success || !parsedDocResult.data) {
-      throw new Error(`Failed to parse API doc: ${parsedDocResult.error}`);
+      throw new BadRequestException(`Failed to parse API doc: ${parsedDocResult.error}`);
     }
 
     const parsedDoc = parsedDocResult.data;
@@ -87,7 +112,7 @@ export class ApiUploadService {
         try {
           const validationResult = await this.apiValidator.execute(
             {
-              baseUrl: parsedDoc.baseUrl || dto.oaUrl,
+              baseUrl: parsedDoc.baseUrl || oaBaseUrl,
               authConfig: dto.authConfig,
               endpoint: {
                 path: workflowApi.path,
@@ -131,7 +156,7 @@ export class ApiUploadService {
             dto.tenantId,
             dto.connectorId,
             workflowApi,
-            parsedDoc.baseUrl || dto.oaUrl,
+            parsedDoc.baseUrl || oaBaseUrl,
             dto.authConfig,
           );
           mcpTools.push(mcpTool);
@@ -175,12 +200,57 @@ export class ApiUploadService {
       const validation = validationResults.find(
         v => v.path === api.path && v.method === api.method,
       );
+      const schemaFields = this.convertParametersToSchema(api.parameters, api.requestBody);
+      const sourceHash = this.computeSourceHash({
+        workflowType: api.workflowType,
+        workflowCategory: api.workflowCategory,
+        path: api.path,
+        method: api.method,
+        schemaFields,
+      });
+      const remoteProcess = await this.prisma.remoteProcess.upsert({
+        where: {
+          connectorId_remoteProcessId: {
+            connectorId,
+            remoteProcessId: api.workflowType,
+          },
+        },
+        create: {
+          tenantId,
+          connectorId,
+          remoteProcessId: api.workflowType,
+          remoteProcessCode: api.workflowType,
+          remoteProcessName: api.description,
+          processCategory: api.workflowCategory,
+          sourceHash,
+          sourceVersion: '1',
+          metadata: {
+            apiPath: api.path,
+            apiMethod: api.method,
+            confidence: api.confidence,
+          },
+          lastSchemaSyncAt: new Date(),
+        },
+        update: {
+          remoteProcessCode: api.workflowType,
+          remoteProcessName: api.description,
+          processCategory: api.workflowCategory,
+          sourceHash,
+          sourceVersion: '1',
+          metadata: {
+            apiPath: api.path,
+            apiMethod: api.method,
+            confidence: api.confidence,
+          },
+          lastSchemaSyncAt: new Date(),
+        },
+      });
 
       // 创建或更新ProcessTemplate
       const template = await this.prisma.processTemplate.upsert({
         where: {
-          tenantId_processCode_version: {
-            tenantId,
+          connectorId_processCode_version: {
+            connectorId,
             processCode: api.workflowType,
             version: 1,
           },
@@ -188,14 +258,17 @@ export class ApiUploadService {
         create: {
           tenantId,
           connectorId,
+          remoteProcessId: remoteProcess.id,
           processCode: api.workflowType,
           processName: api.description,
           processCategory: api.workflowCategory,
           version: 1,
           status: 'draft',
           falLevel: 'F1', // 默认智能填表级别
+          sourceHash,
+          sourceVersion: '1',
           schema: {
-            fields: this.convertParametersToSchema(api.parameters, api.requestBody),
+            fields: schemaFields,
           },
           rules: null,
           permissions: null,
@@ -205,12 +278,15 @@ export class ApiUploadService {
             confidence: api.confidence,
             validationResult: validation || null,
           },
+          lastSyncedAt: new Date(),
         },
         update: {
+          remoteProcessId: remoteProcess.id,
           processName: api.description,
           processCategory: api.workflowCategory,
+          sourceHash,
           schema: {
-            fields: this.convertParametersToSchema(api.parameters, api.requestBody),
+            fields: schemaFields,
           },
           uiHints: {
             apiPath: api.path,
@@ -218,7 +294,15 @@ export class ApiUploadService {
             confidence: api.confidence,
             validationResult: validation || null,
           },
+          lastSyncedAt: new Date(),
           updatedAt: new Date(),
+        },
+      });
+
+      await this.prisma.remoteProcess.update({
+        where: { id: remoteProcess.id },
+        data: {
+          latestTemplateId: template.id,
         },
       });
 
@@ -277,9 +361,14 @@ export class ApiUploadService {
       boolean: 'checkbox',
       array: 'select',
       object: 'json',
+      file: 'file',
     };
 
     return typeMap[apiType] || 'text';
+  }
+
+  private computeSourceHash(input: Record<string, any>) {
+    return createHash('sha256').update(JSON.stringify(input)).digest('hex');
   }
 
   /**

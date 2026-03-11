@@ -8,9 +8,10 @@ import { ApiUploadService } from './api-upload.service';
 import { ApiDocParserAgent } from './agents/api-doc-parser.agent';
 import { WorkflowApiIdentifierAgent } from './agents/workflow-api-identifier.agent';
 import { ApiValidatorAgent } from './agents/api-validator.agent';
+import { AdapterRuntimeModule } from '../adapter-runtime/adapter-runtime.module';
 
 @Module({
-  imports: [CommonModule],
+  imports: [CommonModule, AdapterRuntimeModule],
   controllers: [MCPController],
   providers: [
     MCPService,
