@@ -1,36 +1,66 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { CreateConnectorDto, UpdateConnectorDto } from './dto';
-import { AdapterFactory } from '@uniflow/oa-adapters';
+import { AdapterRuntimeService } from '../adapter-runtime/adapter-runtime.service';
 
 @Injectable()
 export class ConnectorService {
-  constructor(private readonly prisma: PrismaService) {}
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly adapterRuntimeService: AdapterRuntimeService,
+  ) {}
 
   async create(dto: CreateConnectorDto) {
     const tenantId = process.env.DEFAULT_TENANT_ID || 'default-tenant';
+    const { publicAuthConfig, secretRef } = this.splitAuthConfig(dto.authConfig);
 
-    return this.prisma.connector.create({
-      data: {
-        tenantId,
-        name: dto.name,
-        oaType: dto.oaType,
-        oaVendor: dto.oaVendor,
-        oaVersion: dto.oaVersion,
-        baseUrl: dto.baseUrl,
-        authType: dto.authType,
-        authConfig: dto.authConfig,
-        healthCheckUrl: dto.healthCheckUrl,
-        oclLevel: dto.oclLevel,
-        falLevel: dto.falLevel,
-        status: 'active',
-      },
+    return this.prisma.$transaction(async (tx) => {
+      const connector = await tx.connector.create({
+        data: {
+          tenantId,
+          name: dto.name,
+          oaType: dto.oaType,
+          oaVendor: dto.oaVendor,
+          oaVersion: dto.oaVersion,
+          baseUrl: dto.baseUrl,
+          authType: dto.authType,
+          authConfig: publicAuthConfig,
+          healthCheckUrl: dto.healthCheckUrl,
+          oclLevel: dto.oclLevel,
+          falLevel: dto.falLevel,
+          status: 'active',
+        },
+      });
+
+      await tx.connectorCapability.create({
+        data: {
+          tenantId,
+          connectorId: connector.id,
+          ...this.inferCapabilities(dto),
+        },
+      });
+
+      if (secretRef) {
+        await tx.connectorSecretRef.create({
+          data: {
+            tenantId,
+            connectorId: connector.id,
+            ...secretRef,
+          },
+        });
+      }
+
+      return connector;
     });
   }
 
   async list(tenantId: string) {
     return this.prisma.connector.findMany({
       where: { tenantId },
+      include: {
+        capability: true,
+        secretRef: true,
+      },
       orderBy: { createdAt: 'desc' },
     });
   }
@@ -39,6 +69,8 @@ export class ConnectorService {
     const connector = await this.prisma.connector.findUnique({
       where: { id },
       include: {
+        capability: true,
+        secretRef: true,
         processTemplates: {
           where: { status: 'published' },
           orderBy: { createdAt: 'desc' },
@@ -54,93 +86,115 @@ export class ConnectorService {
   }
 
   async update(id: string, dto: UpdateConnectorDto) {
-    return this.prisma.connector.update({
+    const existing = await this.prisma.connector.findUnique({
       where: { id },
-      data: {
-        name: dto.name,
-        oaVendor: dto.oaVendor,
-        oaVersion: dto.oaVersion,
-        baseUrl: dto.baseUrl,
-        authType: dto.authType,
-        authConfig: dto.authConfig,
-        healthCheckUrl: dto.healthCheckUrl,
-        oclLevel: dto.oclLevel,
-        falLevel: dto.falLevel,
-        status: dto.status,
+      include: {
+        capability: true,
       },
+    });
+
+    if (!existing) {
+      throw new NotFoundException('Connector not found');
+    }
+
+    const { publicAuthConfig, secretRef } = this.splitAuthConfig(dto.authConfig);
+
+    return this.prisma.$transaction(async (tx) => {
+      const connector = await tx.connector.update({
+        where: { id },
+        data: {
+          name: dto.name,
+          oaType: dto.oaType,
+          oaVendor: dto.oaVendor,
+          oaVersion: dto.oaVersion,
+          baseUrl: dto.baseUrl,
+          authType: dto.authType,
+          authConfig: dto.authConfig ? publicAuthConfig : undefined,
+          healthCheckUrl: dto.healthCheckUrl,
+          oclLevel: dto.oclLevel,
+          falLevel: dto.falLevel,
+          status: dto.status,
+        },
+      });
+
+      if (dto.authConfig) {
+        if (secretRef) {
+          await tx.connectorSecretRef.upsert({
+            where: { connectorId: id },
+            create: {
+              tenantId: existing.tenantId,
+              connectorId: id,
+              ...secretRef,
+            },
+            update: secretRef,
+          });
+        } else {
+          await tx.connectorSecretRef.deleteMany({
+            where: { connectorId: id },
+          });
+        }
+      }
+
+      if (dto.oaType || dto.authType || dto.oclLevel || dto.falLevel) {
+        await tx.connectorCapability.upsert({
+          where: { connectorId: id },
+          create: {
+            tenantId: existing.tenantId,
+            connectorId: id,
+            ...this.inferCapabilities({
+              name: connector.name,
+              oaType: dto.oaType || connector.oaType,
+              oaVendor: dto.oaVendor || connector.oaVendor || undefined,
+              oaVersion: dto.oaVersion || connector.oaVersion || undefined,
+              baseUrl: dto.baseUrl || connector.baseUrl,
+              authType: dto.authType || connector.authType,
+              authConfig: dto.authConfig || (connector.authConfig as Record<string, any>),
+              healthCheckUrl: dto.healthCheckUrl || connector.healthCheckUrl || undefined,
+              oclLevel: dto.oclLevel || connector.oclLevel,
+              falLevel: dto.falLevel || connector.falLevel || undefined,
+            }, existing.capability?.metadata as Record<string, any> | undefined),
+          },
+          update: this.inferCapabilities({
+            name: connector.name,
+            oaType: dto.oaType || connector.oaType,
+            oaVendor: dto.oaVendor || connector.oaVendor || undefined,
+            oaVersion: dto.oaVersion || connector.oaVersion || undefined,
+            baseUrl: dto.baseUrl || connector.baseUrl,
+            authType: dto.authType || connector.authType,
+            authConfig: dto.authConfig || (connector.authConfig as Record<string, any>),
+            healthCheckUrl: dto.healthCheckUrl || connector.healthCheckUrl || undefined,
+            oclLevel: dto.oclLevel || connector.oclLevel,
+            falLevel: dto.falLevel || connector.falLevel || undefined,
+          }, existing.capability?.metadata as Record<string, any> | undefined),
+        });
+      }
+
+      return connector;
     });
   }
 
   async delete(id: string) {
-    // 获取 connector 信息
     const connector = await this.prisma.connector.findUnique({
       where: { id },
-      include: {
-        processTemplates: {
-          select: { id: true },
-        },
-      },
     });
 
     if (!connector) {
       throw new NotFoundException('Connector not found');
     }
 
-    const templateIds = connector.processTemplates.map((t) => t.id);
-
-    // 使用事务进行级联删除
-    return this.prisma.$transaction(async (tx) => {
-      // 1. 删除所有相关的 Submission 的状态记录
-      if (templateIds.length > 0) {
-        const submissions = await tx.submission.findMany({
-          where: { templateId: { in: templateIds } },
-          select: { id: true },
-        });
-        const submissionIds = submissions.map((s) => s.id);
-
-        if (submissionIds.length > 0) {
-          await tx.submissionStatus.deleteMany({
-            where: { submissionId: { in: submissionIds } },
-          });
-        }
-
-        // 2. 删除所有相关的 Submission
-        await tx.submission.deleteMany({
-          where: { templateId: { in: templateIds } },
-        });
-
-        // 3. 删除所有相关的 ProcessDraft
-        await tx.processDraft.deleteMany({
-          where: { templateId: { in: templateIds } },
-        });
-
-        // 4. 删除所有相关的 ProcessTemplate
-        await tx.processTemplate.deleteMany({
-          where: { id: { in: templateIds } },
-        });
-      }
-
-      // 5. 删除所有相关的 MCPTool
-      await tx.mCPTool.deleteMany({
-        where: { connectorId: id },
-      });
-
-      // 6. 最后删除 Connector
-      return tx.connector.delete({
-        where: { id },
-      });
-    });
+    // 所有关联表均已配置 onDelete: Cascade，数据库自动级联删除：
+    // Connector → ProcessTemplate → Submission → SubmissionStatus/SubmissionEvent
+    //                             → ProcessDraft
+    //           → MCPTool, RemoteProcess, SyncLog, SyncCursor, SyncJob,
+    //             WebhookInbox, ReferenceDataset → ReferenceItem,
+    //             ConnectorCapability, ConnectorSecretRef
+    return this.prisma.connector.delete({ where: { id } });
   }
 
   async healthCheck(id: string) {
     const connector = await this.get(id);
 
-    // Create mock adapter for health check
-    const adapter = AdapterFactory.createMockAdapter(
-      connector.oaType as any,
-      [],
-    );
-
+    const adapter = await this.adapterRuntimeService.createAdapterForConnector(id, []);
     const result = await adapter.healthCheck();
 
     // Update last health check time
@@ -153,5 +207,100 @@ export class ConnectorService {
     });
 
     return result;
+  }
+
+  private inferCapabilities(
+    dto: CreateConnectorDto | UpdateConnectorDto,
+    existingMetadata?: Record<string, any>,
+  ) {
+    const oclLevel = dto.oclLevel || 'OCL0';
+    const supportsRead = ['OCL2', 'OCL3', 'OCL4', 'OCL5'].includes(oclLevel);
+    const supportsWrite = ['OCL3', 'OCL4', 'OCL5'].includes(oclLevel);
+    const supportsAdvanced = ['OCL4', 'OCL5'].includes(oclLevel);
+
+    return {
+      supportsDiscovery: true,
+      supportsSchemaSync: supportsRead,
+      supportsReferenceSync: supportsRead,
+      supportsStatusPull: supportsRead,
+      supportsWebhook: supportsAdvanced,
+      supportsCancel: supportsWrite,
+      supportsUrge: supportsWrite,
+      supportsDelegate: supportsAdvanced,
+      supportsSupplement: supportsAdvanced,
+      supportsRealtimePerm: dto.oaType === 'hybrid' || supportsAdvanced,
+      supportsIdempotency: supportsAdvanced,
+      syncModes: supportsAdvanced ? ['full', 'incremental'] : ['full'],
+      metadata: {
+        ...(existingMetadata || {}),
+        inferredFrom: existingMetadata ? 'connector_update' : 'connector_create',
+        oclLevel,
+        syncPolicy: existingMetadata?.syncPolicy || this.buildDefaultSyncPolicy({
+          supportsSchemaSync: supportsRead,
+          supportsReferenceSync: supportsRead,
+          supportsStatusPull: supportsRead,
+        }),
+      },
+    };
+  }
+
+  private buildDefaultSyncPolicy(input: {
+    supportsSchemaSync: boolean;
+    supportsReferenceSync: boolean;
+    supportsStatusPull: boolean;
+  }) {
+    return {
+      enabled: true,
+      domains: {
+        schema: {
+          enabled: input.supportsSchemaSync,
+          intervalMinutes: 360,
+        },
+        reference: {
+          enabled: input.supportsReferenceSync,
+          intervalMinutes: 120,
+        },
+        status: {
+          enabled: input.supportsStatusPull,
+          intervalMinutes: 10,
+        },
+      },
+    };
+  }
+
+  private splitAuthConfig(authConfig?: Record<string, any>) {
+    if (!authConfig) {
+      return {
+        publicAuthConfig: {},
+        secretRef: null as null | {
+          secretProvider: string;
+          secretPath: string;
+          secretVersion?: string;
+        },
+      };
+    }
+
+    const {
+      secretProvider,
+      secretPath,
+      secretVersion,
+      ...publicAuthConfig
+    } = authConfig;
+
+    if (secretProvider && secretPath) {
+      return {
+        publicAuthConfig,
+        secretRef: {
+          secretProvider,
+          secretPath,
+          secretVersion,
+        },
+      };
+    }
+
+    return {
+      publicAuthConfig: authConfig,
+      secretRef: null,
+    };
   }
 }

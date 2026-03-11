@@ -2,6 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { ApiDocumentParserAgent, ParseDocumentOptions } from './agents/api-document-parser.agent';
 import { createHash } from 'crypto';
+import axios from 'axios';
 
 export interface CreateParseJobDto {
   tenantId: string;
@@ -102,8 +103,23 @@ export class DocumentParserService {
         where: { id: parseJobId },
       });
 
+      // 更新 bootstrap job 状态为 PARSING
+      await this.prisma.bootstrapJob.update({
+        where: { id: parseJob.bootstrapJobId },
+        data: { status: 'PARSING' },
+      });
+
+      // 尝试从 OA 系统拉取真实流程模板数据，丰富文档内容
+      let enrichedContent = documentContent;
+      const bootstrapJob = await this.prisma.bootstrapJob.findUnique({
+        where: { id: parseJob.bootstrapJobId },
+      });
+      if (bootstrapJob?.oaUrl) {
+        enrichedContent = await this.enrichWithLiveFormData(documentContent, bootstrapJob.oaUrl);
+      }
+
       const result = await this.parserAgent.parseDocument(
-        documentContent,
+        enrichedContent,
         parseJob.documentType,
         options,
       );
@@ -135,8 +151,16 @@ export class DocumentParserService {
       });
 
       this.logger.log(`解析任务完成: ${parseJobId}, 状态: ${finalStatus}`);
+
+      // 自动发布到流程库并更新 bootstrap job 状态
+      await this.autoPublishAndUpdateBootstrapJob(parseJobId, parseJob.bootstrapJobId);
     } catch (error) {
       this.logger.error(`解析任务失败: ${parseJobId}`, error.stack);
+
+      // 获取 bootstrapJobId 用于更新状态
+      const parseJob = await this.prisma.parseJob.findUnique({
+        where: { id: parseJobId },
+      });
 
       await this.prisma.parseJob.update({
         where: { id: parseJobId },
@@ -151,6 +175,134 @@ export class DocumentParserService {
           ] as any,
         },
       });
+
+      // 更新 bootstrap job 状态为 FAILED
+      if (parseJob) {
+        await this.prisma.bootstrapJob.update({
+          where: { id: parseJob.bootstrapJobId },
+          data: { status: 'FAILED' },
+        });
+      }
+    }
+  }
+
+  /**
+   * 解析完成后自动发布到流程库并更新 bootstrap job 状态
+   */
+  private async autoPublishAndUpdateBootstrapJob(parseJobId: string, bootstrapJobId: string) {
+    try {
+      // 获取所有提取的流程
+      const extractedProcesses = await this.prisma.extractedProcess.findMany({
+        where: { parseJobId },
+      });
+
+      if (extractedProcesses.length === 0) {
+        this.logger.warn(`解析任务 ${parseJobId} 没有提取到流程，标记为 FAILED`);
+        await this.prisma.bootstrapJob.update({
+          where: { id: bootstrapJobId },
+          data: { status: 'FAILED' },
+        });
+        return;
+      }
+
+      // 更新 bootstrap job 状态为 COMPILING
+      await this.prisma.bootstrapJob.update({
+        where: { id: bootstrapJobId },
+        data: { status: 'COMPILING' },
+      });
+
+      // 发布每个流程到流程库
+      let publishedCount = 0;
+      for (const process of extractedProcesses) {
+        try {
+          const templateId = await this.publishToProcessLibrary(process);
+          await this.prisma.extractedProcess.update({
+            where: { id: process.id },
+            data: { status: 'PUBLISHED', publishedTemplateId: templateId },
+          });
+          publishedCount++;
+        } catch (err) {
+          this.logger.warn(`发布流程 ${process.processCode} 失败: ${err.message}`);
+        }
+      }
+
+      // 更新 bootstrap job 为最终状态
+      if (publishedCount > 0) {
+        await this.prisma.bootstrapJob.update({
+          where: { id: bootstrapJobId },
+          data: { status: 'PUBLISHED', completedAt: new Date() },
+        });
+        this.logger.log(`Bootstrap job ${bootstrapJobId} 完成，发布了 ${publishedCount} 个流程到流程库`);
+      } else {
+        await this.prisma.bootstrapJob.update({
+          where: { id: bootstrapJobId },
+          data: { status: 'FAILED' },
+        });
+        this.logger.warn(`Bootstrap job ${bootstrapJobId} 所有流程发布失败`);
+      }
+    } catch (error) {
+      this.logger.error(`自动发布失败: ${error.message}`, error.stack);
+      await this.prisma.bootstrapJob.update({
+        where: { id: bootstrapJobId },
+        data: { status: 'FAILED' },
+      });
+    }
+  }
+
+  /**
+   * 从 OA 系统拉取真实流程模板数据，合并到 API 文档中
+   * 解决通用申请接口（POST /api/applications）只有一个 example 导致 LLM 只识别出一个流程的问题
+   */
+  private async enrichWithLiveFormData(documentContent: string, oaUrl: string): Promise<string> {
+    this.logger.log(`尝试从 OA 系统 ${oaUrl} 拉取流程模板数据`);
+
+    try {
+      // 1. 尝试登录获取 session
+      const loginRes = await axios.post(
+        `${oaUrl}/api/auth/login`,
+        { username: 'admin', password: 'Admin@123' },
+        { timeout: 10000, withCredentials: true },
+      );
+
+      const cookies = loginRes.headers['set-cookie'];
+      const cookieHeader = cookies ? cookies.map((c: string) => c.split(';')[0]).join('; ') : '';
+
+      // 2. 拉取流程模板列表
+      const formsRes = await axios.get(`${oaUrl}/api/forms`, {
+        timeout: 10000,
+        headers: cookieHeader ? { Cookie: cookieHeader } : {},
+      });
+
+      const forms = formsRes.data?.forms;
+      if (!forms || !Array.isArray(forms) || forms.length === 0) {
+        this.logger.warn('OA 系统未返回流程模板数据');
+        return documentContent;
+      }
+
+      this.logger.log(`从 OA 系统获取到 ${forms.length} 个流程模板: ${forms.map((f: any) => f.name).join(', ')}`);
+
+      // 3. 将流程模板数据追加到文档内容中
+      const formsSection = `
+
+=== OA 系统实际流程模板数据（来自 GET /api/forms 接口的真实返回） ===
+以下是 OA 系统中实际注册的所有流程模板，每个流程通过 POST /api/applications 接口提交，
+使用 formCode 字段区分不同流程类型。请为每个流程模板都生成对应的 process 定义。
+
+${JSON.stringify(forms, null, 2)}
+
+=== 重要说明 ===
+- 上面每个 form 对象就是一个独立的业务流程
+- formCode 对应 processCode（需转为大写下划线格式）
+- fields 数组包含了每个流程的完整字段定义
+- workflow 数组包含了审批流程步骤
+- 所有流程共用 POST /api/applications 接口提交，通过 formCode 区分
+- 请确保为每一个 form 都生成对应的 process，不要遗漏
+`;
+
+      return documentContent + formsSection;
+    } catch (error) {
+      this.logger.warn(`从 OA 系统拉取流程模板失败: ${error.message}，使用原始文档继续解析`);
+      return documentContent;
     }
   }
 
@@ -403,34 +555,118 @@ export class DocumentParserService {
 
     const tenantId = parseJob.bootstrapJob.tenantId;
 
-    // 获取或创建默认连接器
+    // 获取或创建连接器（使用 bootstrap job 的真实 OA 信息）
+    const bootstrapJob = parseJob.bootstrapJob;
     let connector = parseJob.bootstrapJob.tenant.connectors[0];
     if (!connector) {
-      connector = await this.prisma.connector.create({
-        data: {
-          tenantId,
-          name: 'Default Connector',
-          oaType: 'openapi',
-          baseUrl: 'http://localhost',
-          authType: 'none',
-          authConfig: {},
-          oclLevel: 'OCL3',
-        },
+      const connectorName = bootstrapJob.name || 'OA Connector';
+      const baseUrl = bootstrapJob.oaUrl || 'http://localhost';
+
+      connector = await this.prisma.$transaction(async (tx) => {
+        const createdConnector = await tx.connector.create({
+          data: {
+            tenantId,
+            name: connectorName,
+            oaType: 'openapi',
+            baseUrl,
+            authType: 'apikey',
+            authConfig: {},
+            oclLevel: 'OCL3',
+          },
+        });
+        await tx.connectorCapability.create({
+          data: {
+            tenantId,
+            connectorId: createdConnector.id,
+            supportsDiscovery: true,
+            supportsSchemaSync: true,
+            supportsReferenceSync: true,
+            supportsStatusPull: true,
+            supportsCancel: true,
+            supportsUrge: true,
+            syncModes: ['full'],
+            metadata: {
+              inferredFrom: 'document_parser_default_connector',
+            },
+          },
+        });
+        return createdConnector;
+      });
+
+      // 回写 connectorId 到 BootstrapJob
+      await this.prisma.bootstrapJob.update({
+        where: { id: bootstrapJob.id },
+        data: { connectorId: connector.id },
       });
     }
+
+    const sourceHash = this.calculateHash(JSON.stringify({
+      processCode: process.processCode,
+      processName: process.processName,
+      description: process.description,
+      endpoints: process.endpoints,
+      fields: process.fields,
+    }));
+    const remoteProcess = await this.prisma.remoteProcess.upsert({
+      where: {
+        connectorId_remoteProcessId: {
+          connectorId: connector.id,
+          remoteProcessId: process.processCode,
+        },
+      },
+      create: {
+        tenantId,
+        connectorId: connector.id,
+        remoteProcessId: process.processCode,
+        remoteProcessCode: process.processCode,
+        remoteProcessName: process.processName,
+        processCategory: process.processCategory,
+        sourceHash,
+        sourceVersion: '1',
+        metadata: {
+          extractedFrom: 'document_parser',
+        },
+        lastSchemaSyncAt: new Date(),
+        lastDriftCheckAt: new Date(),
+      },
+      update: {
+        remoteProcessCode: process.processCode,
+        remoteProcessName: process.processName,
+        processCategory: process.processCategory,
+        sourceHash,
+        metadata: {
+          extractedFrom: 'document_parser',
+        },
+        lastSchemaSyncAt: new Date(),
+        lastDriftCheckAt: new Date(),
+      },
+    });
+    const latestTemplate = await this.prisma.processTemplate.findFirst({
+      where: {
+        connectorId: connector.id,
+        processCode: process.processCode,
+      },
+      orderBy: {
+        version: 'desc',
+      },
+    });
+    const nextVersion = latestTemplate ? latestTemplate.version + 1 : 1;
 
     // 创建ProcessTemplate
     const template = await this.prisma.processTemplate.create({
       data: {
         tenantId,
         connectorId: connector.id,
+        remoteProcessId: remoteProcess.id,
         processCode: process.processCode,
         processName: process.processName,
         processCategory: process.processCategory,
         description: process.description,
-        version: 1,
+        version: nextVersion,
         status: 'published',
         falLevel: 'F3', // 默认F3
+        sourceHash,
+        sourceVersion: String(nextVersion),
         schema: {
           fields: process.fields,
         },
@@ -439,6 +675,16 @@ export class DocumentParserService {
         },
         rules: null,
         permissions: null,
+        lastSyncedAt: new Date(),
+        publishedAt: new Date(),
+      },
+    });
+
+    await this.prisma.remoteProcess.update({
+      where: { id: remoteProcess.id },
+      data: {
+        latestTemplateId: template.id,
+        sourceVersion: String(nextVersion),
       },
     });
 

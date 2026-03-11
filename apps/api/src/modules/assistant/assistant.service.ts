@@ -3,18 +3,33 @@ import { PrismaService } from '../common/prisma.service';
 import { IntentAgent } from './agents/intent.agent';
 import { FlowAgent } from './agents/flow.agent';
 import { FormAgent } from './agents/form.agent';
+import { ConnectorRouter } from './agents/connector-router';
 import { PermissionService } from '../permission/permission.service';
 import { AuditService } from '../audit/audit.service';
 import { ProcessLibraryService } from '../process-library/process-library.service';
 import { MCPService } from '../mcp/mcp.service';
 import { MCPExecutorService } from '../mcp/mcp-executor.service';
+import { SubmissionService } from '../submission/submission.service';
 import { ChatIntent } from '@uniflow/shared-types';
+import {
+  ACTIVE_SUBMISSION_STATUSES,
+  getSubmissionStatusText,
+} from '../common/submission-status.util';
 
 interface ChatInput {
   tenantId: string;
   userId: string;
   sessionId?: string;
   message: string;
+  attachments?: ChatAttachment[];
+}
+
+interface ChatAttachment {
+  fileId: string;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  filePath: string;
 }
 
 interface ActionButton {
@@ -32,8 +47,9 @@ interface ChatResponse {
   suggestedActions?: string[];
   actionButtons?: ActionButton[];
   formData?: Record<string, any>;
-  missingFields?: Array<{ key: string; label: string; question: string }>;
+  missingFields?: Array<{ key: string; label: string; question: string; type?: string }>;
   processStatus?: ProcessStatus;
+  needsAttachment?: boolean;
 }
 
 // 流程状态枚举
@@ -97,9 +113,11 @@ export class AssistantService {
     private readonly intentAgent: IntentAgent,
     private readonly flowAgent: FlowAgent,
     private readonly formAgent: FormAgent,
+    private readonly connectorRouter: ConnectorRouter,
     private readonly permissionService: PermissionService,
     private readonly auditService: AuditService,
     private readonly processLibraryService: ProcessLibraryService,
+    private readonly submissionService: SubmissionService,
     private readonly mcpService: MCPService,
     private readonly mcpExecutor: MCPExecutorService,
   ) {}
@@ -123,16 +141,113 @@ export class AssistantService {
           sessionId: session.id,
           role: 'user',
           content: input.message,
+          metadata: input.attachments?.length
+            ? { attachments: input.attachments as any }
+            : undefined,
         },
       });
+
+      // If user sent attachments during parameter collection, store them in form data
+      if (input.attachments?.length) {
+        const processContext = this.extractProcessContext(session);
+        if (processContext && processContext.status === ProcessStatus.PARAMETER_COLLECTION) {
+          const currentFormData = { ...processContext.parameters };
+          // Find file-type fields that are still missing
+          const template = await this.processLibraryService.getByCode(
+            input.tenantId,
+            processContext.processCode,
+          );
+          const schema = template.schema as any;
+          const fileFields = (schema?.fields || []).filter(
+            (f: any) => f.type === 'file' && !currentFormData[f.key],
+          );
+          if (fileFields.length > 0) {
+            currentFormData[fileFields[0].key] = input.attachments;
+            const meta = (session.metadata || {}) as Record<string, any>;
+            await this.prisma.chatSession.update({
+              where: { id: session.id },
+              data: {
+                metadata: {
+                  ...meta,
+                  currentFormData,
+                },
+              },
+            });
+            session.metadata = { ...meta, currentFormData };
+          }
+        }
+      }
 
       // Check if we're in the middle of a process
       const processContext = this.extractProcessContext(session);
 
       let response: ChatResponse;
 
-      // If in parameter collection, continue that flow
+      // If in parameter collection, check if user wants to switch to a different flow
       if (processContext && processContext.status === ProcessStatus.PARAMETER_COLLECTION) {
+        // 先检测用户是否想发起新流程（意图切换检测）
+        const switchCheck = await this.intentAgent.detectIntent(input.message, {
+          userId: resolvedUserId,
+          tenantId: input.tenantId,
+          sessionId: session.id,
+        });
+
+        if (
+          switchCheck.intent === ChatIntent.CREATE_SUBMISSION &&
+          switchCheck.confidence >= 0.7
+        ) {
+          // 用户可能想发起新流程，检查是否匹配到不同的流程
+          const allFlows = await this.processLibraryService.list(input.tenantId);
+          const sessionMeta = (session.metadata || {}) as Record<string, any>;
+          const scopedFlows = sessionMeta.routedConnectorId
+            ? allFlows.filter(f => f.connector?.id === sessionMeta.routedConnectorId)
+            : allFlows;
+          const flowResult = await this.flowAgent.matchFlow(
+            switchCheck.intent,
+            input.message,
+            scopedFlows.map(f => ({
+              processCode: f.processCode,
+              processName: f.processName,
+              processCategory: f.processCategory || '',
+            })),
+          );
+
+          if (
+            flowResult.matchedFlow &&
+            flowResult.matchedFlow.processCode !== processContext.processCode
+          ) {
+            // 确认是不同的流程，中断当前流程，重新走意图路由
+            this.logger.log(
+              `用户在 ${processContext.processCode} 参数收集中切换到 ${flowResult.matchedFlow.processCode}`,
+            );
+            await this.rollbackProcess(session, traceId);
+            // 清空 processContext，让下面走正常的意图路由
+            const resolvedInput = { ...input, userId: resolvedUserId };
+            response = await this.handleCreateSubmission(
+              resolvedInput,
+              session,
+              switchCheck,
+              sharedContext,
+              traceId,
+            );
+            // 保存助手回复并返回
+            await this.prisma.chatMessage.create({
+              data: {
+                sessionId: session.id,
+                role: 'assistant',
+                content: response.message,
+                metadata: {
+                  processStatus: response.processStatus,
+                  draftId: response.draftId,
+                  actionButtons: response.actionButtons as any,
+                },
+              },
+            });
+            return response;
+          }
+        }
+
+        // 不是意图切换，继续当前流程的参数收集
         response = await this.continueParameterCollection(
           { ...input, userId: resolvedUserId },
           session,
@@ -384,17 +499,29 @@ export class AssistantService {
       });
       session.metadata = updatedMetadata;
 
-      // 如果还有缺失字段，继续询问
+      // 如果还有缺失字段，一次性列出所有缺失信息
       if (!formResult.isComplete) {
-        const nextQuestion = formResult.missingFields[0];
+        const hasFileField = formResult.missingFields.some(f => f.type === 'file');
+        let message: string;
+        if (formResult.missingFields.length === 1) {
+          // 只剩一个字段，直接问
+          message = formResult.missingFields[0].question;
+        } else {
+          // 多个字段，编号列出
+          const allQuestions = formResult.missingFields
+            .map((f, i) => `${i + 1}. ${f.question}`)
+            .join('\n');
+          message = `还需要以下信息：\n\n${allQuestions}\n\n您可以一次性告诉我，也可以逐个回答。`;
+        }
         return {
           sessionId: session.id,
-          message: nextQuestion.question,
+          message,
           intent: ChatIntent.CREATE_SUBMISSION,
           needsInput: true,
           formData: currentFormData,
           missingFields: formResult.missingFields,
           processStatus: ProcessStatus.PARAMETER_COLLECTION,
+          needsAttachment: hasFileField,
         };
       }
 
@@ -892,10 +1019,61 @@ ${currentFields}
     traceId: string,
   ): Promise<ChatResponse> {
     try {
-      // Get available flows
-      const flows = await this.processLibraryService.list(input.tenantId);
+      // Step 0: Route to the right connector
+      const sessionMeta = (session.metadata || {}) as Record<string, any>;
+      const routeResult = await this.connectorRouter.route(
+        input.tenantId,
+        input.userId,
+        input.message,
+        sessionMeta.routedConnectorId || null,
+      );
 
-      // Match flow
+      if (routeResult.needsSelection) {
+        // Store candidates in session so user can pick by number/name
+        await this.prisma.chatSession.update({
+          where: { id: session.id },
+          data: {
+            metadata: {
+              ...sessionMeta,
+              pendingConnectorSelection: true,
+              connectorCandidates: routeResult.candidates,
+            },
+          },
+        });
+        return {
+          sessionId: session.id,
+          message: routeResult.selectionQuestion || '请选择要使用的 OA 系统。',
+          needsInput: true,
+          suggestedActions: routeResult.candidates?.map(c => c.name),
+        };
+      }
+
+      // Persist routed connector in session
+      if (routeResult.connectorId && routeResult.connectorId !== sessionMeta.routedConnectorId) {
+        await this.prisma.chatSession.update({
+          where: { id: session.id },
+          data: {
+            metadata: {
+              ...sessionMeta,
+              routedConnectorId: routeResult.connectorId,
+              routedConnectorName: routeResult.connectorName,
+            },
+          },
+        });
+        session.metadata = {
+          ...sessionMeta,
+          routedConnectorId: routeResult.connectorId,
+          routedConnectorName: routeResult.connectorName,
+        };
+      }
+
+      // Step 1: Get flows scoped to the selected connector only
+      const allFlows = await this.processLibraryService.list(input.tenantId);
+      const flows = routeResult.connectorId
+        ? allFlows.filter(f => f.connector?.id === routeResult.connectorId)
+        : allFlows;
+
+      // Match flow (LLM only sees this connector's flows)
       const flowResult = await this.flowAgent.matchFlow(
         intentResult.intent,
         input.message,
@@ -985,15 +1163,20 @@ ${currentFields}
       });
 
       if (!formResult.isComplete) {
-        const nextQuestion = formResult.missingFields[0];
+        const hasFileField = formResult.missingFields.some(f => f.type === 'file');
+        // 一次性列出所有缺失字段，让用户可以一次性提供
+        const allQuestions = formResult.missingFields
+          .map((f, i) => `${i + 1}. ${f.question}`)
+          .join('\n');
         return {
           sessionId: session.id,
-          message: `正在为您填写"${flowResult.matchedFlow.processName}"。\n\n${nextQuestion.question}`,
+          message: `正在为您填写"${flowResult.matchedFlow.processName}"，还需要以下信息：\n\n${allQuestions}\n\n您可以一次性告诉我，也可以逐个回答。`,
           intent: ChatIntent.CREATE_SUBMISSION,
           needsInput: true,
           formData: currentFormData,
           missingFields: formResult.missingFields,
           processStatus: ProcessStatus.PARAMETER_COLLECTION,
+          needsAttachment: hasFileField,
         };
       }
 
@@ -1027,14 +1210,10 @@ ${currentFields}
   ): Promise<ChatResponse> {
     try {
       // Get user's recent submissions
-      const submissions = await this.prisma.submission.findMany({
-        where: {
-          tenantId: input.tenantId,
-          userId: input.userId,
-        },
-        orderBy: { createdAt: 'desc' },
-        take: 5,
-      });
+      const submissions = (await this.submissionService.listSubmissions(
+        input.tenantId,
+        input.userId,
+      )).slice(0, 5);
 
       if (submissions.length === 0) {
         return {
@@ -1046,18 +1225,11 @@ ${currentFields}
       }
 
       // 获取模板信息
-      const templateIds = [...new Set(submissions.map(s => s.templateId))];
-      const templates = await this.prisma.processTemplate.findMany({
-        where: { id: { in: templateIds } },
-      });
-      const templateMap = new Map(templates.map(t => [t.id, t]));
-
       const statusList = submissions
         .map((s, i) => {
-          const template = templateMap.get(s.templateId);
-          const statusText = this.getStatusText(s.status);
+          const statusText = getSubmissionStatusText(s.status);
           const date = new Date(s.createdAt).toLocaleDateString('zh-CN');
-          return `${i + 1}. ${template?.processName || '未知流程'} - ${statusText} (${date})`;
+          return `${i + 1}. ${s.processName || '未知流程'} - ${statusText} (${date})`;
         })
         .join('\n');
 
@@ -1095,16 +1267,6 @@ ${currentFields}
         needsInput: false,
       };
     }
-  }
-
-  private getStatusText(status: string): string {
-    const statusMap: Record<string, string> = {
-      pending: '待提交',
-      submitted: '已提交',
-      failed: '提交失败',
-      cancelled: '已取消',
-    };
-    return statusMap[status] || status;
   }
 
   private async handleAction(
@@ -1157,7 +1319,7 @@ ${currentFields}
         where: {
           tenantId: input.tenantId,
           userId: input.userId,
-          status: { in: ['submitted', 'pending'] },
+          status: { in: [...ACTIVE_SUBMISSION_STATUSES] },
         },
         orderBy: { createdAt: 'desc' },
         take: 5,
@@ -1321,21 +1483,48 @@ ${currentFields}
         };
       }
 
-      // 按类别分组
-      const groupedFlows = flows.reduce((acc, flow) => {
-        const category = flow.processCategory || '其他';
-        if (!acc[category]) {
-          acc[category] = [];
+      // 按 connector → 类别 两级分组
+      const connectorGroups = new Map<string, { name: string; flows: any[] }>();
+      for (const flow of flows) {
+        const connName = flow.connector?.name || '未知系统';
+        const connId = flow.connector?.id || 'unknown';
+        if (!connectorGroups.has(connId)) {
+          connectorGroups.set(connId, { name: connName, flows: [] });
         }
-        acc[category].push(flow);
-        return acc;
-      }, {} as Record<string, any[]>);
+        connectorGroups.get(connId)!.flows.push(flow);
+      }
 
-      // 生成流程列表
       let flowList = '';
-      for (const [category, categoryFlows] of Object.entries(groupedFlows)) {
-        flowList += `\n【${category}】\n`;
-        flowList += categoryFlows.map(f => `  - ${f.processName}`).join('\n');
+      if (connectorGroups.size === 1) {
+        // 单系统：只按类别分组，不显示系统名
+        const groupedFlows = flows.reduce((acc, flow) => {
+          const category = flow.processCategory || '其他';
+          if (!acc[category]) acc[category] = [];
+          acc[category].push(flow);
+          return acc;
+        }, {} as Record<string, any[]>);
+
+        for (const [category, categoryFlows] of Object.entries(groupedFlows)) {
+          flowList += `\n【${category}】\n`;
+          flowList += (categoryFlows as any[]).map(f => `  - ${f.processName}`).join('\n');
+        }
+      } else {
+        // 多系统：按系统 → 类别两级分组
+        for (const [, group] of connectorGroups) {
+          flowList += `\n📌 ${group.name}\n`;
+          const byCategory = group.flows.reduce((acc, flow) => {
+            const cat = flow.processCategory || '其他';
+            if (!acc[cat]) acc[cat] = [];
+            acc[cat].push(flow);
+            return acc;
+          }, {} as Record<string, any[]>);
+
+          for (const [category, categoryFlows] of Object.entries(byCategory)) {
+            flowList += `  【${category}】\n`;
+            flowList += (categoryFlows as any[]).map(f => `    - ${f.processName}`).join('\n');
+            flowList += '\n';
+          }
+        }
       }
 
       // 记录审计日志
@@ -1497,6 +1686,11 @@ ${currentFields}
       .map(([key, value]) => {
         const field = fields.find((f: any) => f.key === key);
         const label = field?.label || key;
+        // 文件类型字段显示文件名列表
+        if (Array.isArray(value) && value.length > 0 && value[0]?.fileName) {
+          const fileNames = value.map((f: any) => f.fileName).join('、');
+          return `  ${label}: ${fileNames}`;
+        }
         return `  ${label}: ${value}`;
       })
       .join('\n');

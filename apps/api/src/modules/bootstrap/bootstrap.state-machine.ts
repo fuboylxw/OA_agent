@@ -4,10 +4,9 @@ type BootstrapState =
   | 'CREATED'
   | 'DISCOVERING'
   | 'PARSING'
+  | 'VALIDATING'
   | 'NORMALIZING'
   | 'COMPILING'
-  | 'REPLAYING'
-  | 'REVIEW'
   | 'PUBLISHED'
   | 'FAILED';
 
@@ -16,13 +15,12 @@ type BootstrapEvent =
   | 'DISCOVERY_COMPLETE'
   | 'START_PARSING'
   | 'PARSING_COMPLETE'
+  | 'START_VALIDATING'
+  | 'VALIDATING_COMPLETE'
   | 'START_NORMALIZING'
   | 'NORMALIZING_COMPLETE'
   | 'START_COMPILING'
   | 'COMPILING_COMPLETE'
-  | 'START_REPLAYING'
-  | 'REPLAYING_COMPLETE'
-  | 'APPROVE'
   | 'FAIL';
 
 @Injectable()
@@ -37,7 +35,11 @@ export class BootstrapStateMachine {
       FAIL: 'FAILED',
     },
     PARSING: {
-      PARSING_COMPLETE: 'NORMALIZING',
+      PARSING_COMPLETE: 'VALIDATING',
+      FAIL: 'FAILED',
+    },
+    VALIDATING: {
+      VALIDATING_COMPLETE: 'NORMALIZING',
       FAIL: 'FAILED',
     },
     NORMALIZING: {
@@ -45,15 +47,7 @@ export class BootstrapStateMachine {
       FAIL: 'FAILED',
     },
     COMPILING: {
-      COMPILING_COMPLETE: 'REPLAYING',
-      FAIL: 'FAILED',
-    },
-    REPLAYING: {
-      REPLAYING_COMPLETE: 'REVIEW',
-      FAIL: 'FAILED',
-    },
-    REVIEW: {
-      APPROVE: 'PUBLISHED',
+      COMPILING_COMPLETE: 'PUBLISHED',
       FAIL: 'FAILED',
     },
     PUBLISHED: {},

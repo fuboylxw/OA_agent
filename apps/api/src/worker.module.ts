@@ -1,3 +1,8 @@
+/**
+ * @deprecated 此 Module 已废弃，不被任何入口引用。
+ * Bootstrap 流水线已统一由 apps/worker 中的 WorkerModule 处理。
+ * 保留此文件仅供参考，请勿在 AppModule 或其他入口中 import。
+ */
 import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bull';
 import { ConfigModule } from '@nestjs/config';
@@ -8,6 +13,8 @@ import { IrNormalizerModule } from './modules/ir-normalizer/ir-normalizer.module
 import { AdapterCompilerModule } from './modules/adapter-compiler/adapter-compiler.module';
 import { ReplayValidatorModule } from './modules/replay-validator/replay-validator.module';
 import { BootstrapStateMachine } from './modules/bootstrap/bootstrap.state-machine';
+import { SyncModule } from './modules/sync/sync.module';
+import { WebhookModule } from './modules/webhook/webhook.module';
 
 @Module({
   imports: [
@@ -23,12 +30,16 @@ import { BootstrapStateMachine } from './modules/bootstrap/bootstrap.state-machi
       { name: 'parse' },
       { name: 'submit' },
       { name: 'status' },
+      { name: 'sync' },
+      { name: 'webhook' },
     ),
     CommonModule,
     DiscoveryModule,
     IrNormalizerModule,
     AdapterCompilerModule,
     ReplayValidatorModule,
+    SyncModule,
+    WebhookModule,
   ],
   providers: [BootstrapProcessor, BootstrapStateMachine],
 })

@@ -2,9 +2,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
 import { PrismaService } from '../common/prisma.service';
-import { BootstrapStateMachine } from './bootstrap.state-machine';
 import { CreateBootstrapJobDto } from './dto/create-bootstrap-job.dto';
-import { DocumentParserService } from './document-parser.service';
 import axios from 'axios';
 
 @Injectable()
@@ -13,8 +11,6 @@ export class BootstrapService {
 
   constructor(
     private readonly prisma: PrismaService,
-    private readonly stateMachine: BootstrapStateMachine,
-    private readonly documentParserService: DocumentParserService,
     @InjectQueue('bootstrap') private readonly bootstrapQueue: Queue,
   ) {}
 
@@ -40,6 +36,11 @@ export class BootstrapService {
       throw new Error('请提供 API 文档链接、上传 API 文档或填写 OA 系统地址');
     }
 
+    // 组装 authConfig JSON
+    const authConfig = dto.authType
+      ? { authType: dto.authType, ...(dto.authConfig || {}) }
+      : null;
+
     // Create bootstrap job
     const job = await this.prisma.bootstrapJob.create({
       data: {
@@ -48,6 +49,7 @@ export class BootstrapService {
         status: 'CREATED',
         oaUrl: dto.oaUrl,
         openApiUrl: dto.apiDocUrl,
+        authConfig: authConfig ?? undefined,
       },
     });
 
@@ -87,56 +89,10 @@ export class BootstrapService {
       });
     }
 
-    // Enqueue bootstrap job
+    // 唯一入队路径：Worker Processor 处理全部流水线
     await this.bootstrapQueue.add('process', { jobId: job.id });
 
-    // Auto-trigger document parsing if we have API doc content
-    if (apiDocContent) {
-      this.triggerDocumentParse(job.id, tenantId, dto.apiDocType || 'openapi', apiDocContent, dto.apiDocUrl);
-    }
-
     return job;
-  }
-
-  /**
-   * 异步触发文档解析（不阻塞创建任务的返回）
-   */
-  private async triggerDocumentParse(
-    jobId: string,
-    tenantId: string,
-    docType: string,
-    content: string,
-    docUrl?: string,
-  ) {
-    try {
-      // 更新 job 状态为 DISCOVERING
-      await this.prisma.bootstrapJob.update({
-        where: { id: jobId },
-        data: { status: 'DISCOVERING' },
-      });
-
-      await this.documentParserService.createParseJob({
-        tenantId,
-        bootstrapJobId: jobId,
-        documentType: docType,
-        documentContent: content,
-        documentUrl: docUrl,
-        parseOptions: {
-          extractBusinessLogic: true,
-          generateFieldMapping: true,
-          filterNonBusinessEndpoints: true,
-        },
-      });
-
-      this.logger.log(`Auto-triggered document parse for job ${jobId}`);
-    } catch (error: any) {
-      this.logger.error(`Failed to trigger document parse for job ${jobId}: ${error.message}`);
-      // 解析失败不影响 job 创建，更新状态为 FAILED
-      await this.prisma.bootstrapJob.update({
-        where: { id: jobId },
-        data: { status: 'FAILED' },
-      });
-    }
   }
 
   async getJob(id: string) {
@@ -176,196 +132,96 @@ export class BootstrapService {
     });
   }
 
-  async publishJob(jobId: string) {
+  /**
+   * 重新激活已删除连接器的初始化任务
+   * mode: 'reuse' — 复用旧文档直接重新解析发布
+   * mode: 'new'   — 使用新上传的文档
+   */
+  async reactivate(
+    jobId: string,
+    mode: 'reuse' | 'new',
+    newDoc?: { apiDocContent?: string; apiDocUrl?: string; apiDocType?: string },
+  ) {
     const job = await this.prisma.bootstrapJob.findUnique({
       where: { id: jobId },
-      include: {
-        flowIRs: true,
-        fieldIRs: true,
-        ruleIRs: true,
-        permissionIRs: true,
-        reports: true,
-      },
+      include: { sources: true },
     });
 
-    if (!job) {
-      throw new Error('Bootstrap job not found');
+    if (!job) throw new Error('Bootstrap job not found');
+
+    // 只有 PUBLISHED 且连接器还在的任务不允许重新激活
+    if (job.connectorId && job.status === 'PUBLISHED') {
+      throw new Error('该任务关联的连接器仍然存在，无需重新激活');
     }
 
-    if (job.status !== 'REVIEW') {
-      throw new Error('Job must be in REVIEW status to publish');
-    }
-
-    // Find the connector created during bootstrap
-    const report = job.reports[0];
-    const connector = await this.prisma.connector.findFirst({
-      where: {
-        tenantId: job.tenantId,
-        createdAt: { gte: job.createdAt },
-      },
-      orderBy: { createdAt: 'desc' },
-    });
-
-    if (!connector) {
-      throw new Error('Connector not found for this bootstrap job');
-    }
-
-    // Get MCP tools grouped by module
-    const mcpTools = await this.prisma.mCPTool.findMany({
-      where: { connectorId: connector.id },
-    });
-
-    // Group tools by module (extracted from toolDescription)
-    const moduleMap = new Map<string, { title: string; tools: any[] }>();
-
-    for (const tool of mcpTools) {
-      const match = tool.toolDescription?.match(/^([^ ]+) - /);
-      const moduleTitle = match ? match[1] : '其他';
-
-      if (!moduleMap.has(moduleTitle)) {
-        moduleMap.set(moduleTitle, { title: moduleTitle, tools: [] });
+    if (mode === 'new') {
+      // 使用新文档：获取内容
+      let docContent = newDoc?.apiDocContent;
+      if (!docContent && newDoc?.apiDocUrl) {
+        const response = await axios.get(newDoc.apiDocUrl, { timeout: 30000 });
+        docContent = typeof response.data === 'string'
+          ? response.data
+          : JSON.stringify(response.data);
       }
-      moduleMap.get(moduleTitle)!.tools.push(tool);
-    }
+      if (!docContent) throw new Error('请提供新的 API 文档内容或链接');
 
-    // Category mapping for O2OA modules
-    const categoryMap: Record<string, string> = {
-      '流程平台': '行政',
-      '内容管理': '行政',
-      '考勤管理': '人事',
-      '组织管理': '人事',
-      '文件管理': '行政',
-      '会议管理': '行政',
-      '论坛': '行政',
-      '门户设计': '行政',
-      '门户前端': '行政',
-      '数据查询设计': '行政',
-      '数据查询前端': '行政',
-      '消息通信': '行政',
-      '日历': '行政',
-      '脑图': '行政',
-      'AI': '其他',
-      '程序中心': '其他',
-      '认证/登录': '其他',
-    };
-
-    // Create process templates from modules
-    let publishedCount = 0;
-    for (const [moduleTitle, moduleData] of moduleMap) {
-      // Skip modules with too few tools (likely not user-facing processes)
-      if (moduleData.tools.length < 10) continue;
-
-      // Generate a clean process code using pinyin or English
-      const moduleCodeMap: Record<string, string> = {
-        '流程平台': 'workflow_platform',
-        '内容管理': 'content_management',
-        '考勤管理': 'attendance',
-        '组织管理': 'organization',
-        '文件管理': 'file_management',
-        '会议管理': 'meeting',
-        '论坛': 'forum',
-        '门户设计': 'portal_design',
-        '门户前端': 'portal',
-        '数据查询设计': 'query_design',
-        '数据查询前端': 'query',
-        '数据查询服务': 'query_service',
-        '消息通信': 'message',
-        '日历': 'calendar',
-        '脑图': 'mindmap',
-        'AI': 'ai',
-        '程序中心': 'program_center',
-        '认证/登录': 'auth',
-        '组织快捷查询': 'org_express',
-        '流程处理服务': 'workflow_service',
-        '流程设计': 'workflow_design',
-        '个人设置': 'personal',
-        '流程监控': 'workflow_monitor',
-        '通用': 'general',
-        '热点': 'hotpic',
-        '关联服务': 'correlation',
-        '极光推送': 'jpush',
-        '组件管理': 'component',
-        '初始化': 'init',
-      };
-
-      const processCode = moduleCodeMap[moduleTitle] || `o2oa_${moduleTitle.replace(/[^a-zA-Z0-9]/g, '_').toLowerCase()}`;
-      const category = categoryMap[moduleTitle] || '其他';
-
-      // Check if already exists
-      const existing = await this.prisma.processTemplate.findFirst({
-        where: {
-          tenantId: job.tenantId,
-          connectorId: connector.id,
-          processCode,
-        },
-      });
-
-      if (existing) continue;
-
-      // Count tool types
-      const postCount = moduleData.tools.filter(t => t.httpMethod === 'POST').length;
-      const getCount = moduleData.tools.filter(t => t.httpMethod === 'GET').length;
-
-      // Determine FAL level based on tool capabilities
-      let falLevel = 'F1';
-      if (postCount >= 10 && getCount >= 20) falLevel = 'F3';
-      else if (postCount >= 5 && getCount >= 10) falLevel = 'F2';
-
-      await this.prisma.processTemplate.create({
+      // 保存新文档为新的 BootstrapSource（旧的保留作为历史）
+      await this.prisma.bootstrapSource.create({
         data: {
-          tenantId: job.tenantId,
-          connectorId: connector.id,
-          processCode,
-          processName: moduleTitle,
-          processCategory: category,
-          version: 1,
-          status: 'published',
-          falLevel,
-          schema: {
-            description: `${moduleTitle}相关操作，包含 ${moduleData.tools.length} 个 API 工具`,
-            toolCount: moduleData.tools.length,
-            capabilities: {
-              create: postCount,
-              read: getCount,
-              update: moduleData.tools.filter(t => t.httpMethod === 'PUT').length,
-              delete: moduleData.tools.filter(t => t.httpMethod === 'DELETE').length,
-            },
+          bootstrapJobId: jobId,
+          sourceType: newDoc?.apiDocType || 'openapi',
+          sourceContent: docContent,
+          metadata: {
+            docType: newDoc?.apiDocType || 'openapi',
+            docUrl: newDoc?.apiDocUrl,
+            reactivatedAt: new Date().toISOString(),
           },
-          rules: [],
-          permissions: [],
-          publishedAt: new Date(),
         },
       });
+    } else {
+      // 复用旧文档：确认有可用的历史文档
+      const latestSource = job.sources
+        .filter((s) => s.sourceContent)
+        .sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())[0];
 
-      publishedCount++;
+      if (!latestSource?.sourceContent) {
+        throw new Error('没有找到可复用的历史文档，请上传新文档');
+      }
     }
 
-    // Update job status
+    // 重置状态，通过 Bull 队列重新走 Worker 流水线
     await this.prisma.bootstrapJob.update({
       where: { id: jobId },
-      data: {
-        status: 'PUBLISHED',
-        completedAt: new Date(),
-      },
+      data: { status: 'CREATED', completedAt: null, connectorId: null },
     });
 
-    return {
-      success: true,
-      connectorId: connector.id,
-      publishedTemplates: publishedCount,
-    };
+    await this.bootstrapQueue.add('process', { jobId });
+
+    return { jobId, mode, status: 'CREATED' };
   }
 
-  async transitionState(jobId: string, event: string) {
-    const job = await this.prisma.bootstrapJob.findUnique({ where: { id: jobId } });
-    if (!job) throw new Error('Job not found');
-
-    const newState = this.stateMachine.transition(job.status, event);
-    await this.prisma.bootstrapJob.update({
+  /**
+   * 彻底删除初始化任务及所有关联数据
+   * BootstrapJob 的子表全部配置了 onDelete: Cascade，直接删即可
+   */
+  async deleteJob(jobId: string) {
+    const job = await this.prisma.bootstrapJob.findUnique({
       where: { id: jobId },
-      data: { status: newState },
     });
 
-    return newState;
+    if (!job) throw new Error('Bootstrap job not found');
+
+    // 如果关联的连接器还在，一起删掉
+    if (job.connectorId) {
+      await this.prisma.connector.delete({ where: { id: job.connectorId } });
+    }
+
+    // BootstrapJob 的所有子表均已配置 onDelete: Cascade：
+    // BootstrapJob → BootstrapSource, BootstrapReport, FlowIR, FieldIR,
+    //   RuleIR, PermissionIR, AdapterBuild, ReplayCase, DriftEvent,
+    //   ParseJob → ExtractedProcess
+    await this.prisma.bootstrapJob.delete({ where: { id: jobId } });
+
+    return { deleted: true, jobId };
   }
 }

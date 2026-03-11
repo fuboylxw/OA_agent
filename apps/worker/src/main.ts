@@ -7,7 +7,7 @@ async function bootstrap() {
   const { WorkerModule } = await import('./worker.module');
   const app = await NestFactory.createApplicationContext(WorkerModule);
 
-  logger.log('Worker started, processing queues: bootstrap, parse, submit, status');
+  logger.log('Worker started, processing queues: bootstrap, parse, submit, status, sync, webhook');
 
   // Graceful shutdown
   process.on('SIGTERM', async () => {

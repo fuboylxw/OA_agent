@@ -18,12 +18,22 @@ interface ActionButton {
   type: 'primary' | 'default' | 'danger';
 }
 
+interface ChatAttachment {
+  fileId: string;
+  fileName: string;
+  fileSize: number;
+  mimeType: string;
+  filePath: string;
+}
+
 interface ChatMessage {
   role: string;
   content: string;
   actionButtons?: ActionButton[];
   formData?: Record<string, any>;
   processStatus?: string;
+  needsAttachment?: boolean;
+  attachments?: ChatAttachment[];
 }
 
 interface ChatSession {
@@ -51,7 +61,10 @@ export default function ChatPage() {
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [showHistory, setShowHistory] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
+  const [pendingFiles, setPendingFiles] = useState<ChatAttachment[]>([]);
+  const [uploading, setUploading] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
@@ -103,11 +116,17 @@ export default function ChatPage() {
 
   const sendMessage = async (text?: string) => {
     const msg = text || input.trim();
-    if (!msg) return;
+    if (!msg && pendingFiles.length === 0) return;
 
-    const userMessage: ChatMessage = { role: 'user', content: msg };
+    const userMessage: ChatMessage = {
+      role: 'user',
+      content: msg || (pendingFiles.length > 0 ? `[已上传 ${pendingFiles.length} 个文件]` : ''),
+      attachments: pendingFiles.length > 0 ? pendingFiles : undefined,
+    };
     setMessages((prev) => [...prev, userMessage]);
     setInput('');
+    const filesToSend = [...pendingFiles];
+    setPendingFiles([]);
     setLoading(true);
 
     try {
@@ -116,7 +135,8 @@ export default function ChatPage() {
         tenantId,
         userId,
         sessionId,
-        message: msg,
+        message: msg || '已上传文件',
+        attachments: filesToSend.length > 0 ? filesToSend : undefined,
       });
 
       const data = response.data;
@@ -128,6 +148,7 @@ export default function ChatPage() {
         actionButtons: data.actionButtons,
         formData: data.formData,
         processStatus: data.processStatus,
+        needsAttachment: data.needsAttachment,
       };
       setMessages((prev) => [...prev, assistantMsg]);
 
@@ -139,14 +160,45 @@ export default function ChatPage() {
     }
   };
 
+  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = e.target.files;
+    if (!files || files.length === 0) return;
+
+    setUploading(true);
+    try {
+      const formData = new FormData();
+      for (let i = 0; i < files.length; i++) {
+        formData.append('files', files[i]);
+      }
+      const response = await axios.post(`${API_URL}/api/v1/assistant/upload`, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      setPendingFiles((prev) => [...prev, ...response.data]);
+    } catch (error: any) {
+      const msg = error.response?.data?.message || '文件上传失败';
+      alert(typeof msg === 'string' ? msg : JSON.stringify(msg));
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) fileInputRef.current.value = '';
+    }
+  };
+
+  const removePendingFile = (fileId: string) => {
+    setPendingFiles((prev) => prev.filter((f) => f.fileId !== fileId));
+  };
+
+  // 记录已点击过按钮的消息索引
+  const [clickedActionIdx, setClickedActionIdx] = useState<Record<number, boolean>>({});
+
   // 处理按钮点击
-  const handleActionButton = (action: string) => {
+  const handleActionButton = (action: string, msgIdx: number) => {
     const actionMap: Record<string, string> = {
       confirm: '__ACTION_CONFIRM__',
       cancel: '__ACTION_CANCEL__',
       modify: '__ACTION_MODIFY__',
     };
     const msg = actionMap[action] || action;
+    setClickedActionIdx((prev) => ({ ...prev, [msgIdx]: true }));
     sendMessage(msg);
   };
 
@@ -384,26 +436,58 @@ export default function ChatPage() {
                     }`}
                   >
                     <p className="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}</p>
+                    {/* 用户消息中的附件 */}
+                    {msg.role === 'user' && msg.attachments && msg.attachments.length > 0 && (
+                      <div className="flex flex-wrap gap-1.5 mt-2 pt-2 border-t border-blue-500/30">
+                        {msg.attachments.map((att) => (
+                          <span key={att.fileId} className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-500/30 rounded text-xs">
+                            <i className="fas fa-paperclip text-[10px]"></i>
+                            <span className="max-w-[100px] truncate">{att.fileName}</span>
+                          </span>
+                        ))}
+                      </div>
+                    )}
                   </div>
                 </div>
 
-                {/* 渲染操作按钮 */}
-                {msg.role === 'assistant' && msg.actionButtons && msg.actionButtons.length > 0 && (
+                {/* 智能体提示上传文件 */}
+                {msg.role === 'assistant' && msg.needsAttachment && (
                   <div className="flex justify-start ml-9 mt-2">
-                    <div className="flex gap-2">
-                      {msg.actionButtons.map((btn) => (
-                        <button
-                          key={btn.action}
-                          onClick={() => handleActionButton(btn.action)}
-                          disabled={loading}
-                          className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${getButtonStyle(btn.type)}`}
-                        >
-                          {btn.label}
-                        </button>
-                      ))}
-                    </div>
+                    <button
+                      onClick={() => fileInputRef.current?.click()}
+                      disabled={loading || uploading}
+                      className="px-4 py-2 rounded-lg text-sm font-medium text-blue-600 bg-blue-50 border border-blue-200 hover:bg-blue-100 transition-colors disabled:opacity-50 inline-flex items-center gap-2"
+                    >
+                      <i className={`fas ${uploading ? 'fa-spinner fa-spin' : 'fa-cloud-upload-alt'}`}></i>
+                      点击上传文件
+                    </button>
                   </div>
                 )}
+
+                {/* 渲染操作按钮：只有最后一条带按钮的消息且未点击过才可操作 */}
+                {msg.role === 'assistant' && msg.actionButtons && msg.actionButtons.length > 0 ? (
+                  <div className="flex justify-start ml-9 mt-2">
+                    <div className="flex gap-2">
+                      {clickedActionIdx[idx] || idx !== messages.reduce((last, m, i) =>
+                        m.role === 'assistant' && m.actionButtons && m.actionButtons.length > 0 ? i : last, -1) ? (
+                        <span className="px-4 py-2 rounded-lg text-sm text-gray-400 bg-gray-100 border border-gray-200">
+                          <i className="fas fa-check mr-1.5 text-xs"></i>已操作
+                        </span>
+                      ) : (
+                        msg.actionButtons.map((btn) => (
+                          <button
+                            key={btn.action}
+                            onClick={() => handleActionButton(btn.action, idx)}
+                            disabled={loading}
+                            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${getButtonStyle(btn.type)}`}
+                          >
+                            {btn.label}
+                          </button>
+                        ))
+                      )}
+                    </div>
+                  </div>
+                ) : null}
               </div>
             ))}
 
@@ -431,7 +515,40 @@ export default function ChatPage() {
         {/* Input Area */}
         <div className="border-t border-gray-200 bg-white flex-shrink-0" style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
           <div className="max-w-3xl mx-auto px-4 py-3">
+            {/* 待发送的附件预览 */}
+            {pendingFiles.length > 0 && (
+              <div className="flex flex-wrap gap-2 mb-2">
+                {pendingFiles.map((file) => (
+                  <div key={file.fileId} className="flex items-center gap-1.5 px-2.5 py-1.5 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-700">
+                    <i className="fas fa-paperclip"></i>
+                    <span className="max-w-[120px] truncate">{file.fileName}</span>
+                    <button
+                      onClick={() => removePendingFile(file.fileId)}
+                      className="text-blue-400 hover:text-red-500 ml-0.5"
+                    >
+                      <i className="fas fa-times"></i>
+                    </button>
+                  </div>
+                ))}
+              </div>
+            )}
             <div className="flex gap-2">
+              <input
+                ref={fileInputRef}
+                type="file"
+                className="hidden"
+                multiple
+                accept=".jpg,.jpeg,.png,.gif,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip,.rar"
+                onChange={handleFileUpload}
+              />
+              <button
+                onClick={() => fileInputRef.current?.click()}
+                disabled={loading || uploading}
+                className="px-3 py-3 border border-gray-300 rounded-lg text-gray-500 hover:text-blue-600 hover:border-blue-300 hover:bg-blue-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                title="上传附件"
+              >
+                <i className={`fas ${uploading ? 'fa-spinner fa-spin' : 'fa-paperclip'}`}></i>
+              </button>
               <input
                 type="text"
                 className="flex-1 px-3.5 py-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
@@ -443,7 +560,7 @@ export default function ChatPage() {
               />
               <button
                 onClick={() => sendMessage()}
-                disabled={loading || !input.trim()}
+                disabled={loading || (!input.trim() && pendingFiles.length === 0)}
                 className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-3 rounded-lg flex items-center gap-2 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
               >
                 <i className="fas fa-paper-plane text-xs"></i>

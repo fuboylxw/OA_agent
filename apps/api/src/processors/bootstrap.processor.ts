@@ -1,3 +1,7 @@
+/**
+ * @deprecated 此 Processor 已废弃，bootstrap 流水线已统一由 apps/worker 中的 BootstrapProcessor 处理。
+ * 保留此文件仅供参考，请勿在任何 Module 中注册此 Processor。
+ */
 import { Process, Processor } from '@nestjs/bull';
 import { Job } from 'bull';
 import { Injectable } from '@nestjs/common';

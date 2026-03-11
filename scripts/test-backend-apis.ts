@@ -1,10 +1,15 @@
 import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
+import { PrismaClient } from '@prisma/client';
 
 const API_BASE_URL = 'http://localhost:3001/api/v1';
-const TEST_TENANT_ID = 'test-tenant';
-const TEST_CONNECTOR_ID = 'test-connector';
+const TEST_TENANT_CODE = 'test-tenant';
+const TEST_CONNECTOR_NAME = 'test-connector';
+
+const prisma = new PrismaClient();
+let testTenantId = '';
+let testConnectorId = '';
 
 interface TestResult {
   endpoint: string;
@@ -27,6 +32,7 @@ async function testEndpoint(
   url: string,
   data?: any,
   params?: any,
+  timeout = 10000,
 ): Promise<TestResult> {
   const startTime = Date.now();
   const result: TestResult = {
@@ -42,7 +48,7 @@ async function testEndpoint(
     const config: any = {
       method,
       url: `${API_BASE_URL}${url}`,
-      timeout: 10000,
+      timeout,
     };
 
     if (data) {
@@ -87,11 +93,32 @@ async function setupTestData() {
   console.log('\n📋 准备测试数据...');
   console.log('='.repeat(60));
 
-  // 创建测试租户（通过数据库或API）
-  // 这里我们假设租户已存在，或者通过seed脚本创建
+  const tenant = await prisma.tenant.findUnique({
+    where: { code: TEST_TENANT_CODE },
+    select: { id: true, code: true },
+  });
 
-  console.log(`✓ 测试租户ID: ${TEST_TENANT_ID}`);
-  console.log(`✓ 测试连接器ID: ${TEST_CONNECTOR_ID}`);
+  if (!tenant) {
+    throw new Error(`未找到测试租户 ${TEST_TENANT_CODE}，请先执行 prisma/seed-test.ts`);
+  }
+
+  const connector = await prisma.connector.findFirst({
+    where: {
+      tenantId: tenant.id,
+      name: TEST_CONNECTOR_NAME,
+    },
+    select: { id: true, name: true },
+  });
+
+  if (!connector) {
+    throw new Error(`未找到测试连接器 ${TEST_CONNECTOR_NAME}，请先执行 prisma/seed-test.ts`);
+  }
+
+  testTenantId = tenant.id;
+  testConnectorId = connector.id;
+
+  console.log(`✓ 测试租户ID: ${testTenantId}`);
+  console.log(`✓ 测试连接器ID: ${testConnectorId}`);
 }
 
 /**
@@ -195,8 +222,8 @@ async function testApiUpload() {
     'POST',
     '/mcp/upload-api-json',
     {
-      tenantId: TEST_TENANT_ID,
-      connectorId: TEST_CONNECTOR_ID,
+      tenantId: testTenantId,
+      connectorId: testConnectorId,
       docType: 'openapi',
       docContent: JSON.stringify(sampleApiDoc),
       oaUrl: 'https://test-oa.example.com',
@@ -208,6 +235,8 @@ async function testApiUpload() {
       autoValidate: false,
       autoGenerateMcp: true,
     },
+    null,
+    30000,
   );
 
   testResults.push(result);
@@ -228,8 +257,8 @@ async function testUploadHistory() {
     '/mcp/upload-history',
     null,
     {
-      tenantId: TEST_TENANT_ID,
-      connectorId: TEST_CONNECTOR_ID,
+      tenantId: testTenantId,
+      connectorId: testConnectorId,
     },
   );
 
@@ -250,7 +279,7 @@ async function testMcpToolsList() {
     'GET',
     '/mcp/tools',
     null,
-    { connectorId: TEST_CONNECTOR_ID },
+    { connectorId: testConnectorId },
   );
 
   testResults.push(listResult);
@@ -261,7 +290,7 @@ async function testMcpToolsList() {
     'GET',
     '/mcp/tools',
     null,
-    { connectorId: TEST_CONNECTOR_ID, category: 'submit' },
+    { connectorId: testConnectorId, category: 'submit' },
   );
 
   testResults.push(categoryResult);
@@ -281,7 +310,7 @@ async function testMcpToolDetail(toolName: string) {
     'GET',
     `/mcp/tools/${toolName}`,
     null,
-    { connectorId: TEST_CONNECTOR_ID },
+    { connectorId: testConnectorId },
   );
 
   testResults.push(result);
@@ -300,7 +329,7 @@ async function testProcessLibrary() {
     'GET',
     '/process-library',
     null,
-    { tenantId: TEST_TENANT_ID },
+    { tenantId: testTenantId },
   );
 
   testResults.push(result);
@@ -320,7 +349,7 @@ async function testConnectorManagement() {
     'GET',
     '/connectors',
     null,
-    { tenantId: TEST_TENANT_ID },
+    { tenantId: testTenantId },
   );
 
   testResults.push(listResult);
@@ -397,7 +426,7 @@ async function runAllTests() {
     await testHealthCheck();
 
     // 2. API上传
-    const uploadResult = await testApiUpload();
+    await testApiUpload();
 
     // 3. 上传历史
     await testUploadHistory();
@@ -427,13 +456,22 @@ async function runAllTests() {
     }
     console.log('='.repeat(60));
 
-    process.exit(allPassed ? 0 : 1);
+    return allPassed;
   } catch (error: any) {
     console.error('\n❌ 测试过程中发生错误:', error.message);
     console.error(error.stack);
-    process.exit(1);
+    return false;
+  } finally {
+    await prisma.$disconnect();
   }
 }
 
 // 运行测试
-runAllTests().catch(console.error);
+runAllTests()
+  .then((allPassed) => {
+    process.exitCode = allPassed ? 0 : 1;
+  })
+  .catch((error) => {
+    console.error(error);
+    process.exitCode = 1;
+  });

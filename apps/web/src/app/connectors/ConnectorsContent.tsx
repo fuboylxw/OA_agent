@@ -29,7 +29,7 @@ export default function ConnectorsContent({ initialConnectors }: { initialConnec
     try {
       await axios.post(`${API_URL}/api/v1/connectors/${id}/health-check`);
       // reload
-      const { tenantId } = JSON.parse(document.cookie.split('tenantId=')[1]?.split(';')[0] ? decodeURIComponent(document.cookie.split('tenantId=')[1].split(';')[0]) : '""');
+      const tenantId = localStorage.getItem('tenantId');
       if (tenantId) {
         const res = await axios.get(`${API_URL}/api/v1/connectors`, { params: { tenantId } });
         setConnectors(res.data);

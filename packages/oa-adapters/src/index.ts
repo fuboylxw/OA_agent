@@ -1,3 +1,17 @@
+import { TokenHeaderAdapter, type TokenHeaderConfig } from './token-header-adapter';
+import { CookieSessionAdapter, type CookieSessionConfig } from './cookie-session-adapter';
+import { OAuth2RefreshAdapter, type OAuth2RefreshConfig } from './oauth2-refresh-adapter';
+import { SoapXmlAdapter, type SoapXmlConfig } from './soap-xml-adapter';
+import { MockOAAdapter } from './mock-adapter';
+import { AdapterRegistry } from './registry';
+import type { AdapterDescriptor, AdapterCapabilities, AdapterMatchFn, AdapterLifecycle } from './registry';
+import { hasLifecycle } from './registry';
+import { TokenHeaderDescriptor } from './token-header-descriptor';
+import { CookieSessionDescriptor } from './cookie-session-descriptor';
+import { OAuth2RefreshDescriptor } from './oauth2-refresh-descriptor';
+import { SoapXmlDescriptor } from './soap-xml-descriptor';
+import { MockDescriptor } from './mock-descriptor';
+
 // ============================================================
 // OA Adapter Interface
 // ============================================================
@@ -7,6 +21,7 @@ export interface OAAdapter {
   healthCheck(): Promise<HealthCheckResult>;
   submit(request: SubmitRequest): Promise<SubmitResult>;
   queryStatus(submissionId: string): Promise<StatusResult>;
+  listReferenceData?(datasetCode: string): Promise<ReferenceDataResult>;
   cancel?(submissionId: string): Promise<CancelResult>;
   urge?(submissionId: string): Promise<UrgeResult>;
   delegate?(request: DelegateRequest): Promise<DelegateResult>;
@@ -58,6 +73,22 @@ export interface StatusResult {
   }>;
 }
 
+export interface ReferenceDataResult {
+  datasetCode: string;
+  datasetName: string;
+  datasetType: string;
+  syncMode: 'full' | 'incremental' | 'ttl';
+  sourceVersion?: string;
+  items: Array<{
+    remoteItemId?: string;
+    itemKey: string;
+    itemLabel: string;
+    itemValue?: string;
+    parentKey?: string;
+    payload?: Record<string, any>;
+  }>;
+}
+
 export interface CancelResult {
   success: boolean;
   message?: string;
@@ -90,119 +121,34 @@ export interface SupplementResult {
   message?: string;
 }
 
-// ============================================================
-// Mock OA Adapter Factory
-// ============================================================
-
-export class MockOAAdapter implements OAAdapter {
-  constructor(
-    private readonly config: {
-      oaType: 'openapi' | 'form-page' | 'hybrid';
-      flows: Array<{ flowCode: string; flowName: string }>;
-      simulateDelay?: number;
-    },
-  ) {}
-
-  async discover(): Promise<DiscoverResult> {
-    await this.delay();
-    return {
-      oaVendor: 'MockOA',
-      oaVersion: '1.0.0',
-      oaType: this.config.oaType,
-      authType: 'apikey',
-      discoveredFlows: this.config.flows.map(f => ({
-        flowCode: f.flowCode,
-        flowName: f.flowName,
-        entryUrl: `/flows/${f.flowCode}`,
-        submitUrl: `/flows/${f.flowCode}/submit`,
-        queryUrl: `/flows/${f.flowCode}/status`,
-      })),
-    };
-  }
-
-  async healthCheck(): Promise<HealthCheckResult> {
-    const start = Date.now();
-    await this.delay();
-    return {
-      healthy: true,
-      latencyMs: Date.now() - start,
-      message: 'Mock OA is healthy',
-    };
-  }
-
-  async submit(request: SubmitRequest): Promise<SubmitResult> {
-    await this.delay();
-    const mockId = `MOCK-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-    return {
-      success: true,
-      submissionId: mockId,
-      metadata: {
-        flowCode: request.flowCode,
-        submittedAt: new Date().toISOString(),
-      },
-    };
-  }
-
-  async queryStatus(submissionId: string): Promise<StatusResult> {
-    await this.delay();
-    return {
-      status: 'pending',
-      statusDetail: {
-        currentStep: 'manager_approval',
-        currentApprover: 'mock_manager',
-      },
-      timeline: [
-        {
-          timestamp: new Date().toISOString(),
-          status: 'submitted',
-          operator: 'system',
-          comment: 'Application submitted',
-        },
-      ],
-    };
-  }
-
-  async cancel(submissionId: string): Promise<CancelResult> {
-    await this.delay();
-    return {
-      success: true,
-      message: `Submission ${submissionId} cancelled`,
-    };
-  }
-
-  async urge(submissionId: string): Promise<UrgeResult> {
-    await this.delay();
-    return {
-      success: true,
-      message: `Urge sent for submission ${submissionId}`,
-    };
-  }
-
-  async delegate(request: DelegateRequest): Promise<DelegateResult> {
-    await this.delay();
-    return {
-      success: true,
-      message: `Submission ${request.submissionId} delegated to ${request.targetUserId}`,
-    };
-  }
-
-  async supplement(request: SupplementRequest): Promise<SupplementResult> {
-    await this.delay();
-    return {
-      success: true,
-      message: `Supplement added to submission ${request.submissionId}`,
-    };
-  }
-
-  private async delay(): Promise<void> {
-    if (this.config.simulateDelay) {
-      await new Promise(resolve => setTimeout(resolve, this.config.simulateDelay));
-    }
-  }
+export interface AdapterConnectionConfig {
+  oaVendor?: string;
+  oaType: 'openapi' | 'form-page' | 'hybrid';
+  baseUrl: string;
+  authType: string;
+  authConfig?: Record<string, any>;
+  flows?: Array<{ flowCode: string; flowName: string }>;
 }
 
 // ============================================================
-// Adapter Factory
+// Bootstrap: register built-in adapters
+// ============================================================
+
+function ensureBuiltinAdaptersRegistered() {
+  const registry = AdapterRegistry.getInstance();
+  if (registry.size > 0) return;
+
+  registry.register(TokenHeaderDescriptor);
+  registry.register(CookieSessionDescriptor);
+  registry.register(OAuth2RefreshDescriptor);
+  registry.register(SoapXmlDescriptor);
+  registry.register(MockDescriptor);
+}
+
+ensureBuiltinAdaptersRegistered();
+
+// ============================================================
+// AdapterFactory — facade over AdapterRegistry
 // ============================================================
 
 export class AdapterFactory {
@@ -212,7 +158,44 @@ export class AdapterFactory {
   ): OAAdapter {
     return new MockOAAdapter({ oaType, flows, simulateDelay: 100 });
   }
+
+  static createAdapter(config: AdapterConnectionConfig): OAAdapter {
+    ensureBuiltinAdaptersRegistered();
+    return AdapterRegistry.getInstance().createAdapterSync(config);
+  }
+
+  static async createAdapterAsync(config: AdapterConnectionConfig): Promise<OAAdapter> {
+    ensureBuiltinAdaptersRegistered();
+    return AdapterRegistry.getInstance().createAdapter(config);
+  }
+
+  static getRegistry(): AdapterRegistry {
+    ensureBuiltinAdaptersRegistered();
+    return AdapterRegistry.getInstance();
+  }
 }
 
-// Export O2OA adapter
-export { O2OAAdapter, type O2OAConfig } from './o2oa-adapter';
+// ============================================================
+// Re-exports: adapters by API pattern name
+// ============================================================
+
+export { TokenHeaderAdapter, type TokenHeaderConfig };
+export { CookieSessionAdapter, type CookieSessionConfig };
+export { OAuth2RefreshAdapter, type OAuth2RefreshConfig };
+export { SoapXmlAdapter, type SoapXmlConfig };
+export { MockOAAdapter };
+
+// Backward compatibility aliases
+export { TokenHeaderAdapter as O2OAAdapter };
+export type { TokenHeaderConfig as O2OAConfig };
+export { CookieSessionAdapter as SchoolOAAdapter };
+export type { CookieSessionConfig as SchoolOAConfig };
+
+// Registry & descriptors
+export { AdapterRegistry, hasLifecycle };
+export { TokenHeaderDescriptor, TokenHeaderDescriptor as O2OADescriptor };
+export { CookieSessionDescriptor, CookieSessionDescriptor as SchoolOADescriptor };
+export { OAuth2RefreshDescriptor };
+export { SoapXmlDescriptor };
+export { MockDescriptor };
+export type { AdapterDescriptor, AdapterCapabilities, AdapterMatchFn, AdapterLifecycle };

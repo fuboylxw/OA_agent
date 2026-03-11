@@ -238,6 +238,8 @@ export interface ProcessTemplate {
   updatedAt: Date;
 }
 
+export * from './sync-utils';
+
 export interface ProcessSchema {
   fields: ProcessField[];
 }

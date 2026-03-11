@@ -82,8 +82,8 @@ async function main() {
   // 4. 创建示例流程模板
   const leaveTemplate = await prisma.processTemplate.upsert({
     where: {
-      tenantId_processCode_version: {
-        tenantId: tenant.id,
+      connectorId_processCode_version: {
+        connectorId: connector.id,
         processCode: 'leave_request',
         version: 1,
       },

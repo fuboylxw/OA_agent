@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import axios, { AxiosRequestConfig } from 'axios';
+import { AdapterRuntimeService } from '../adapter-runtime/adapter-runtime.service';
 
 const ALLOWED_TRANSFORMS = new Set([
   'toString', 'toNumber', 'toBoolean',
@@ -11,7 +12,13 @@ const ALLOWED_TRANSFORMS = new Set([
 export class MCPExecutorService {
   private readonly logger = new Logger(MCPExecutorService.name);
 
-  constructor(private readonly prisma: PrismaService) {}
+  // Cookie cache: connectorId -> { cookie, expiresAt }
+  private cookieCache = new Map<string, { cookie: string; expiresAt: number }>();
+
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly adapterRuntimeService: AdapterRuntimeService,
+  ) {}
 
   /**
    * Execute an MCP tool
@@ -24,7 +31,13 @@ export class MCPExecutorService {
     // 1. Query MCP tool definition
     const tool = await this.prisma.mCPTool.findFirst({
       where: { toolName, connectorId },
-      include: { connector: true },
+      include: {
+        connector: {
+          include: {
+            secretRef: true,
+          },
+        },
+      },
     });
 
     if (!tool) {
@@ -50,7 +63,14 @@ export class MCPExecutorService {
     );
 
     // 3. Build HTTP request
-    const request = this.buildRequest(tool, mappedParams);
+    const resolvedAuthConfig = this.adapterRuntimeService.resolveAuthConfig(tool.connector);
+    const request = this.buildRequest(tool, mappedParams, resolvedAuthConfig);
+
+    // 3.5 If cookie auth, get session cookie and attach
+    if (tool.connector.authType === 'cookie') {
+      const cookie = await this.getCookieForConnector(tool.connector, resolvedAuthConfig);
+      request.headers = { ...request.headers, Cookie: cookie };
+    }
 
     this.logger.debug(`HTTP ${request.method} ${request.url}`);
 
@@ -68,8 +88,17 @@ export class MCPExecutorService {
 
       return mappedResponse;
     } catch (error: any) {
+      // If 401, clear cookie cache and retry once
+      if (error.response?.status === 401 && tool.connector.authType === 'cookie') {
+        this.logger.warn(`Got 401, clearing cookie cache and retrying...`);
+        this.cookieCache.delete(tool.connector.id);
+        const cookie = await this.getCookieForConnector(tool.connector, resolvedAuthConfig);
+        request.headers = { ...request.headers, Cookie: cookie };
+        const retryResp = await axios(request);
+        return this.applyResponseMapping(retryResp.data, tool.responseMapping as any);
+      }
       this.logger.error(`Tool ${toolName} execution failed: ${error.message}`);
-      throw new Error(`MCP tool execution failed: ${error.message}`);
+      throw new Error(`MCP tool execution failed: ${error.response?.data?.message || error.message}`);
     }
   }
 
@@ -166,13 +195,17 @@ export class MCPExecutorService {
   /**
    * Build HTTP request configuration
    */
-  private buildRequest(tool: any, mappedParams: Record<string, any>): AxiosRequestConfig {
+  private buildRequest(
+    tool: any,
+    mappedParams: Record<string, any>,
+    resolvedAuthConfig: Record<string, any>,
+  ): AxiosRequestConfig {
     const { connector, apiEndpoint, httpMethod, headers, bodyTemplate } = tool;
 
     const config: AxiosRequestConfig = {
       method: httpMethod.toLowerCase(),
       url: `${connector.baseUrl}${apiEndpoint}`,
-      headers: this.buildHeaders(headers, connector),
+      headers: this.buildHeaders(headers, connector, resolvedAuthConfig),
       timeout: 30000,
     };
 
@@ -192,6 +225,7 @@ export class MCPExecutorService {
   private buildHeaders(
     headerTemplate: any,
     connector: any,
+    resolvedAuthConfig: Record<string, any>,
   ): Record<string, string> {
     const headers: Record<string, string> = {
       'Content-Type': 'application/json',
@@ -203,7 +237,7 @@ export class MCPExecutorService {
     }
 
     // Add authentication header
-    const authConfig = connector.authConfig as any;
+    const authConfig = resolvedAuthConfig as any;
     if (connector.authType === 'apikey') {
       if (authConfig.headerName && authConfig.token) {
         headers[authConfig.headerName] = authConfig.token;
@@ -220,8 +254,51 @@ export class MCPExecutorService {
         headers['Authorization'] = `Bearer ${authConfig.accessToken}`;
       }
     }
+    // cookie session auth is handled in executeTool, not here
 
     return headers;
+  }
+
+  /**
+   * Login to get session cookie for cookie-based auth
+   */
+  private async getCookieForConnector(
+    connector: any,
+    resolvedAuthConfig: Record<string, any>,
+  ): Promise<string> {
+    const cached = this.cookieCache.get(connector.id);
+    if (cached && cached.expiresAt > Date.now()) {
+      return cached.cookie;
+    }
+
+    const authConfig = resolvedAuthConfig as any;
+    const loginUrl = `${connector.baseUrl}${authConfig.loginPath || '/api/auth/login'}`;
+
+    this.logger.log(`Cookie auth: logging in to ${loginUrl}`);
+
+    const resp = await axios.post(
+      loginUrl,
+      { username: authConfig.username, password: authConfig.password },
+      { headers: { 'Content-Type': 'application/json' }, maxRedirects: 0 },
+    );
+
+    // Extract Set-Cookie header
+    const setCookies = resp.headers['set-cookie'];
+    if (!setCookies || setCookies.length === 0) {
+      throw new Error('Cookie auth login succeeded but no Set-Cookie header returned');
+    }
+
+    // Combine all cookies
+    const cookie = setCookies.map((c: string) => c.split(';')[0]).join('; ');
+
+    // Cache for 1 hour (conservative, oa_system uses 8h)
+    this.cookieCache.set(connector.id, {
+      cookie,
+      expiresAt: Date.now() + 3600_000,
+    });
+
+    this.logger.log(`Cookie auth: login successful, cookie cached`);
+    return cookie;
   }
 
   /**

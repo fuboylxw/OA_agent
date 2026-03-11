@@ -1,6 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 const STATUS_MAP: Record<string, { label: string; bgClass: string; textClass: string }> = {
   pending: { label: '待处理', bgClass: 'bg-orange-100', textClass: 'text-orange-600' },
@@ -34,12 +36,63 @@ interface Submission {
   createdAt: string;
 }
 
-export default function SubmissionsContent({ initialSubmissions }: { initialSubmissions: Submission[] }) {
-  const [submissions] = useState<Submission[]>(initialSubmissions);
+export default function SubmissionsContent({
+  initialSubmissions,
+  tenantId,
+  userId,
+}: {
+  initialSubmissions: Submission[];
+  tenantId: string;
+  userId: string;
+}) {
+  const [submissions, setSubmissions] = useState<Submission[]>(initialSubmissions);
   const [expandedId, setExpandedId] = useState<string | null>(null);
 
   const getStatus = (status: string) => STATUS_MAP[status] || { label: status, bgClass: 'bg-blue-100', textClass: 'text-blue-600' };
   const toggleExpand = (id: string) => setExpandedId(expandedId === id ? null : id);
+
+  useEffect(() => {
+    if (!tenantId || !userId) return undefined;
+
+    let cancelled = false;
+
+    const refreshSubmissions = async () => {
+      try {
+        const response = await fetch(
+          `${API_URL}/api/v1/submissions?tenantId=${encodeURIComponent(tenantId)}&userId=${encodeURIComponent(userId)}`,
+          { cache: 'no-store' },
+        );
+        if (!response.ok) return;
+        const latest = await response.json();
+        if (!cancelled) {
+          setSubmissions(Array.isArray(latest) ? latest : []);
+        }
+      } catch {
+        // Ignore refresh failures and keep showing the last successful state.
+      }
+    };
+
+    const handleVisibleRefresh = () => {
+      if (document.visibilityState === 'visible') {
+        void refreshSubmissions();
+      }
+    };
+
+    const intervalId = window.setInterval(() => {
+      void refreshSubmissions();
+    }, 15000);
+
+    void refreshSubmissions();
+    window.addEventListener('focus', handleVisibleRefresh);
+    document.addEventListener('visibilitychange', handleVisibleRefresh);
+
+    return () => {
+      cancelled = true;
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleVisibleRefresh);
+      document.removeEventListener('visibilitychange', handleVisibleRefresh);
+    };
+  }, [tenantId, userId]);
 
   return (
     <main className="h-full overflow-y-auto">

@@ -3,6 +3,8 @@ import { BullModule } from '@nestjs/bull';
 import { ConfigModule } from '@nestjs/config';
 import { PrismaService } from './services/prisma.service';
 import { BootstrapProcessor } from './processors/bootstrap.processor';
+import { SyncProcessor } from './processors/sync.processor';
+import { WebhookProcessor } from './processors/webhook.processor';
 
 @Global()
 @Module({
@@ -19,9 +21,17 @@ import { BootstrapProcessor } from './processors/bootstrap.processor';
       { name: 'parse' },
       { name: 'submit' },
       { name: 'status' },
+      { name: 'sync' },
+      { name: 'webhook' },
     ),
   ],
-  providers: [PrismaService, BootstrapProcessor],
+  providers: [
+    { provide: 'PrismaService', useClass: PrismaService },
+    PrismaService,
+    BootstrapProcessor,
+    SyncProcessor,
+    WebhookProcessor,
+  ],
   exports: [PrismaService],
 })
 export class WorkerModule {}

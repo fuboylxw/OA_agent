@@ -15,40 +15,48 @@ datasource db {
 // ============================================================
 
 model Tenant {
-  id         String   @id @default(uuid())
-  name       String
-  code       String   @unique
-  status     String   @default("active") // active, suspended
-  createdAt  DateTime @default(now())
-  updatedAt  DateTime @updatedAt
+  id        String   @id @default(uuid())
+  name      String
+  code      String   @unique
+  status    String   @default("active") // active, suspended
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  users              User[]
-  connectors         Connector[]
-  processTemplates   ProcessTemplate[]
-  processDrafts      ProcessDraft[]
-  submissions        Submission[]
-  auditLogs          AuditLog[]
-  bootstrapJobs      BootstrapJob[]
-  parseTasks         ParseTask[]
-  permissionPolicies PermissionPolicy[]
-  chatSessions       ChatSession[]
-  mcpTools           MCPTool[]
-  parseJobs          ParseJob[]
+  users                 User[]
+  connectors            Connector[]
+  processTemplates      ProcessTemplate[]
+  processDrafts         ProcessDraft[]
+  submissions           Submission[]
+  auditLogs             AuditLog[]
+  bootstrapJobs         BootstrapJob[]
+  parseTasks            ParseTask[]
+  permissionPolicies    PermissionPolicy[]
+  chatSessions          ChatSession[]
+  mcpTools              MCPTool[]
+  parseJobs             ParseJob[]
+  connectorSecretRefs   ConnectorSecretRef[]
+  connectorCapabilities ConnectorCapability[]
+  remoteProcesses       RemoteProcess[]
+  syncCursors           SyncCursor[]
+  syncJobs              SyncJob[]
+  submissionEvents      SubmissionEvent[]
+  referenceDatasets     ReferenceDataset[]
+  webhookInboxes        WebhookInbox[]
 
   @@map("tenants")
 }
 
 model User {
-  id           String   @id @default(uuid())
-  tenantId     String
-  username     String
-  email        String
-  displayName  String
-  roles        Json // ["admin", "flow_manager", "user", "auditor"]
-  oaUserId     String? // OA系统中的用户ID
-  status       String   @default("active")
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id          String   @id @default(uuid())
+  tenantId    String
+  username    String
+  email       String
+  displayName String
+  roles       Json // ["admin", "flow_manager", "user", "auditor"]
+  oaUserId    String? // OA系统中的用户ID
+  status      String   @default("active")
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   tenant       Tenant         @relation(fields: [tenantId], references: [id])
   drafts       ProcessDraft[]
@@ -65,43 +73,47 @@ model User {
 // ============================================================
 
 model BootstrapJob {
-  id              String   @id @default(uuid())
+  id              String    @id @default(uuid())
   tenantId        String
+  connectorId     String?   // 发布后关联的连接器，删除连接器时置空
   name            String?
-  status          String   @default("CREATED") // CREATED -> DISCOVERING -> PARSING -> NORMALIZING -> COMPILING -> REPLAYING -> REVIEW -> PUBLISHED
+  status          String    @default("CREATED") // CREATED -> DISCOVERING -> PARSING -> VALIDATING -> NORMALIZING -> COMPILING -> PUBLISHED -> CONNECTOR_DELETED
   oaUrl           String?
+  authConfig      Json?     // 用户填写的认证信息 { authType, username, password, token, headerName, loginPath, appKey, appSecret, ... }
   sourceBundleUrl String?
   openApiUrl      String?
   harFileUrl      String?
   uploadedFiles   Json? // Array of file paths
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
   completedAt     DateTime?
 
-  tenant          Tenant             @relation(fields: [tenantId], references: [id])
-  sources         BootstrapSource[]
-  reports         BootstrapReport[]
-  flowIRs         FlowIR[]
-  fieldIRs        FieldIR[]
-  ruleIRs         RuleIR[]
-  permissionIRs   PermissionIR[]
-  adapterBuilds   AdapterBuild[]
-  replayCases     ReplayCase[]
-  driftEvents     DriftEvent[]
-  parseJobs       ParseJob[]
+  tenant        Tenant            @relation(fields: [tenantId], references: [id])
+  connector     Connector?        @relation(fields: [connectorId], references: [id], onDelete: SetNull)
+  sources       BootstrapSource[]
+  reports       BootstrapReport[]
+  flowIRs       FlowIR[]
+  fieldIRs      FieldIR[]
+  ruleIRs       RuleIR[]
+  permissionIRs PermissionIR[]
+  adapterBuilds AdapterBuild[]
+  replayCases   ReplayCase[]
+  driftEvents   DriftEvent[]
+  parseJobs     ParseJob[]
 
   @@index([tenantId, status])
+  @@index([connectorId])
   @@map("bootstrap_jobs")
 }
 
 model BootstrapSource {
-  id              String   @id @default(uuid())
-  bootstrapJobId  String
-  sourceType      String // oa_url, source_bundle, openapi, har, file
-  sourceUrl       String?
-  sourceContent   String? // For inline content
-  metadata        Json? // Additional metadata
-  createdAt       DateTime @default(now())
+  id             String   @id @default(uuid())
+  bootstrapJobId String
+  sourceType     String // oa_url, source_bundle, openapi, har, file
+  sourceUrl      String?
+  sourceContent  String?  @db.LongText // For inline content
+  metadata       Json? // Additional metadata
+  createdAt      DateTime @default(now())
 
   bootstrapJob BootstrapJob @relation(fields: [bootstrapJobId], references: [id], onDelete: Cascade)
 
@@ -116,7 +128,7 @@ model BootstrapReport {
   confidence     Float // 0.0-1.0
   risk           String // low, medium, high
   evidence       Json // Array of evidence items
-  recommendation String @db.Text
+  recommendation String   @db.Text
   createdAt      DateTime @default(now())
 
   bootstrapJob BootstrapJob @relation(fields: [bootstrapJobId], references: [id], onDelete: Cascade)
@@ -171,7 +183,7 @@ model RuleIR {
   bootstrapJobId String
   flowCode       String
   ruleType       String // validation, calculation, conditional
-  ruleExpression String @db.Text
+  ruleExpression String   @db.Text
   errorLevel     String // error, warn
   errorMessage   String?
   metadata       Json?
@@ -187,7 +199,7 @@ model PermissionIR {
   bootstrapJobId String
   flowCode       String
   permissionType String // role, department, custom
-  permissionRule String @db.Text
+  permissionRule String   @db.Text
   metadata       Json?
   createdAt      DateTime @default(now())
 
@@ -204,9 +216,9 @@ model AdapterBuild {
   id             String   @id @default(uuid())
   bootstrapJobId String
   adapterType    String // api, rpa, hybrid
-  generatedCode  String @db.Text
+  generatedCode  String   @db.Text
   buildStatus    String // pending, success, failed
-  buildLog       String? @db.Text
+  buildLog       String?  @db.Text
   createdAt      DateTime @default(now())
   updatedAt      DateTime @updatedAt
 
@@ -234,7 +246,7 @@ model ReplayResult {
   replayCaseId String
   status       String // success, failed, error
   actualResult Json?
-  errorMessage String? @db.Text
+  errorMessage String?  @db.Text
   executedAt   DateTime @default(now())
 
   replayCase ReplayCase @relation(fields: [replayCaseId], references: [id], onDelete: Cascade)
@@ -260,13 +272,13 @@ model DriftEvent {
 // ============================================================
 
 model ProcessStep {
-  id          String   @id @default(uuid())
-  flowCode    String
-  stepOrder   Int
-  stepName    String
-  stepType    String // form, approval, notification
-  stepConfig  Json
-  createdAt   DateTime @default(now())
+  id         String   @id @default(uuid())
+  flowCode   String
+  stepOrder  Int
+  stepName   String
+  stepType   String // form, approval, notification
+  stepConfig Json
+  createdAt  DateTime @default(now())
 
   @@unique([flowCode, stepOrder])
   @@map("process_steps")
@@ -290,7 +302,7 @@ model UIActionGraph {
 // ============================================================
 
 model Connector {
-  id              String   @id @default(uuid())
+  id              String    @id @default(uuid())
   tenantId        String
   name            String
   oaType          String // openapi, form-page, hybrid
@@ -302,17 +314,146 @@ model Connector {
   healthCheckUrl  String?
   oclLevel        String // OCL0-OCL5
   falLevel        String? // F0-F4 (default level for this connector)
-  status          String   @default("active")
+  status          String    @default("active")
   lastHealthCheck DateTime?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  syncStrategy    Json? // { primary, fallback, pollingIntervalMs, webhookRegisterToolName, statusQueryToolName, batchQueryToolName }
+  statusMapping   Json? // { statusFieldPath, rules: [{ match, localStatus }], defaultStatus }
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
-  tenant           Tenant            @relation(fields: [tenantId], references: [id])
-  processTemplates ProcessTemplate[]
-  mcpTools         MCPTool[]
+  tenant            Tenant               @relation(fields: [tenantId], references: [id])
+  secretRef         ConnectorSecretRef?
+  capability        ConnectorCapability?
+  remoteProcesses   RemoteProcess[]
+  syncCursors       SyncCursor[]
+  syncJobs          SyncJob[]
+  referenceDatasets ReferenceDataset[]
+  webhookInboxes    WebhookInbox[]
+  processTemplates  ProcessTemplate[]
+  mcpTools          MCPTool[]
+  syncLogs          SyncLog[]
+  bootstrapJobs     BootstrapJob[]
 
   @@unique([tenantId, name])
   @@map("connectors")
+}
+
+model ConnectorSecretRef {
+  id             String    @id @default(uuid())
+  tenantId       String
+  connectorId    String    @unique
+  secretProvider String // vault, kms, env, manual
+  secretPath     String // vault path / kms key alias
+  secretVersion  String?
+  rotationStatus String    @default("active")
+  lastRotatedAt  DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  connector Connector @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("connector_secret_refs")
+}
+
+model ConnectorCapability {
+  id                    String   @id @default(uuid())
+  tenantId              String
+  connectorId           String   @unique
+  supportsDiscovery     Boolean  @default(false)
+  supportsSchemaSync    Boolean  @default(false)
+  supportsReferenceSync Boolean  @default(false)
+  supportsStatusPull    Boolean  @default(false)
+  supportsWebhook       Boolean  @default(false)
+  supportsCancel        Boolean  @default(false)
+  supportsUrge          Boolean  @default(false)
+  supportsDelegate      Boolean  @default(false)
+  supportsSupplement    Boolean  @default(false)
+  supportsRealtimePerm  Boolean  @default(false)
+  supportsIdempotency   Boolean  @default(false)
+  syncModes             Json?
+  metadata              Json?
+  createdAt             DateTime @default(now())
+  updatedAt             DateTime @updatedAt
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  connector Connector @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId])
+  @@map("connector_capabilities")
+}
+
+model RemoteProcess {
+  id                String    @id @default(uuid())
+  tenantId          String
+  connectorId       String
+  remoteProcessId   String
+  remoteProcessCode String?
+  remoteProcessName String
+  processCategory   String?
+  sourceVersion     String?
+  sourceHash        String
+  latestTemplateId  String?
+  status            String    @default("active") // active, deprecated, disabled
+  metadata          Json?
+  discoveredAt      DateTime  @default(now())
+  lastSchemaSyncAt  DateTime?
+  lastDriftCheckAt  DateTime?
+
+  tenant           Tenant            @relation(fields: [tenantId], references: [id])
+  connector        Connector         @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+  processTemplates ProcessTemplate[]
+
+  @@unique([connectorId, remoteProcessId])
+  @@index([tenantId, connectorId])
+  @@index([sourceHash])
+  @@map("remote_processes")
+}
+
+model ReferenceDataset {
+  id            String    @id @default(uuid())
+  tenantId      String
+  connectorId   String
+  datasetCode   String
+  datasetName   String
+  datasetType   String // department, user, dictionary, approver
+  syncMode      String // ttl, full, incremental
+  sourceHash    String?
+  sourceVersion String?
+  lastSyncedAt  DateTime?
+  expiresAt     DateTime?
+  metadata      Json?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  tenant    Tenant          @relation(fields: [tenantId], references: [id])
+  connector Connector       @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+  items     ReferenceItem[]
+
+  @@unique([connectorId, datasetCode])
+  @@index([tenantId, datasetType])
+  @@map("reference_datasets")
+}
+
+model ReferenceItem {
+  id           String   @id @default(uuid())
+  datasetId    String
+  remoteItemId String?
+  itemKey      String
+  itemLabel    String
+  itemValue    String?
+  parentKey    String?
+  status       String   @default("active")
+  payload      Json?
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  dataset ReferenceDataset @relation(fields: [datasetId], references: [id], onDelete: Cascade)
+
+  @@index([datasetId, itemKey])
+  @@index([datasetId, remoteItemId])
+  @@map("reference_items")
 }
 
 // ============================================================
@@ -320,30 +461,43 @@ model Connector {
 // ============================================================
 
 model ProcessTemplate {
-  id              String   @id @default(uuid())
+  id              String    @id @default(uuid())
   tenantId        String
   connectorId     String
+  remoteProcessId String?
   processCode     String // 流程编码，如 "travel_expense"
   processName     String
   processCategory String? // 流程分类
-  description     String?  @db.Text // 流程描述
-  version         Int      @default(1)
-  status          String   @default("draft") // draft, published, archived
+  description     String?   @db.Text // 流程描述
+  version         Int       @default(1)
+  status          String    @default("draft") // draft, published, archived
   falLevel        String // F0-F4
+  sourceHash      String?
+  sourceVersion   String?
+  reviewStatus    String    @default("approved") // draft, review, approved, rejected
+  changeSummary   Json?
+  supersedesId    String?
   schema          Json // 字段定义
   rules           Json? // 规则定义
   permissions     Json? // 权限定义
   uiHints         Json? // UI提示
+  lastSyncedAt    DateTime?
   publishedAt     DateTime?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  publishedBy     String?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
 
-  tenant    Tenant         @relation(fields: [tenantId], references: [id])
-  connector Connector      @relation(fields: [connectorId], references: [id])
-  drafts    ProcessDraft[]
+  tenant        Tenant            @relation(fields: [tenantId], references: [id])
+  connector     Connector         @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+  remoteProcess RemoteProcess?    @relation(fields: [remoteProcessId], references: [id], onDelete: SetNull)
+  supersedes    ProcessTemplate?  @relation("ProcessTemplateSupersedes", fields: [supersedesId], references: [id])
+  supersededBy  ProcessTemplate[] @relation("ProcessTemplateSupersedes")
+  drafts        ProcessDraft[]
+  submissions   Submission[]
 
-  @@unique([tenantId, processCode, version])
+  @@unique([connectorId, processCode, version])
   @@index([tenantId, status])
+  @@index([connectorId, remoteProcessId, version])
   @@map("process_templates")
 }
 
@@ -352,16 +506,16 @@ model ProcessTemplate {
 // ============================================================
 
 model ParseTask {
-  id          String   @id @default(uuid())
+  id          String    @id @default(uuid())
   tenantId    String
   sourceType  String // openapi, har, manual
   sourceUrl   String?
   sourceData  Json?
-  status      String   @default("pending") // pending, parsing, completed, failed
+  status      String    @default("pending") // pending, parsing, completed, failed
   result      Json?
-  errorMsg    String? @db.Text
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  errorMsg    String?   @db.Text
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
   completedAt DateTime?
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
@@ -374,15 +528,15 @@ model ParseTask {
 // ============================================================
 
 model PermissionPolicy {
-  id           String   @id @default(uuid())
-  tenantId     String
-  processCode  String
-  policyType   String // rbac, abac
-  policyRule   Json // 策略规则
-  priority     Int      @default(0)
-  enabled      Boolean  @default(true)
-  createdAt    DateTime @default(now())
-  updatedAt    DateTime @updatedAt
+  id          String   @id @default(uuid())
+  tenantId    String
+  processCode String
+  policyType  String // rbac, abac
+  policyRule  Json // 策略规则
+  priority    Int      @default(0)
+  enabled     Boolean  @default(true)
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
 
@@ -415,7 +569,7 @@ model ChatMessage {
   id        String   @id @default(uuid())
   sessionId String
   role      String // user, assistant, system
-  content   String @db.Text
+  content   String   @db.Text
   metadata  Json? // intent, extracted_fields, etc.
   createdAt DateTime @default(now())
 
@@ -442,7 +596,7 @@ model ProcessDraft {
 
   tenant   Tenant          @relation(fields: [tenantId], references: [id])
   user     User            @relation(fields: [userId], references: [id])
-  template ProcessTemplate @relation(fields: [templateId], references: [id])
+  template ProcessTemplate @relation(fields: [templateId], references: [id], onDelete: Cascade)
 
   @@index([tenantId, userId])
   @@map("process_drafts")
@@ -453,24 +607,28 @@ model ProcessDraft {
 // ============================================================
 
 model Submission {
-  id              String   @id @default(uuid())
-  tenantId        String
-  userId          String
-  templateId      String
-  draftId         String?
-  idempotencyKey  String
-  formData        Json
-  oaSubmissionId  String? // OA系统返回的单据ID
-  status          String   @default("pending") // pending, submitted, failed, cancelled
-  submitResult    Json?
-  errorMsg        String? @db.Text
-  submittedAt     DateTime?
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  id             String    @id @default(uuid())
+  tenantId       String
+  userId         String
+  templateId     String
+  draftId        String?
+  idempotencyKey String
+  formData       Json
+  oaSubmissionId String? // OA系统返回的单据ID
+  status         String    @default("pending") // pending, submitted, in_progress, approved, rejected, failed, cancelled, completed
+  submitResult   Json?
+  errorMsg       String?   @db.Text
+  submittedAt    DateTime?
+  lastSyncedAt   DateTime? // 上次同步时间
+  syncFailCount  Int       @default(0) // 连续同步失败次数
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
 
-  tenant        Tenant              @relation(fields: [tenantId], references: [id])
-  user          User                @relation(fields: [userId], references: [id])
+  tenant        Tenant             @relation(fields: [tenantId], references: [id])
+  user          User               @relation(fields: [userId], references: [id])
+  template      ProcessTemplate    @relation(fields: [templateId], references: [id], onDelete: Cascade)
   statusRecords SubmissionStatus[]
+  events        SubmissionEvent[]
 
   @@unique([tenantId, idempotencyKey])
   @@index([tenantId, userId])
@@ -491,22 +649,43 @@ model SubmissionStatus {
   @@map("submission_statuses")
 }
 
+model SubmissionEvent {
+  id            String   @id @default(uuid())
+  tenantId      String
+  submissionId  String
+  eventType     String // submitted, accepted, in_progress, approved, rejected, cancelled, supplemented
+  eventSource   String // oa_pull, oa_webhook, user_action, internal
+  remoteEventId String?
+  eventTime     DateTime
+  status        String
+  payload       Json?
+  createdAt     DateTime @default(now())
+
+  tenant     Tenant     @relation(fields: [tenantId], references: [id])
+  submission Submission @relation(fields: [submissionId], references: [id], onDelete: Cascade)
+
+  @@unique([submissionId, eventSource, remoteEventId])
+  @@index([tenantId, status])
+  @@index([submissionId, eventTime])
+  @@map("submission_events")
+}
+
 // ============================================================
 // Audit Log (审计日志)
 // ============================================================
 
 model AuditLog {
-  id         String   @id @default(uuid())
-  tenantId   String
-  traceId    String // 全链路追踪ID
-  userId     String?
-  action     String // chat, permission_check, submit, query_status, etc.
-  resource   String? // 资源标识
-  result     String // success, denied, error
-  details    Json?
-  ipAddress  String?
-  userAgent  String?
-  createdAt  DateTime @default(now())
+  id        String   @id @default(uuid())
+  tenantId  String
+  traceId   String // 全链路追踪ID
+  userId    String?
+  action    String // chat, permission_check, submit, query_status, etc.
+  resource  String? // 资源标识
+  result    String // success, denied, error
+  details   Json?
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
 
   tenant Tenant @relation(fields: [tenantId], references: [id])
 
@@ -522,7 +701,7 @@ model AuditLog {
 // ============================================================
 
 model MCPTool {
-  id          String   @id @default(uuid())
+  id          String @id @default(uuid())
   tenantId    String
   connectorId String
 
@@ -532,9 +711,9 @@ model MCPTool {
   toolSchema      Json // MCP 工具 schema（JSON Schema 格式）
 
   // API 映射
-  apiEndpoint String // API 端点，如 "/x_processplatform_assemble_surface/jaxrs/work"
-  httpMethod  String // HTTP 方法，如 "POST"
-  headers     Json? // 请求头模板
+  apiEndpoint  String // API 端点，如 "/x_processplatform_assemble_surface/jaxrs/work"
+  httpMethod   String // HTTP 方法，如 "POST"
+  headers      Json? // 请求头模板
   bodyTemplate Json? // 请求体模板
 
   // 参数映射
@@ -544,19 +723,19 @@ model MCPTool {
   responseMapping Json // 响应映射规则：{ "targetField": "response.data.field" }
 
   // 元数据
-  flowCode    String? // 关联的流程代码
-  category    String // 工具分类：submit, query, cancel, urge, list, get
-  enabled     Boolean  @default(true)
+  flowCode String? // 关联的流程代码
+  category String // 工具分类：submit, query, cancel, urge, list, get, approve, status_query, batch_query, webhook_register, reference_data, auth_login, other
+  enabled  Boolean @default(true)
 
   // 测试数据
-  testInput   Json? // 测试输入示例
-  testOutput  Json? // 预期输出示例
+  testInput  Json? // 测试输入示例
+  testOutput Json? // 预期输出示例
 
-  createdAt   DateTime @default(now())
-  updatedAt   DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
-  connector   Connector @relation(fields: [connectorId], references: [id], onDelete: Cascade)
-  tenant      Tenant    @relation(fields: [tenantId], references: [id])
+  connector Connector @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
 
   @@unique([connectorId, toolName])
   @@index([connectorId])
@@ -570,33 +749,33 @@ model MCPTool {
 // ============================================================
 
 model ParseJob {
-  id              String   @id @default(uuid())
-  tenantId        String
-  bootstrapJobId  String
-  tenant          Tenant       @relation(fields: [tenantId], references: [id])
-  bootstrapJob    BootstrapJob @relation(fields: [bootstrapJobId], references: [id])
+  id             String       @id @default(uuid())
+  tenantId       String
+  bootstrapJobId String
+  tenant         Tenant       @relation(fields: [tenantId], references: [id])
+  bootstrapJob   BootstrapJob @relation(fields: [bootstrapJobId], references: [id], onDelete: Cascade)
 
-  documentType    String   // openapi/swagger/postman/har
-  documentUrl     String?
-  documentHash    String   // 文档内容哈希，用于缓存
+  documentType String // openapi/swagger/postman/har
+  documentUrl  String?
+  documentHash String // 文档内容哈希，用于缓存
 
-  status          String   // PENDING/PARSING/COMPLETED/FAILED/REVIEW_REQUIRED
-  progress        Int      @default(0)
+  status   String // PENDING/PARSING/COMPLETED/FAILED/REVIEW_REQUIRED
+  progress Int    @default(0)
 
-  parseOptions    Json     // 解析选项
-  parseResult     Json?    // 解析结果
-  parseMetadata   Json?    // 元数据（耗时、token等）
+  parseOptions  Json // 解析选项
+  parseResult   Json? // 解析结果
+  parseMetadata Json? // 元数据（耗时、token等）
 
-  warnings        Json     @default("[]") // 警告信息
-  errors          Json     @default("[]") // 错误信息
+  warnings Json @default("[]") // 警告信息
+  errors   Json @default("[]") // 错误信息
 
-  reviewedBy      String?
-  reviewedAt      DateTime?
-  reviewComment   String?
+  reviewedBy    String?
+  reviewedAt    DateTime?
+  reviewComment String?
 
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
-  completedAt     DateTime?
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  completedAt DateTime?
 
   extractedProcesses ExtractedProcess[]
 
@@ -608,27 +787,117 @@ model ParseJob {
 }
 
 model ExtractedProcess {
-  id              String   @id @default(uuid())
-  parseJobId      String
-  parseJob        ParseJob @relation(fields: [parseJobId], references: [id])
+  id         String   @id @default(uuid())
+  parseJobId String
+  parseJob   ParseJob @relation(fields: [parseJobId], references: [id], onDelete: Cascade)
 
   processCode     String
   processName     String
   processCategory String
   description     String?
 
-  confidence      Float    // 0-1
-  endpoints       Json     // API端点信息
-  fields          Json     // 字段定义
+  confidence Float // 0-1
+  endpoints  Json // API端点信息
+  fields     Json // 字段定义
 
-  status          String   // EXTRACTED/REVIEWED/PUBLISHED/REJECTED
+  status              String // EXTRACTED/REVIEWED/PUBLISHED/REJECTED
   publishedTemplateId String?
 
-  createdAt       DateTime @default(now())
-  updatedAt       DateTime @updatedAt
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
 
   @@index([parseJobId])
   @@index([processCode])
   @@index([status])
   @@map("extracted_processes")
+}
+
+model SyncCursor {
+  id            String    @id @default(uuid())
+  tenantId      String
+  connectorId   String
+  syncDomain    String // schema, reference, status
+  cursorType    String // watermark, token, etag, page
+  cursorValue   String?   @db.LongText
+  lastVersion   String?
+  lastSuccessAt DateTime?
+  lastFailureAt DateTime?
+  metadata      Json?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  connector Connector @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+
+  @@unique([connectorId, syncDomain])
+  @@index([tenantId, syncDomain])
+  @@map("sync_cursors")
+}
+
+model SyncJob {
+  id             String    @id @default(uuid())
+  tenantId       String
+  connectorId    String
+  syncDomain     String // schema, reference, status
+  triggerType    String // schedule, manual, webhook, repair
+  status         String // pending, running, succeeded, failed, partial
+  scope          Json?
+  cursorSnapshot Json?
+  result         Json?
+  errorMessage   String?   @db.Text
+  startedAt      DateTime?
+  finishedAt     DateTime?
+  createdAt      DateTime  @default(now())
+  updatedAt      DateTime  @updatedAt
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  connector Connector @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+
+  @@index([connectorId, syncDomain, status])
+  @@index([tenantId, createdAt])
+  @@map("sync_jobs")
+}
+
+model WebhookInbox {
+  id            String    @id @default(uuid())
+  tenantId      String
+  connectorId   String
+  eventType     String?
+  dedupeKey     String    @unique
+  headers       Json?
+  payload       Json
+  receivedAt    DateTime  @default(now())
+  processedAt   DateTime?
+  processStatus String    @default("pending") // pending, processed, failed
+  errorMessage  String?   @db.Text
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  connector Connector @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+
+  @@index([connectorId, processStatus])
+  @@map("webhook_inboxes")
+}
+
+// ============================================================
+// Sync Log (同步日志)
+// ============================================================
+
+model SyncLog {
+  id            String    @id @default(uuid())
+  connectorId   String
+  submissionId  String?
+  syncType      String // webhook, polling, on_demand
+  success       Boolean
+  statusBefore  String?
+  statusAfter   String?
+  remoteRaw     Json?
+  error         String?   @db.Text
+  durationMs    Int?
+  createdAt     DateTime  @default(now())
+
+  connector Connector @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+
+  @@index([connectorId, createdAt])
+  @@index([submissionId])
+  @@map("sync_logs")
 }

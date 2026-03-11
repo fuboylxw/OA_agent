@@ -3,6 +3,8 @@
 import { useState, useEffect } from 'react';
 import { FileText, CheckCircle, Clock, AlertCircle, Search } from 'lucide-react';
 
+const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+
 interface ProcessTemplate {
   id: string;
   processCode: string;
@@ -18,20 +20,42 @@ interface ProcessTemplate {
 export default function ProcessLibraryPage() {
   const [processes, setProcesses] = useState<ProcessTemplate[]>([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('all');
 
   useEffect(() => {
-    fetchProcesses();
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    const storedTenantId = localStorage.getItem('tenantId');
+    if (!storedTenantId) {
+      setError('缺少租户信息，请先登录。');
+      setLoading(false);
+      return;
+    }
+
+    void fetchProcesses(storedTenantId);
   }, []);
 
-  const fetchProcesses = async () => {
+  const fetchProcesses = async (tenantId: string) => {
     try {
-      const response = await fetch('/api/process-library?tenantId=default-tenant');
+      setError(null);
+      const response = await fetch(
+        `${API_URL}/api/v1/process-library?tenantId=${encodeURIComponent(tenantId)}`,
+      );
+
+      if (!response.ok) {
+        throw new Error('流程库加载失败');
+      }
+
       const data = await response.json();
       setProcesses(data);
-    } catch (error) {
-      console.error('Failed to fetch processes:', error);
+    } catch (err: any) {
+      console.error('Failed to fetch processes:', err);
+      setProcesses([]);
+      setError(err.message || '流程库加载失败');
     } finally {
       setLoading(false);
     }
@@ -100,6 +124,12 @@ export default function ProcessLibraryPage() {
         <h1 className="text-3xl font-bold mb-2">流程库</h1>
         <p className="text-gray-600">管理和查看所有办事流程</p>
       </div>
+
+      {error && (
+        <div className="mb-6 rounded-lg border border-red-200 bg-red-50 p-4 text-sm text-red-700">
+          {error}
+        </div>
+      )}
 
       {/* 搜索和筛选 */}
       <div className="bg-white rounded-lg shadow-md p-4 mb-6">

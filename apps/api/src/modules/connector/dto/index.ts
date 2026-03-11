@@ -49,6 +49,11 @@ export class CreateConnectorDto {
 }
 
 export class UpdateConnectorDto {
+  @ApiProperty({ enum: ['openapi', 'form-page', 'hybrid'], required: false })
+  @IsOptional()
+  @IsEnum(['openapi', 'form-page', 'hybrid'])
+  oaType?: string;
+
   @ApiProperty({ required: false })
   @IsOptional()
   @IsString()

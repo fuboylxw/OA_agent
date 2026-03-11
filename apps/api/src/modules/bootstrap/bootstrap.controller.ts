@@ -1,4 +1,4 @@
-import { Controller, Post, Get, Body, Param, Query } from '@nestjs/common';
+import { Controller, Post, Get, Delete, Body, Param, Query } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { BootstrapService } from './bootstrap.service';
 import { CreateBootstrapJobDto } from './dto/create-bootstrap-job.dto';
@@ -32,9 +32,22 @@ export class BootstrapController {
     return this.bootstrapService.getReport(id);
   }
 
-  @Post('jobs/:id/publish')
-  @ApiOperation({ summary: 'Publish bootstrap job to process library' })
-  async publishJob(@Param('id') id: string) {
-    return this.bootstrapService.publishJob(id);
+  @Post('jobs/:id/reactivate')
+  @ApiOperation({ summary: 'Reactivate a bootstrap job after connector deletion' })
+  async reactivate(
+    @Param('id') id: string,
+    @Body() body: { mode: 'reuse' | 'new'; apiDocContent?: string; apiDocUrl?: string; apiDocType?: string },
+  ) {
+    return this.bootstrapService.reactivate(id, body.mode, {
+      apiDocContent: body.apiDocContent,
+      apiDocUrl: body.apiDocUrl,
+      apiDocType: body.apiDocType,
+    });
+  }
+
+  @Delete('jobs/:id')
+  @ApiOperation({ summary: 'Permanently delete a bootstrap job and all related data' })
+  async deleteJob(@Param('id') id: string) {
+    return this.bootstrapService.deleteJob(id);
   }
 }

@@ -6,10 +6,13 @@ import * as bodyParser from 'body-parser';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule, { bodyParser: false });
+  const captureRawBody = (req: any, _res: any, buffer: Buffer, encoding: BufferEncoding) => {
+    req.rawBody = buffer.toString(encoding || 'utf8');
+  };
 
   // Body parser with 10mb limit for API doc uploads
-  app.use(bodyParser.json({ limit: '10mb' }));
-  app.use(bodyParser.urlencoded({ limit: '10mb', extended: true }));
+  app.use(bodyParser.json({ limit: '10mb', verify: captureRawBody }));
+  app.use(bodyParser.urlencoded({ limit: '10mb', extended: true, verify: captureRawBody }));
 
   // Global validation pipe
   app.useGlobalPipes(

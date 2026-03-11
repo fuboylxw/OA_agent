@@ -15,7 +15,7 @@ interface ProcessSchema {
 
 interface FormExtractionResult {
   extractedFields: Record<string, any>;
-  missingFields: Array<{ key: string; label: string; question: string }>;
+  missingFields: Array<{ key: string; label: string; question: string; type?: string }>;
   isComplete: boolean;
 }
 
@@ -77,8 +77,17 @@ export class FormAgent {
   ): Promise<FormExtractionResult> {
     const formData = { ...currentFormData };
 
+    // 标准化字段格式：兼容 fieldCode/fieldName/fieldType 和 key/label/type
+    const normalizedFields: ProcessField[] = (processSchema.fields || []).map((f: any) => ({
+      key: f.key || f.fieldCode,
+      label: f.label || f.fieldName,
+      type: f.type || f.fieldType,
+      required: f.required ?? false,
+      options: f.options,
+    }));
+
     // 找出还需要填写的字段
-    const pendingFields = processSchema.fields.filter(
+    const pendingFields = normalizedFields.filter(
       (f) => formData[f.key] === undefined,
     );
 
@@ -91,16 +100,21 @@ export class FormAgent {
       };
     }
 
+    // 文件类型字段不走 LLM 提取，单独处理
+    const textPendingFields = pendingFields.filter((f) => f.type !== 'file');
+
     // 用 LLM 提取字段值
     let extractedFields: Record<string, any> = {};
-    try {
-      extractedFields = await this.extractWithLLM(
-        pendingFields,
-        userMessage,
-        processCode,
-      );
-    } catch (error: any) {
-      this.logger.warn(`LLM提取失败，跳过: ${error.message}`);
+    if (textPendingFields.length > 0) {
+      try {
+        extractedFields = await this.extractWithLLM(
+          textPendingFields,
+          userMessage,
+          processCode,
+        );
+      } catch (error: any) {
+        this.logger.warn(`LLM提取失败，跳过: ${error.message}`);
+      }
     }
 
     // 合并到 formData
@@ -109,13 +123,14 @@ export class FormAgent {
     }
 
     // 检查缺失的必填字段
-    const missingFields: Array<{ key: string; label: string; question: string }> = [];
-    for (const field of processSchema.fields) {
+    const missingFields: Array<{ key: string; label: string; question: string; type?: string }> = [];
+    for (const field of normalizedFields) {
       if (field.required && formData[field.key] === undefined) {
         missingFields.push({
           key: field.key,
           label: field.label,
           question: this.generateQuestion(field),
+          type: field.type,
         });
       }
     }
@@ -197,6 +212,10 @@ ${fieldDescriptions.join('\n')}
 
   private generateQuestion(field: ProcessField): string {
     // 不再要求用户输入特定格式，用自然语言提问
+    if (field.type === 'file') {
+      return `请上传${field.label}（点击输入框旁的附件按钮上传文件）`;
+    }
+
     if (field.type === 'select' || field.type === 'radio') {
       const optionLabels = field.options?.map((o) => o.label).join('、') || '';
       return `请问${field.label}选哪个？可选：${optionLabels}`;
