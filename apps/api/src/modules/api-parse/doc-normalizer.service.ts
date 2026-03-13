@@ -443,10 +443,10 @@ export class DocNormalizerService {
     };
   }
 
-  // ── Unknown JSON (可能是 O2OA modules 等自定义格式) ──────────
+  // ── Unknown JSON (非标准格式) ──────────────────────────────
 
   private async normalizeUnknownJson(content: string): Promise<NormalizeResult> {
-    // 先尝试看是否有 modules 结构（O2OA 等），统一走 LLM
+    // 非标准 JSON 格式，统一走 LLM 兜底分析
     return this.normalizeWithLLM(content);
   }
 
@@ -486,7 +486,14 @@ ${truncated}
     try {
       const response = await this.llmClient.chat([
         { role: 'user', content: prompt },
-      ]);
+      ], {
+        trace: {
+          scope: 'api_parse.doc_normalizer.normalize',
+          metadata: {
+            format: 'unknown-text',
+          },
+        },
+      });
 
       let jsonStr = response.content.trim();
       if (jsonStr.startsWith('```')) {

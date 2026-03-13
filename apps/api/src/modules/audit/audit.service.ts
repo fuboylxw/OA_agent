@@ -1,16 +1,29 @@
 import { Injectable } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { v4 as uuidv4 } from 'uuid';
+import { readRuntimeDiagnostics, recordRuntimeDiagnostic, type RuntimeDiagnosticEvent } from '@uniflow/agent-kernel';
 
 export interface AuditLogQuery {
   tenantId: string;
   userId?: string;
   action?: string;
+  result?: string;
   traceId?: string;
   startDate?: Date;
   endDate?: Date;
   limit?: number;
   offset?: number;
+}
+
+export interface RuntimeDiagnosticQuery {
+  tenantId?: string;
+  traceId?: string;
+  source?: string;
+  category?: 'llm' | 'system';
+  eventType?: 'llm_call' | 'llm_error' | 'audit_error' | 'runtime_error' | 'worker_error';
+  level?: 'info' | 'warn' | 'error';
+  search?: string;
+  limit?: number;
 }
 
 export interface CreateAuditLogInput {
@@ -30,7 +43,7 @@ export class AuditService {
   constructor(private readonly prisma: PrismaService) {}
 
   async createLog(input: CreateAuditLogInput) {
-    return this.prisma.auditLog.create({
+    const created = await this.prisma.auditLog.create({
       data: {
         tenantId: input.tenantId,
         traceId: input.traceId,
@@ -43,6 +56,29 @@ export class AuditService {
         userAgent: input.userAgent,
       },
     });
+
+    if (input.result === 'error') {
+      recordRuntimeDiagnostic({
+        source: 'api',
+        category: 'system',
+        eventType: 'audit_error',
+        level: 'error',
+        scope: input.action,
+        message: typeof input.details?.error === 'string' ? input.details.error : `${input.action} failed`,
+        traceId: input.traceId,
+        tenantId: input.tenantId,
+        userId: input.userId,
+        data: {
+          resource: input.resource,
+          details: input.details,
+          ipAddress: input.ipAddress,
+          userAgent: input.userAgent,
+          auditLogId: created.id,
+        },
+      });
+    }
+
+    return created;
   }
 
   async queryLogs(query: AuditLogQuery) {
@@ -56,6 +92,10 @@ export class AuditService {
 
     if (query.action) {
       where.action = query.action;
+    }
+
+    if (query.result) {
+      where.result = query.result;
     }
 
     if (query.traceId) {
@@ -155,5 +195,26 @@ export class AuditService {
 
   generateTraceId(): string {
     return `trace-${uuidv4()}`;
+  }
+
+  async queryRuntimeDiagnostics(query: RuntimeDiagnosticQuery): Promise<{
+    items: RuntimeDiagnosticEvent[];
+    total: number;
+  }> {
+    const items = readRuntimeDiagnostics({
+      tenantId: query.tenantId,
+      traceId: query.traceId,
+      source: query.source,
+      category: query.category,
+      eventType: query.eventType,
+      level: query.level,
+      search: query.search,
+      limit: query.limit || 100,
+    });
+
+    return {
+      items,
+      total: items.length,
+    };
   }
 }

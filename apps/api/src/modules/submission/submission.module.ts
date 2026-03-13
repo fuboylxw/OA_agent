@@ -8,6 +8,8 @@ import { PermissionModule } from '../permission/permission.module';
 import { ProcessLibraryModule } from '../process-library/process-library.module';
 import { ConnectorModule } from '../connector/connector.module';
 import { AdapterRuntimeModule } from '../adapter-runtime/adapter-runtime.module';
+import { AttachmentModule } from '../attachment/attachment.module';
+import { SubmitProcessor } from '../../processors/submit.processor';
 
 @Module({
   imports: [
@@ -18,9 +20,10 @@ import { AdapterRuntimeModule } from '../adapter-runtime/adapter-runtime.module'
     ProcessLibraryModule,
     ConnectorModule,
     AdapterRuntimeModule,
+    AttachmentModule,
   ],
   controllers: [SubmissionController],
-  providers: [SubmissionService],
+  providers: [SubmissionService, SubmitProcessor],
   exports: [SubmissionService],
 })
 export class SubmissionModule {}

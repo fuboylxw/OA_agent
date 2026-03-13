@@ -140,6 +140,7 @@ export const FormAgentOutputSchema = z.object({
     key: z.string(),
     label: z.string(),
     question: z.string(),
+    type: z.string().optional(),
   })),
   isComplete: z.boolean(),
 });

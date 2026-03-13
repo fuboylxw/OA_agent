@@ -213,7 +213,14 @@ ${JSON.stringify(endpointSummary, null, 2)}`;
       const response = await this.llmClient.chat([
         { role: 'system', content: SYSTEM_PROMPT },
         { role: 'user', content: userPrompt },
-      ]);
+      ], {
+        trace: {
+          scope: 'api_parse.workflow_identifier.identify',
+          metadata: {
+            endpointCount: endpointSummary.length,
+          },
+        },
+      });
 
       return this.parseLLMResponse(response.content, allEndpoints);
     } catch (error: any) {

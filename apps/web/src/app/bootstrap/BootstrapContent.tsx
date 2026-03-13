@@ -6,23 +6,24 @@ import axios from 'axios';
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 const STATUS_MAP: Record<string, { label: string; icon: string; bgClass: string; textClass: string }> = {
-  CREATED: { label: '已创建', icon: 'fa-file-alt', bgClass: 'bg-blue-100', textClass: 'text-blue-600' },
+  CREATED: { label: '已入队', icon: 'fa-file-alt', bgClass: 'bg-blue-100', textClass: 'text-blue-600' },
   DISCOVERING: { label: '识别中', icon: 'fa-search', bgClass: 'bg-blue-100', textClass: 'text-blue-600' },
   PARSING: { label: '解析中', icon: 'fa-cog fa-spin', bgClass: 'bg-blue-100', textClass: 'text-blue-600' },
+  AUTH_PROBING: { label: '认证探测', icon: 'fa-key', bgClass: 'bg-yellow-100', textClass: 'text-yellow-600' },
   VALIDATING: { label: '验证中', icon: 'fa-check-double', bgClass: 'bg-blue-100', textClass: 'text-blue-600' },
+  SELF_HEALING: { label: '自动修复中', icon: 'fa-magic', bgClass: 'bg-orange-100', textClass: 'text-orange-600' },
+  REVALIDATING: { label: '修复后复验', icon: 'fa-vial', bgClass: 'bg-amber-100', textClass: 'text-amber-700' },
   NORMALIZING: { label: '归一化', icon: 'fa-sync', bgClass: 'bg-blue-100', textClass: 'text-blue-600' },
   COMPILING: { label: '编译发布中', icon: 'fa-hammer', bgClass: 'bg-blue-100', textClass: 'text-blue-600' },
+  AUTO_RECOVERING: { label: '自动恢复中', icon: 'fa-redo', bgClass: 'bg-orange-100', textClass: 'text-orange-700' },
+  AUTO_RECONCILING: { label: '自动补齐中', icon: 'fa-tools', bgClass: 'bg-amber-100', textClass: 'text-amber-700' },
+  VALIDATION_FAILED: { label: '验证未通过', icon: 'fa-exclamation-triangle', bgClass: 'bg-red-100', textClass: 'text-red-600' },
+  MANUAL_REVIEW: { label: '待人工处理', icon: 'fa-user', bgClass: 'bg-red-100', textClass: 'text-red-700' },
+  PARTIALLY_PUBLISHED: { label: '部分发布', icon: 'fa-layer-group', bgClass: 'bg-yellow-100', textClass: 'text-yellow-700' },
   PUBLISHED: { label: '已发布', icon: 'fa-check-circle', bgClass: 'bg-green-100', textClass: 'text-green-600' },
   FAILED: { label: '失败', icon: 'fa-times-circle', bgClass: 'bg-red-100', textClass: 'text-red-600' },
   CONNECTOR_DELETED: { label: '连接器已删除', icon: 'fa-unlink', bgClass: 'bg-gray-100', textClass: 'text-gray-500' },
 };
-
-const AUTH_TYPE_OPTIONS = [
-  { value: 'cookie', label: 'Cookie 会话', desc: '用户名密码登录，Cookie 保持会话' },
-  { value: 'apikey', label: 'API Key / Token', desc: '通过自定义请求头传递令牌' },
-  { value: 'basic', label: 'Basic Auth', desc: 'HTTP Basic 认证' },
-  { value: 'oauth2', label: 'OAuth2', desc: '钉钉、飞书、企业微信等' },
-];
 
 export default function BootstrapContent({ initialJobs, tenantId }: { initialJobs: any[]; tenantId: string }) {
   const [jobs, setJobs] = useState<any[]>(initialJobs);
@@ -33,7 +34,6 @@ export default function BootstrapContent({ initialJobs, tenantId }: { initialJob
     apiDocType: 'openapi' as 'openapi' | 'swagger' | 'custom',
     apiDocContent: '',
     apiDocUrl: '',
-    authType: '' as '' | 'apikey' | 'cookie' | 'basic' | 'oauth2',
     authConfig: {} as Record<string, any>,
   });
   const [uploadFileName, setUploadFileName] = useState('');
@@ -43,14 +43,20 @@ export default function BootstrapContent({ initialJobs, tenantId }: { initialJob
   const [createError, setCreateError] = useState('');
   const [reactivateJob, setReactivateJob] = useState<any>(null);
   const [reactivateMode, setReactivateMode] = useState<'reuse' | 'new'>('reuse');
-  const [reactivateDoc, setReactivateDoc] = useState({ apiDocContent: '', apiDocUrl: '', apiDocType: 'openapi' });
+  const [reactivateDoc, setReactivateDoc] = useState({
+    apiDocContent: '',
+    apiDocUrl: '',
+    apiDocType: 'openapi',
+    oaUrl: '',
+    authConfig: {} as Record<string, any>,
+  });
   const [reactivateFileName, setReactivateFileName] = useState('');
   const [reactivating, setReactivating] = useState(false);
   const [reactivateError, setReactivateError] = useState('');
   const [deleteConfirm, setDeleteConfirm] = useState<any>(null);
   const [deleting, setDeleting] = useState(false);
 
-  const TERMINAL_STATUSES = ['PUBLISHED', 'FAILED'];
+  const TERMINAL_STATUSES = ['PUBLISHED', 'FAILED', 'VALIDATION_FAILED', 'PARTIALLY_PUBLISHED', 'MANUAL_REVIEW'];
 
   const loadJobs = useCallback(async () => {
     try {
@@ -80,17 +86,17 @@ export default function BootstrapContent({ initialJobs, tenantId }: { initialJob
     setCreateError('');
     try {
       // 构建 payload，过滤空值
-      const { authType, authConfig, ...rest } = formData;
+      const { authConfig, ...rest } = formData;
       const payload: any = Object.fromEntries(
         Object.entries({ ...rest, tenantId }).filter(([_, v]) => v !== '')
       );
-      if (authType) {
-        payload.authType = authType;
+      // 只有在有认证信息时才传 authConfig
+      if (authConfig.username || authConfig.password || authConfig.token) {
         payload.authConfig = authConfig;
       }
       await axios.post(`${API_URL}/api/v1/bootstrap/jobs`, payload);
       setShowCreateModal(false);
-      setFormData({ name: '', oaUrl: '', apiDocType: 'openapi', apiDocContent: '', apiDocUrl: '', authType: '', authConfig: {} });
+      setFormData({ name: '', oaUrl: '', apiDocType: 'openapi', apiDocContent: '', apiDocUrl: '', authConfig: {} });
       setUploadFileName('');
       loadJobs();
     } catch (error: any) {
@@ -117,25 +123,55 @@ export default function BootstrapContent({ initialJobs, tenantId }: { initialJob
 
   // 判断"连接器已删除"：PUBLISHED 状态但 connectorId 为空
   const isConnectorDeleted = (job: any) =>
-    job.status === 'PUBLISHED' && !job.connectorId;
+    ['PUBLISHED', 'PARTIALLY_PUBLISHED'].includes(job.status) && !job.connectorId;
 
   const getEffectiveStatus = (job: any) =>
     isConnectorDeleted(job) ? 'CONNECTOR_DELETED' : job.status;
+
+  const normalizeAuthConfig = (value: Record<string, any> | null | undefined) =>
+    Object.fromEntries(
+      Object.entries(value || {}).filter(([key, val]) => !key.startsWith('_') && val !== ''),
+    );
+
+  const getEditableAuthConfig = (value: Record<string, any> | null | undefined) => {
+    const normalized = normalizeAuthConfig(value);
+    return Object.fromEntries(
+      Object.entries(normalized).filter(([key]) => ['username', 'password', 'token'].includes(key)),
+    );
+  };
+
+  const openReactivateModal = (job: any) => {
+    setReactivateJob(job);
+    setReactivateMode('reuse');
+    setReactivateError('');
+    setReactivateFileName('');
+    setReactivateDoc({
+      apiDocContent: '',
+      apiDocUrl: job.openApiUrl || '',
+      apiDocType: 'openapi',
+      oaUrl: job.oaUrl || '',
+      authConfig: getEditableAuthConfig(job.authConfig),
+    });
+  };
 
   const handleReactivate = async () => {
     if (!reactivateJob) return;
     setReactivating(true);
     setReactivateError('');
     try {
-      const payload: any = { mode: reactivateMode };
+      const payload: any = {
+        mode: reactivateMode,
+        oaUrl: reactivateDoc.oaUrl || undefined,
+      };
       if (reactivateMode === 'new') {
         if (reactivateDoc.apiDocContent) payload.apiDocContent = reactivateDoc.apiDocContent;
         if (reactivateDoc.apiDocUrl) payload.apiDocUrl = reactivateDoc.apiDocUrl;
         payload.apiDocType = reactivateDoc.apiDocType;
       }
+      payload.authConfig = normalizeAuthConfig(reactivateDoc.authConfig);
       await axios.post(`${API_URL}/api/v1/bootstrap/jobs/${reactivateJob.id}/reactivate`, payload);
       setReactivateJob(null);
-      setReactivateDoc({ apiDocContent: '', apiDocUrl: '', apiDocType: 'openapi' });
+      setReactivateDoc({ apiDocContent: '', apiDocUrl: '', apiDocType: 'openapi', oaUrl: '', authConfig: {} });
       setReactivateFileName('');
       loadJobs();
     } catch (error: any) {
@@ -206,7 +242,7 @@ export default function BootstrapContent({ initialJobs, tenantId }: { initialJob
             <div>
               <p className="text-xs font-medium text-gray-500">进行中</p>
               <p className="text-xl font-bold text-blue-600">
-                {jobs.filter((j) => !['PUBLISHED', 'FAILED'].includes(j.status)).length}
+                {jobs.filter((j) => !TERMINAL_STATUSES.includes(j.status)).length}
               </p>
             </div>
             <div className="w-8 h-8 bg-blue-100 rounded-md flex items-center justify-center">
@@ -219,7 +255,7 @@ export default function BootstrapContent({ initialJobs, tenantId }: { initialJob
             <div>
               <p className="text-xs font-medium text-gray-500">失败</p>
               <p className="text-xl font-bold text-red-600">
-                {jobs.filter((j) => j.status === 'FAILED').length}
+                {jobs.filter((j) => ['FAILED', 'VALIDATION_FAILED', 'MANUAL_REVIEW'].includes(j.status)).length}
               </p>
             </div>
             <div className="w-8 h-8 bg-red-100 rounded-md flex items-center justify-center">
@@ -232,7 +268,7 @@ export default function BootstrapContent({ initialJobs, tenantId }: { initialJob
             <div>
               <p className="text-xs font-medium text-gray-500">已发布</p>
               <p className="text-xl font-bold text-green-600">
-                {jobs.filter((j) => j.status === 'PUBLISHED').length}
+                {jobs.filter((j) => ['PUBLISHED', 'PARTIALLY_PUBLISHED'].includes(j.status)).length}
               </p>
             </div>
             <div className="w-8 h-8 bg-green-100 rounded-md flex items-center justify-center">
@@ -287,28 +323,30 @@ export default function BootstrapContent({ initialJobs, tenantId }: { initialJob
                       <a href={`/bootstrap/${job.id}`} className="text-xs text-blue-600 hover:text-blue-800 font-medium">
                         详情
                       </a>
-                      {job.status === 'FAILED' && (
+                      {effectiveStatus !== 'CONNECTOR_DELETED' && ['FAILED', 'VALIDATION_FAILED', 'PARTIALLY_PUBLISHED', 'MANUAL_REVIEW'].includes(job.status) && (
                         <>
                           <button
-                            onClick={() => { setReactivateJob(job); setReactivateMode('reuse'); setReactivateError(''); }}
+                            onClick={() => openReactivateModal(job)}
                             className="text-xs text-orange-600 hover:text-orange-800 font-medium inline-flex items-center gap-1"
                           >
                             <i className="fas fa-redo text-[10px]"></i>
-                            重试
+                            重新处理
                           </button>
-                          <button
-                            onClick={() => setDeleteConfirm(job)}
-                            className="text-xs text-red-500 hover:text-red-700 font-medium inline-flex items-center gap-1"
-                          >
-                            <i className="fas fa-trash-alt text-[10px]"></i>
-                            删除
-                          </button>
+                          {['FAILED', 'VALIDATION_FAILED', 'MANUAL_REVIEW'].includes(job.status) && (
+                            <button
+                              onClick={() => setDeleteConfirm(job)}
+                              className="text-xs text-red-500 hover:text-red-700 font-medium inline-flex items-center gap-1"
+                            >
+                              <i className="fas fa-trash-alt text-[10px]"></i>
+                              删除
+                            </button>
+                          )}
                         </>
                       )}
                       {effectiveStatus === 'CONNECTOR_DELETED' && (
                         <>
                           <button
-                            onClick={() => { setReactivateJob(job); setReactivateMode('reuse'); setReactivateError(''); }}
+                            onClick={() => openReactivateModal(job)}
                             className="text-xs text-blue-600 hover:text-blue-800 font-medium inline-flex items-center gap-1"
                           >
                             <i className="fas fa-redo text-[10px]"></i>
@@ -424,142 +462,49 @@ export default function BootstrapContent({ initialJobs, tenantId }: { initialJob
                 <h3 className="text-sm font-semibold text-gray-900 mb-4 flex items-center gap-2">
                   <span className="w-5 h-5 bg-blue-600 text-white rounded-full text-xs flex items-center justify-center">2</span>
                   认证信息
-                  <span className="text-xs font-normal text-gray-400 ml-1">用于访问 OA 系统 API</span>
+                  <span className="text-xs font-normal text-gray-400 ml-1">可选，系统会自动探测认证方式</span>
                 </h3>
 
-                <div className="mb-4">
-                  <label className="block text-sm font-medium text-gray-700 mb-1.5">认证方式</label>
-                  <select
-                    className="w-full sm:w-1/2 px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
-                    value={formData.authType}
-                    onChange={(e) => setFormData({ ...formData, authType: e.target.value as any, authConfig: {} })}
-                  >
-                    <option value="">不需要认证</option>
-                    {AUTH_TYPE_OPTIONS.map((opt) => (
-                      <option key={opt.value} value={opt.value}>{opt.label} — {opt.desc}</option>
-                    ))}
-                  </select>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-4 mb-4">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1.5">用户名</label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      placeholder="OA 系统登录用户名"
+                      value={formData.authConfig.username || ''}
+                      onChange={(e) => setFormData({ ...formData, authConfig: { ...formData.authConfig, username: e.target.value } })}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1.5">密码</label>
+                    <input
+                      type="password"
+                      className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                      placeholder="••••••••"
+                      value={formData.authConfig.password || ''}
+                      onChange={(e) => setFormData({ ...formData, authConfig: { ...formData.authConfig, password: e.target.value } })}
+                    />
+                  </div>
                 </div>
 
-                {formData.authType === 'cookie' && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1.5">用户名</label>
-                      <input
-                        type="text"
-                        className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                        placeholder="admin"
-                        value={formData.authConfig.username || ''}
-                        onChange={(e) => setFormData({ ...formData, authConfig: { ...formData.authConfig, username: e.target.value } })}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1.5">密码</label>
-                      <input
-                        type="password"
-                        className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                        placeholder="••••••••"
-                        value={formData.authConfig.password || ''}
-                        onChange={(e) => setFormData({ ...formData, authConfig: { ...formData.authConfig, password: e.target.value } })}
-                      />
-                    </div>
-                    <div className="sm:col-span-2">
-                      <label className="block text-sm font-medium text-gray-700 mb-1.5">登录路径</label>
-                      <input
-                        type="text"
-                        className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                        placeholder="/api/auth/login（默认）"
-                        value={formData.authConfig.loginPath || ''}
-                        onChange={(e) => setFormData({ ...formData, authConfig: { ...formData.authConfig, loginPath: e.target.value } })}
-                      />
-                    </div>
-                  </div>
-                )}
+                <div className="flex items-center gap-2 mb-3">
+                  <div className="flex-1 border-t border-gray-200"></div>
+                  <span className="text-xs text-gray-400">或</span>
+                  <div className="flex-1 border-t border-gray-200"></div>
+                </div>
 
-                {formData.authType === 'apikey' && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1.5">Token / API Key</label>
-                      <input
-                        type="password"
-                        className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                        placeholder="输入令牌"
-                        value={formData.authConfig.token || ''}
-                        onChange={(e) => setFormData({ ...formData, authConfig: { ...formData.authConfig, token: e.target.value } })}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1.5">请求头名称</label>
-                      <input
-                        type="text"
-                        className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                        placeholder="x-token（默认）"
-                        value={formData.authConfig.headerName || ''}
-                        onChange={(e) => setFormData({ ...formData, authConfig: { ...formData.authConfig, headerName: e.target.value } })}
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {formData.authType === 'basic' && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1.5">用户名</label>
-                      <input
-                        type="text"
-                        className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                        placeholder="用户名"
-                        value={formData.authConfig.username || ''}
-                        onChange={(e) => setFormData({ ...formData, authConfig: { ...formData.authConfig, username: e.target.value } })}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1.5">密码</label>
-                      <input
-                        type="password"
-                        className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                        placeholder="••••••••"
-                        value={formData.authConfig.password || ''}
-                        onChange={(e) => setFormData({ ...formData, authConfig: { ...formData.authConfig, password: e.target.value } })}
-                      />
-                    </div>
-                  </div>
-                )}
-
-                {formData.authType === 'oauth2' && (
-                  <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1.5">App Key</label>
-                      <input
-                        type="text"
-                        className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                        placeholder="应用 Key"
-                        value={formData.authConfig.appKey || ''}
-                        onChange={(e) => setFormData({ ...formData, authConfig: { ...formData.authConfig, appKey: e.target.value } })}
-                      />
-                    </div>
-                    <div>
-                      <label className="block text-sm font-medium text-gray-700 mb-1.5">App Secret</label>
-                      <input
-                        type="password"
-                        className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                        placeholder="应用密钥"
-                        value={formData.authConfig.appSecret || ''}
-                        onChange={(e) => setFormData({ ...formData, authConfig: { ...formData.authConfig, appSecret: e.target.value } })}
-                      />
-                    </div>
-                    <div className="sm:col-span-2">
-                      <label className="block text-sm font-medium text-gray-700 mb-1.5">Token 获取路径</label>
-                      <input
-                        type="text"
-                        className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
-                        placeholder="/gettoken（默认）"
-                        value={formData.authConfig.tokenPath || ''}
-                        onChange={(e) => setFormData({ ...formData, authConfig: { ...formData.authConfig, tokenPath: e.target.value } })}
-                      />
-                    </div>
-                  </div>
-                )}
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1.5">Token / API Key</label>
+                  <input
+                    type="password"
+                    className="w-full px-3 py-2.5 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent"
+                    placeholder="如果有现成的令牌，可以直接填入"
+                    value={formData.authConfig.token || ''}
+                    onChange={(e) => setFormData({ ...formData, authConfig: { ...formData.authConfig, token: e.target.value } })}
+                  />
+                  <p className="text-xs text-gray-400 mt-1.5">认证方式和登录路径将从 API 文档中自动识别</p>
+                </div>
               </div>
 
               {/* Section 3: API Doc Import */}
@@ -708,7 +653,7 @@ export default function BootstrapContent({ initialJobs, tenantId }: { initialJob
                   <input type="radio" name="reactivateMode" checked={reactivateMode === 'reuse'} readOnly className="mt-0.5" />
                   <div>
                     <p className="text-sm font-medium text-gray-900">使用原有文档恢复</p>
-                    <p className="text-xs text-gray-500 mt-0.5">直接复用上次上传的 API 文档，快速恢复连接器</p>
+                    <p className="text-xs text-gray-500 mt-0.5">复用原文档重新验证，可同时修正 OA 地址和认证信息</p>
                   </div>
                 </label>
                 <label
@@ -718,9 +663,60 @@ export default function BootstrapContent({ initialJobs, tenantId }: { initialJob
                   <input type="radio" name="reactivateMode" checked={reactivateMode === 'new'} readOnly className="mt-0.5" />
                   <div>
                     <p className="text-sm font-medium text-gray-900">上传新文档</p>
-                    <p className="text-xs text-gray-500 mt-0.5">OA 系统有更新？上传最新的 API 文档重新解析</p>
+                    <p className="text-xs text-gray-500 mt-0.5">上传最新文档后重新验证，并按通过结果重新发布</p>
                   </div>
                 </label>
+              </div>
+
+              <div className="space-y-3 mb-5">
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">OA 系统地址</label>
+                  <input
+                    type="text"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    placeholder="https://oa.example.com"
+                    value={reactivateDoc.oaUrl}
+                    onChange={(e) => setReactivateDoc((prev) => ({ ...prev, oaUrl: e.target.value }))}
+                  />
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">用户名</label>
+                    <input
+                      type="text"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      value={reactivateDoc.authConfig.username || ''}
+                      onChange={(e) => setReactivateDoc((prev) => ({
+                        ...prev,
+                        authConfig: { ...prev.authConfig, username: e.target.value },
+                      }))}
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-sm font-medium text-gray-700 mb-1">密码</label>
+                    <input
+                      type="password"
+                      className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      value={reactivateDoc.authConfig.password || ''}
+                      onChange={(e) => setReactivateDoc((prev) => ({
+                        ...prev,
+                        authConfig: { ...prev.authConfig, password: e.target.value },
+                      }))}
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-sm font-medium text-gray-700 mb-1">Token / API Key</label>
+                  <input
+                    type="password"
+                    className="w-full px-3 py-2 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    value={reactivateDoc.authConfig.token || ''}
+                    onChange={(e) => setReactivateDoc((prev) => ({
+                      ...prev,
+                      authConfig: { ...prev.authConfig, token: e.target.value },
+                    }))}
+                  />
+                </div>
               </div>
 
               {reactivateMode === 'new' && (
@@ -768,7 +764,7 @@ export default function BootstrapContent({ initialJobs, tenantId }: { initialJob
                 {reactivating ? (
                   <><i className="fas fa-spinner fa-spin"></i>处理中...</>
                 ) : (
-                  <><i className="fas fa-redo"></i>{reactivateMode === 'reuse' ? '快速恢复' : '上传并重新解析'}</>
+                  <><i className="fas fa-redo"></i>{reactivateMode === 'reuse' ? '重新验证' : '上传并重新验证'}</>
                 )}
               </button>
             </div>

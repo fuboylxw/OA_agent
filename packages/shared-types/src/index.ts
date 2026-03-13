@@ -28,11 +28,21 @@ export enum BootstrapJobStatus {
   CREATED = 'CREATED',
   DISCOVERING = 'DISCOVERING',
   PARSING = 'PARSING',
+  AUTH_PROBING = 'AUTH_PROBING',
+  VALIDATING = 'VALIDATING',
+  SELF_HEALING = 'SELF_HEALING',
+  REVALIDATING = 'REVALIDATING',
   NORMALIZING = 'NORMALIZING',
   COMPILING = 'COMPILING',
+  AUTO_RECOVERING = 'AUTO_RECOVERING',
+  AUTO_RECONCILING = 'AUTO_RECONCILING',
   REPLAYING = 'REPLAYING',
   REVIEW = 'REVIEW',
   PUBLISHED = 'PUBLISHED',
+  PARTIALLY_PUBLISHED = 'PARTIALLY_PUBLISHED',
+  VALIDATION_FAILED = 'VALIDATION_FAILED',
+  MANUAL_REVIEW = 'MANUAL_REVIEW',
+  CONNECTOR_DELETED = 'CONNECTOR_DELETED',
   FAILED = 'FAILED',
 }
 
@@ -216,6 +226,9 @@ export interface DriftEvent {
   resolved: boolean;
 }
 
+export * from './worker-heartbeat';
+export * from './bootstrap-runtime';
+
 // ============================================================
 // Process Template
 // ============================================================
@@ -239,6 +252,7 @@ export interface ProcessTemplate {
 }
 
 export * from './sync-utils';
+export * from './probe-utils';
 
 export interface ProcessSchema {
   fields: ProcessField[];

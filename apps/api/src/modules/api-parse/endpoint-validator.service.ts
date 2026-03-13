@@ -14,9 +14,10 @@ export class EndpointValidatorService {
   ) {}
 
   /**
-   * 分级流水线验证：连通性 → 认证 → 逐端点
+   * 轻量级连通性验证（运行时手动触发）
+   * 注意：bootstrap 阶段已经做过深度验证，这里只做简单的健康检查
    */
-  async validate(connectorId: string): Promise<ValidationReport> {
+  async validate(connectorId: string, skipProbe = true): Promise<ValidationReport> {
     const adapter = await this.adapterRuntime.createAdapterForConnector(connectorId);
 
     // Level 1: 连通性
@@ -32,9 +33,23 @@ export class EndpointValidatorService {
       };
     }
 
-    // Level 2 + 3: 需要 GenericHttpAdapter 才能逐端点探测
+    // Level 2: 认证检测已被删除（AUTH_PROBING 阶段已经验证过）
+
+    // Level 3: 逐端点探测（默认跳过，bootstrap 已经做过深度验证）
+    if (skipProbe) {
+      this.logger.log(`Connector ${connectorId}: skipping endpoint probe (already validated in bootstrap)`);
+      return {
+        overall: 'skipped',
+        connectivity: true,
+        authValid: true,
+        endpoints: [],
+        summary: { total: 0, reachable: 0, unreachable: 0, unknown: 0 },
+      };
+    }
+
+    // 如果需要重新探测（手动触发），执行逐端点探测
     if (!('probeEndpoint' in adapter)) {
-      this.logger.log(`Connector ${connectorId}: adapter does not support probing, skipping endpoint validation`);
+      this.logger.log(`Connector ${connectorId}: adapter does not support probing`);
       return {
         overall: 'skipped',
         connectivity: true,
@@ -59,40 +74,7 @@ export class EndpointValidatorService {
       };
     }
 
-    // Level 2: 认证检测 — 用第一个 GET 端点试探
-    const getEndpoint = tools.find(t => t.httpMethod.toUpperCase() === 'GET');
-    if (getEndpoint) {
-      const authProbe = await genericAdapter.probeEndpoint({
-        toolName: getEndpoint.toolName,
-        category: getEndpoint.category,
-        apiEndpoint: getEndpoint.apiEndpoint,
-        httpMethod: getEndpoint.httpMethod,
-        headers: getEndpoint.headers as any,
-        bodyTemplate: getEndpoint.bodyTemplate,
-        paramMapping: getEndpoint.paramMapping as any,
-        responseMapping: getEndpoint.responseMapping as any,
-        flowCode: getEndpoint.flowCode,
-      });
-
-      if (authProbe.status === 'auth_failed') {
-        this.logger.warn(`Connector ${connectorId}: auth failed`);
-        return {
-          overall: 'failed',
-          connectivity: true,
-          authValid: false,
-          endpoints: [{
-            path: getEndpoint.apiEndpoint,
-            method: getEndpoint.httpMethod,
-            status: 'auth_failed',
-            statusCode: authProbe.statusCode,
-            responseTimeMs: authProbe.responseTimeMs,
-          }],
-          summary: { total: tools.length, reachable: 0, unreachable: 0, unknown: tools.length },
-        };
-      }
-    }
-
-    // Level 3: 逐端点探测（并发限流 5 个）
+    // 逐端点探测（并发限流 5 个）
     const results: ProbeResult[] = [];
     const concurrency = 5;
 

@@ -1,5 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
+import { ChatSessionProcessService } from '../common/chat-session-process.service';
 import { AdapterRuntimeService } from '../adapter-runtime/adapter-runtime.service';
 import { StatusMapperService } from './status-mapper.service';
 import { SyncStrategy } from './types';
@@ -13,6 +14,7 @@ export class SyncService {
 
   constructor(
     private readonly prisma: PrismaService,
+    private readonly chatSessionProcessService: ChatSessionProcessService,
     private readonly adapterRuntime: AdapterRuntimeService,
     private readonly statusMapper: StatusMapperService,
   ) {}
@@ -149,6 +151,14 @@ export class SyncService {
             },
           }),
         ]);
+
+        await this.chatSessionProcessService.syncSubmissionStatusToSession({
+          submissionId,
+          previousSubmissionStatus: statusBefore,
+          externalStatus: localStatus,
+          payload: remoteRaw,
+          createStatusMessage: true,
+        });
       } else {
         // 状态未变，仅更新同步时间
         await this.prisma.submission.update({
@@ -269,6 +279,14 @@ export class SyncService {
             },
           }),
         ]);
+
+        await this.chatSessionProcessService.syncSubmissionStatusToSession({
+          submissionId: submission.id,
+          previousSubmissionStatus: statusBefore,
+          externalStatus: localStatus,
+          payload,
+          createStatusMessage: true,
+        });
       }
 
       await this.writeSyncLog(connectorId, submission.id, 'webhook', true, statusBefore, localStatus, payload, null, Date.now() - start);

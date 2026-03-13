@@ -13,6 +13,7 @@ export class AuditController {
     @Query('tenantId') tenantId: string,
     @Query('userId') userId?: string,
     @Query('action') action?: string,
+    @Query('result') result?: string,
     @Query('traceId') traceId?: string,
     @Query('startDate') startDate?: string,
     @Query('endDate') endDate?: string,
@@ -23,6 +24,7 @@ export class AuditController {
       tenantId,
       userId,
       action,
+      result,
       traceId,
       startDate: startDate ? new Date(startDate) : undefined,
       endDate: endDate ? new Date(endDate) : undefined,
@@ -51,6 +53,30 @@ export class AuditController {
       tenantId,
       startDate: startDate ? new Date(startDate) : undefined,
       endDate: endDate ? new Date(endDate) : undefined,
+    });
+  }
+
+  @Get('runtime-events')
+  @ApiOperation({ summary: 'Get runtime diagnostic events' })
+  async getRuntimeEvents(
+    @Query('tenantId') tenantId?: string,
+    @Query('traceId') traceId?: string,
+    @Query('source') source?: string,
+    @Query('category') category?: 'llm' | 'system',
+    @Query('eventType') eventType?: 'llm_call' | 'llm_error' | 'audit_error' | 'runtime_error' | 'worker_error',
+    @Query('level') level?: 'info' | 'warn' | 'error',
+    @Query('search') search?: string,
+    @Query('limit') limit?: string,
+  ) {
+    return this.auditService.queryRuntimeDiagnostics({
+      tenantId,
+      traceId,
+      source,
+      category,
+      eventType,
+      level,
+      search,
+      limit: limit ? parseInt(limit, 10) : 100,
     });
   }
 }

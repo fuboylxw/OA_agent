@@ -51,7 +51,7 @@ export class StatusMapperService {
       where: { id: connectorId },
       select: { statusMapping: true },
     });
-    return (connector?.statusMapping as StatusMappingConfig) || null;
+    return (connector?.statusMapping as unknown as StatusMappingConfig) || null;
   }
 
   /**

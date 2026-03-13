@@ -3,8 +3,10 @@ import { Logger, ValidationPipe } from '@nestjs/common';
 import { SwaggerModule, DocumentBuilder } from '@nestjs/swagger';
 import { AppModule } from './app.module';
 import * as bodyParser from 'body-parser';
+import { registerRuntimeDiagnosticsProcessHandlers } from '@uniflow/agent-kernel';
 
 async function bootstrap() {
+  registerRuntimeDiagnosticsProcessHandlers('api');
   const app = await NestFactory.create(AppModule, { bodyParser: false });
   const captureRawBody = (req: any, _res: any, buffer: Buffer, encoding: BufferEncoding) => {
     req.rawBody = buffer.toString(encoding || 'utf8');

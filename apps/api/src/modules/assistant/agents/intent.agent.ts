@@ -75,7 +75,16 @@ export class IntentAgent {
         },
       ];
 
-      const response = await this.llmClient.chat(messages);
+      const response = await this.llmClient.chat(messages, {
+        trace: {
+          scope: 'assistant.intent.detect',
+          tenantId: context.tenantId,
+          userId: context.userId,
+          metadata: {
+            sessionId: context.sessionId,
+          },
+        },
+      });
 
       // Parse JSON response - handle markdown code blocks
       let jsonStr = response.content.trim();

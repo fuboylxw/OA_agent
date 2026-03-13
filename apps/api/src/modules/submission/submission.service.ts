@@ -9,6 +9,9 @@ import { RuleService } from '../rule/rule.service';
 import { PermissionService } from '../permission/permission.service';
 import { ProcessLibraryService } from '../process-library/process-library.service';
 import { AdapterRuntimeService } from '../adapter-runtime/adapter-runtime.service';
+import { ChatSessionProcessService } from '../common/chat-session-process.service';
+import { AttachmentBindingService } from '../attachment/attachment-binding.service';
+import { AttachmentService } from '../attachment/attachment.service';
 import {
   getSubmissionStatusText,
   isActiveSubmissionStatus,
@@ -23,7 +26,7 @@ interface SubmitInput {
   traceId: string;
 }
 
-interface SubmitResult {
+export interface SubmitResult {
   submissionId: string;
   status: string;
   oaSubmissionId?: string;
@@ -39,6 +42,9 @@ export class SubmissionService {
     private readonly permissionService: PermissionService,
     private readonly processLibraryService: ProcessLibraryService,
     private readonly adapterRuntimeService: AdapterRuntimeService,
+    private readonly chatSessionProcessService: ChatSessionProcessService,
+    private readonly attachmentService: AttachmentService,
+    private readonly attachmentBindingService: AttachmentBindingService,
     @InjectQueue('submit') private readonly submitQueue: Queue,
   ) {}
 
@@ -135,6 +141,13 @@ export class SubmissionService {
       throw new BadRequestException(`Rule validation failed: ${errorMessages}`);
     }
 
+    await this.attachmentService.prepareSubmissionPayload({
+      tenantId: input.tenantId,
+      userId: input.userId,
+      formData: draft.formData as Record<string, any>,
+      schema: draft.template.schema as any,
+    });
+
     // Create submission record
     const submission = await this.prisma.submission.create({
       data: {
@@ -157,6 +170,15 @@ export class SubmissionService {
         draftId: draft.id,
         processCode: draft.template.processCode,
       },
+    });
+
+    await this.attachmentBindingService.syncSubmissionBindings({
+      tenantId: input.tenantId,
+      userId: input.userId,
+      draftId: draft.id,
+      submissionId: submission.id,
+      formData: draft.formData as Record<string, any>,
+      phase: 'submit',
     });
 
     // Update draft status
@@ -198,6 +220,30 @@ export class SubmissionService {
     const { submissionId, connectorId, processCode, formData, idempotencyKey } = jobData;
 
     try {
+      const originalSubmission = await this.prisma.submission.findUnique({
+        where: { id: submissionId },
+        select: {
+          status: true,
+          tenantId: true,
+          userId: true,
+          formData: true,
+          template: {
+            select: {
+              schema: true,
+            },
+          },
+        },
+      });
+      if (!originalSubmission) {
+        throw new NotFoundException('Submission not found');
+      }
+
+      const preparedPayload = await this.attachmentService.prepareSubmissionPayload({
+        tenantId: originalSubmission.tenantId,
+        userId: originalSubmission.userId,
+        formData: (originalSubmission.formData as Record<string, any>) || formData,
+        schema: originalSubmission.template?.schema as any,
+      });
       const adapter = await this.adapterRuntimeService.createAdapterForConnector(
         connectorId,
         [{ flowCode: processCode, flowName: processCode }],
@@ -206,8 +252,9 @@ export class SubmissionService {
       // Submit to OA
       const result = await adapter.submit({
         flowCode: processCode,
-        formData,
+        formData: preparedPayload.sanitizedFormData,
         idempotencyKey,
+        attachments: preparedPayload.adapterAttachments,
       });
 
       // Update submission
@@ -242,8 +289,20 @@ export class SubmissionService {
         });
       }
 
+      await this.chatSessionProcessService.syncSubmissionStatusToSession({
+        submissionId,
+        previousSubmissionStatus: originalSubmission.status,
+        externalStatus: result.success ? 'submitted' : 'failed',
+        payload: result as Record<string, any>,
+        createStatusMessage: false,
+      });
+
       return { success: result.success };
     } catch (error: any) {
+      const originalSubmission = await this.prisma.submission.findUnique({
+        where: { id: submissionId },
+        select: { status: true },
+      });
       const failedSubmission = await this.prisma.submission.update({
         where: { id: submissionId },
         data: {
@@ -258,6 +317,14 @@ export class SubmissionService {
         eventSource: 'internal',
         status: 'failed',
         payload: { errorMessage: error.message },
+      });
+
+      await this.chatSessionProcessService.syncSubmissionStatusToSession({
+        submissionId,
+        previousSubmissionStatus: originalSubmission?.status,
+        externalStatus: 'failed',
+        payload: { errorMessage: error.message },
+        createStatusMessage: true,
       });
 
       throw error;
@@ -369,6 +436,7 @@ export class SubmissionService {
         value,
         displayValue,
         type: field?.type || 'text',
+        required: Boolean(field?.required),
       };
     });
   }
@@ -421,6 +489,14 @@ export class SubmissionService {
       result: 'success',
     });
 
+    await this.chatSessionProcessService.syncSubmissionStatusToSession({
+      submissionId,
+      previousSubmissionStatus: submission.status,
+      externalStatus: 'cancelled',
+      payload: { userId },
+      createStatusMessage: true,
+    });
+
     return { success: true, message: '申请已撤回' };
   }
 
@@ -471,6 +547,12 @@ export class SubmissionService {
     const template = await this.prisma.processTemplate.findUnique({
       where: { id: submission.templateId },
     });
+    const preparedPayload = await this.attachmentService.prepareSubmissionPayload({
+      tenantId: submission.tenantId,
+      userId,
+      formData: supplementData,
+      schema: template?.schema as any,
+    });
     const adapter = template
       ? await this.adapterRuntimeService.createAdapterForConnector(template.connectorId, [
           { flowCode: submission.processCode, flowName: submission.processName || submission.processCode || 'flow' },
@@ -479,9 +561,19 @@ export class SubmissionService {
     if (adapter?.supplement && submission.oaSubmissionId) {
       await adapter.supplement({
         submissionId: submission.oaSubmissionId,
-        supplementData,
+        supplementData: preparedPayload.sanitizedFormData,
+        attachments: preparedPayload.adapterAttachments,
       });
     }
+
+    await this.attachmentBindingService.syncSubmissionBindings({
+      tenantId: submission.tenantId,
+      userId,
+      draftId: submission.draftId || undefined,
+      submissionId,
+      formData: supplementData,
+      phase: 'supplement',
+    });
 
     await this.createSubmissionEvent({
       tenantId: submission.tenantId,
@@ -613,8 +705,9 @@ export class SubmissionService {
           }
 
           const adapter = await adapterPromise;
+          const previousStatus = submission.status;
           const result = await adapter.queryStatus(submission.oaSubmissionId);
-          const mappedStatus = mapExternalStatusToSubmissionStatus(result.status, submission.status);
+          const mappedStatus = mapExternalStatusToSubmissionStatus(result.status, previousStatus);
           const queriedAt = new Date();
           const remoteEventId = buildStatusEventRemoteId(
             submission.oaSubmissionId,
@@ -662,6 +755,16 @@ export class SubmissionService {
               data: { status: mappedStatus },
             });
             submission.status = mappedStatus;
+          }
+
+          if (eventCreated || mappedStatus !== previousStatus) {
+            await this.chatSessionProcessService.syncSubmissionStatusToSession({
+              submissionId: submission.id,
+              previousSubmissionStatus: previousStatus,
+              externalStatus: result.status,
+              payload: result as Record<string, any>,
+              createStatusMessage: eventCreated,
+            });
           }
         } catch {
           // Swallow refresh failures so list/detail queries still work.

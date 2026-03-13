@@ -1,6 +1,5 @@
 import type { Metadata } from 'next';
 import { cookies } from 'next/headers';
-import '@fortawesome/fontawesome-free/css/all.min.css';
 import './globals.css';
 import UserHeader from './components/UserHeader';
 import NavBar from './components/NavBar';
@@ -25,6 +24,7 @@ export default async function RootLayout({
   return (
     <html lang="zh-CN">
       <head>
+        <link rel="stylesheet" href="/vendor/fontawesome/css/all.min.css" />
         <link rel="preconnect" href="https://fonts.googleapis.com" />
         <link rel="preconnect" href="https://fonts.gstatic.com" crossOrigin="anonymous" />
         <link href="https://fonts.googleapis.com/css2?family=Pacifico&display=swap" rel="stylesheet" />

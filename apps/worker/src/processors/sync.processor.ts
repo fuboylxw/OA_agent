@@ -4,6 +4,7 @@ import { Injectable, Logger } from '@nestjs/common';
 import { createHash } from 'crypto';
 import { Prisma } from '@prisma/client';
 import { AdapterFactory, type OAAdapter } from '@uniflow/oa-adapters';
+import { recordRuntimeDiagnostic } from '@uniflow/agent-kernel';
 import {
   buildFlowChangeSummary,
   buildStatusEventRemoteId,
@@ -126,6 +127,21 @@ export class SyncProcessor {
       });
 
       this.logger.error(`Sync job ${syncJob.id} failed: ${error.message}`);
+      recordRuntimeDiagnostic({
+        source: 'worker',
+        category: 'system',
+        eventType: 'worker_error',
+        level: 'error',
+        scope: 'sync.handleSync',
+        message: error.message,
+        tenantId: syncJob.tenantId,
+        data: {
+          syncJobId: syncJob.id,
+          connectorId: syncJob.connectorId,
+          syncDomain: syncJob.syncDomain,
+          stack: error.stack,
+        },
+      });
       throw error;
     }
   }
@@ -537,7 +553,12 @@ export class SyncProcessor {
       throw new Error(`Connector ${connectorId} not found`);
     }
 
-    const authConfig = this.resolveAuthConfig(connector.authType, connector.authConfig as any, connector.secretRef);
+    const authConfig = await this.resolveAuthConfig(
+      connector.id,
+      connector.authType,
+      connector.authConfig as any,
+      connector.secretRef,
+    );
     return AdapterFactory.createAdapter({
       oaVendor: connector.oaVendor || undefined,
       oaType: connector.oaType as 'openapi' | 'form-page' | 'hybrid',
@@ -547,7 +568,8 @@ export class SyncProcessor {
     });
   }
 
-  private resolveAuthConfig(
+  private async resolveAuthConfig(
+    connectorId: string,
     authType: string,
     authConfig: Record<string, any>,
     secretRef?: { secretProvider: string; secretPath: string } | null,
@@ -557,10 +579,54 @@ export class SyncProcessor {
     }
 
     const raw = process.env[secretRef.secretPath];
-    if (!raw) {
-      return authConfig || {};
+    if (raw) {
+      return this.mapRawSecret(authType, authConfig, raw);
     }
 
+    const latestPublishedJob = await this.prisma.bootstrapJob.findFirst({
+      where: {
+        connectorId,
+        status: {
+          in: ['PUBLISHED', 'PARTIALLY_PUBLISHED'],
+        },
+      },
+      orderBy: [
+        { completedAt: 'desc' },
+        { updatedAt: 'desc' },
+      ],
+      select: {
+        authConfig: true,
+      },
+    });
+
+    const fallbackAuthConfig = latestPublishedJob?.authConfig;
+    if (fallbackAuthConfig && typeof fallbackAuthConfig === 'object' && !Array.isArray(fallbackAuthConfig)) {
+      const sensitiveKeys = new Set([
+        'password',
+        'token',
+        'appSecret',
+        'accessToken',
+        'refreshToken',
+        'secret',
+      ]);
+      return {
+        ...(authConfig || {}),
+        ...Object.fromEntries(
+          Object.entries(fallbackAuthConfig as Record<string, any>).filter(([key, value]) =>
+            sensitiveKeys.has(key) && value !== undefined && value !== null && value !== ''
+          ),
+        ),
+      };
+    }
+
+    return authConfig || {};
+  }
+
+  private mapRawSecret(
+    authType: string,
+    authConfig: Record<string, any>,
+    raw: string,
+  ) {
     try {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === 'object') {

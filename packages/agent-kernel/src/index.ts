@@ -104,3 +104,4 @@ export const globalAgentRegistry = new AgentRegistry();
 
 // Export LLM client
 export * from './llm-client';
+export * from './runtime-diagnostics';

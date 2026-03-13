@@ -1,8 +1,11 @@
 import { Test, TestingModule } from '@nestjs/testing';
 import { BootstrapService } from './bootstrap.service';
 import { PrismaService } from '../common/prisma.service';
-import { BootstrapStateMachine } from './bootstrap.state-machine';
 import { Queue } from 'bull';
+import { WorkerAvailabilityService } from './worker-availability.service';
+import axios from 'axios';
+
+jest.mock('axios');
 
 describe('BootstrapService', () => {
   let service: BootstrapService;
@@ -11,6 +14,10 @@ describe('BootstrapService', () => {
   const mockQueue = {
     add: jest.fn(),
   } as unknown as Queue;
+
+  const mockWorkerAvailabilityService = {
+    assertBootstrapWorkerAvailable: jest.fn(),
+  };
 
   beforeEach(async () => {
     const module: TestingModule = await Test.createTestingModule({
@@ -33,7 +40,10 @@ describe('BootstrapService', () => {
             },
           },
         },
-        BootstrapStateMachine,
+        {
+          provide: WorkerAvailabilityService,
+          useValue: mockWorkerAvailabilityService,
+        },
         {
           provide: 'BullQueue_bootstrap',
           useValue: mockQueue,
@@ -58,15 +68,30 @@ describe('BootstrapService', () => {
         openApiUrl: 'http://example.com/openapi.json',
       };
 
+      (axios.get as jest.Mock).mockResolvedValue({
+        data: { openapi: '3.0.0', paths: {} },
+      });
       jest.spyOn(prisma.bootstrapJob, 'create').mockResolvedValue(mockJob as any);
+      jest.spyOn(prisma.bootstrapJob, 'findUnique').mockResolvedValue({
+        ...mockJob,
+        queueJobId: 'queue-job-id',
+      } as any);
 
       const result = await service.createJob({
         apiDocUrl: 'http://example.com/openapi.json',
       });
 
-      expect(result).toEqual(mockJob);
+      expect(result).toEqual({
+        ...mockJob,
+        queueJobId: 'queue-job-id',
+      });
       expect(prisma.bootstrapJob.create).toHaveBeenCalled();
-      expect(mockQueue.add).toHaveBeenCalledWith('process', { jobId: mockJob.id });
+      expect(prisma.bootstrapJob.update).toHaveBeenCalled();
+      expect(mockQueue.add).toHaveBeenCalledWith(
+        'process',
+        expect.objectContaining({ jobId: mockJob.id, queueJobId: expect.any(String) }),
+        expect.objectContaining({ jobId: expect.any(String) }),
+      );
     });
   });
 });

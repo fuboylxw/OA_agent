@@ -60,7 +60,7 @@ export class ApiDocParserAgent extends BaseAgent<
     if (input.docType === 'openapi' || input.docType === 'swagger') {
       return this.parseOpenAPI(input.docContent, input.oaUrl);
     } else if (input.docType === 'custom') {
-      return this.parseWithLLM(input.docContent, input.oaUrl);
+      return this.parseWithLLM(input.docContent, input.oaUrl, context);
     }
 
     throw new Error(`Unsupported doc type: ${input.docType}`);
@@ -117,6 +117,7 @@ export class ApiDocParserAgent extends BaseAgent<
   private async parseWithLLM(
     docContent: string,
     oaUrl: string,
+    context?: AgentContext,
   ): Promise<ApiDocParserOutput> {
     const prompt = `
 你是一个 API 文档解析专家。请分析以下 OA 系统的 API 文档，提取所有可用的 API 端点。
@@ -156,7 +157,17 @@ ${docContent}
       const messages = [
         { role: 'user' as const, content: prompt }
       ];
-      const response = await this.llmClient.chat(messages);
+      const response = await this.llmClient.chat(messages, {
+        trace: {
+          scope: 'mcp.api_doc_parser.parse',
+          traceId: context?.traceId,
+          tenantId: context?.tenantId,
+          userId: context?.userId,
+          metadata: {
+            oaUrl,
+          },
+        },
+      });
       const llmResult = response.content;
 
       // Remove markdown code blocks if present

@@ -1,4 +1,5 @@
 import axios, { AxiosInstance } from 'axios';
+import { recordRuntimeDiagnostic, RuntimeDiagnosticTraceContext } from './runtime-diagnostics';
 
 // ============================================================
 // LLM Provider Types
@@ -45,6 +46,7 @@ export interface LLMChatOptions {
   tools?: LLMToolDef[];
   /** 'auto' | 'none' | { type: 'function', function: { name: string } } */
   toolChoice?: any;
+  trace?: RuntimeDiagnosticTraceContext;
 }
 
 // ============================================================
@@ -107,14 +109,88 @@ export abstract class BaseLLMClient {
   protected abstract formatRequest(messages: LLMMessage[], options?: LLMChatOptions): any;
   protected abstract parseResponse(response: any): LLMResponse;
 
-  async chat(messages: LLMMessage[], options?: LLMChatOptions): Promise<LLMResponse> {
+  protected async executeChatRequest(
+    requestPath: string,
+    requestBody: any,
+    messages: LLMMessage[],
+    options?: LLMChatOptions,
+    errorLabel = 'LLM API Error',
+  ): Promise<LLMResponse> {
+    const startedAt = Date.now();
+
     try {
-      const requestBody = this.formatRequest(messages, options);
-      const response = await this.client.post('/chat/completions', requestBody);
-      return this.parseResponse(response.data);
+      const response = await this.client.post(requestPath, requestBody);
+      const parsed = this.parseResponse(response.data);
+
+      recordRuntimeDiagnostic({
+        category: 'llm',
+        eventType: 'llm_call',
+        level: 'info',
+        scope: options?.trace?.scope || 'llm.chat',
+        message: parsed.content || 'LLM call completed',
+        traceId: options?.trace?.traceId,
+        tenantId: options?.trace?.tenantId,
+        userId: options?.trace?.userId,
+        tags: options?.trace?.tags,
+        data: {
+          provider: this.config.provider,
+          model: parsed.model || this.config.model,
+          durationMs: Date.now() - startedAt,
+          finishReason: parsed.finishReason,
+          usage: parsed.usage,
+          request: {
+            path: requestPath,
+            messageCount: messages.length,
+            messages,
+            tools: options?.tools?.map((tool) => tool.function.name),
+            toolChoice: options?.toolChoice,
+          },
+          response: {
+            content: parsed.content,
+            toolCalls: parsed.toolCalls,
+          },
+          metadata: options?.trace?.metadata,
+        },
+      });
+
+      return parsed;
     } catch (error: any) {
-      throw new Error(`LLM API Error: ${error.message}`);
+      recordRuntimeDiagnostic({
+        category: 'llm',
+        eventType: 'llm_error',
+        level: 'error',
+        scope: options?.trace?.scope || 'llm.chat',
+        message: error.message,
+        traceId: options?.trace?.traceId,
+        tenantId: options?.trace?.tenantId,
+        userId: options?.trace?.userId,
+        tags: options?.trace?.tags,
+        data: {
+          provider: this.config.provider,
+          model: this.config.model,
+          durationMs: Date.now() - startedAt,
+          request: {
+            path: requestPath,
+            messageCount: messages.length,
+            messages,
+            tools: options?.tools?.map((tool) => tool.function.name),
+            toolChoice: options?.toolChoice,
+          },
+          error: {
+            message: error.message,
+            stack: error.stack,
+          },
+          metadata: options?.trace?.metadata,
+        },
+      });
+
+      throw new Error(`${errorLabel}: ${error.message}`);
     }
+  }
+
+  async chat(messages: LLMMessage[], options?: LLMChatOptions): Promise<LLMResponse> {
+    const requestBody = this.formatRequest(messages, options);
+    return this.executeChatRequest('/chat/completions', requestBody, messages, options, 'LLM API Error');
   }
 }
 
@@ -279,13 +355,8 @@ export class AnthropicClient extends BaseLLMClient {
   }
 
   async chat(messages: LLMMessage[], options?: LLMChatOptions): Promise<LLMResponse> {
-    try {
-      const requestBody = this.formatRequest(messages, options);
-      const response = await this.client.post('/messages', requestBody);
-      return this.parseResponse(response.data);
-    } catch (error: any) {
-      throw new Error(`Anthropic API Error: ${error.message}`);
-    }
+    const requestBody = this.formatRequest(messages, options);
+    return this.executeChatRequest('/messages', requestBody, messages, options, 'Anthropic API Error');
   }
 }
 
@@ -302,16 +373,14 @@ export class AzureOpenAIClient extends OpenAIClient {
   }
 
   async chat(messages: LLMMessage[], options?: LLMChatOptions): Promise<LLMResponse> {
-    try {
-      const requestBody = this.formatRequest(messages, options);
-      const response = await this.client.post(
-        `/openai/deployments/${this.config.model}/chat/completions?api-version=2024-02-15-preview`,
-        requestBody
-      );
-      return this.parseResponse(response.data);
-    } catch (error: any) {
-      throw new Error(`Azure OpenAI API Error: ${error.message}`);
-    }
+    const requestBody = this.formatRequest(messages, options);
+    return this.executeChatRequest(
+      `/openai/deployments/${this.config.model}/chat/completions?api-version=2024-02-15-preview`,
+      requestBody,
+      messages,
+      options,
+      'Azure OpenAI API Error',
+    );
   }
 }
 
@@ -360,13 +429,8 @@ export class OllamaClient extends BaseLLMClient {
   }
 
   async chat(messages: LLMMessage[], options?: LLMChatOptions): Promise<LLMResponse> {
-    try {
-      const requestBody = this.formatRequest(messages, options);
-      const response = await this.client.post('/api/chat', requestBody);
-      return this.parseResponse(response.data);
-    } catch (error: any) {
-      throw new Error(`Ollama API Error: ${error.message}`);
-    }
+    const requestBody = this.formatRequest(messages, options);
+    return this.executeChatRequest('/api/chat', requestBody, messages, options, 'Ollama API Error');
   }
 }
 

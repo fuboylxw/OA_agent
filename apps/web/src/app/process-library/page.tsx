@@ -9,12 +9,21 @@ interface ProcessTemplate {
   id: string;
   processCode: string;
   processName: string;
-  processCategory: string;
+  processCategory: string | null;
   status: string;
-  falLevel: string;
+  falLevel: string | null;
   uiHints: any;
   createdAt: string;
   updatedAt: string;
+  sourceType: 'published' | 'bootstrap_candidate';
+  connector?: {
+    id: string;
+    name: string;
+    oaType: string;
+    oclLevel: string;
+  } | null;
+  bootstrapJobId?: string;
+  bootstrapJobStatus?: string;
 }
 
 export default function ProcessLibraryPage() {
@@ -70,14 +79,19 @@ export default function ProcessLibraryPage() {
     return matchesSearch && matchesCategory;
   });
 
-  const categories = Array.from(new Set(processes.map((p) => p.processCategory)));
+  const categories = Array.from(new Set(processes.map((p) => p.processCategory).filter((value): value is string => !!value)));
+  const pendingCount = processes.filter(
+    (p) => p.status === 'validation_failed' || p.status === 'validation_partial',
+  ).length;
 
   const getStatusIcon = (status: string) => {
     switch (status) {
       case 'published':
         return <CheckCircle className="w-5 h-5 text-green-500" />;
-      case 'draft':
+      case 'validation_partial':
         return <Clock className="w-5 h-5 text-yellow-500" />;
+      case 'validation_failed':
+        return <AlertCircle className="w-5 h-5 text-red-500" />;
       default:
         return <AlertCircle className="w-5 h-5 text-gray-500" />;
     }
@@ -87,8 +101,10 @@ export default function ProcessLibraryPage() {
     switch (status) {
       case 'published':
         return '已发布';
-      case 'draft':
-        return '草稿';
+      case 'validation_partial':
+        return '验证未通过';
+      case 'validation_failed':
+        return '验证失败';
       case 'archived':
         return '已归档';
       default:
@@ -105,6 +121,21 @@ export default function ProcessLibraryPage() {
       F4: 'bg-purple-100 text-purple-700',
     };
     return colors[level] || 'bg-gray-100 text-gray-700';
+  };
+
+  const getRepairStatusText = (status: string) => {
+    switch (status) {
+      case 'fixed':
+        return '已修复';
+      case 'failed':
+        return '修复失败';
+      case 'skipped':
+        return '未自动修复';
+      case 'rejected':
+        return '修复建议被拒绝';
+      default:
+        return status;
+    }
   };
 
   if (loading) {
@@ -173,9 +204,9 @@ export default function ProcessLibraryPage() {
         </div>
         <div className="bg-white rounded-lg shadow-md p-4">
           <div className="text-2xl font-bold text-yellow-600">
-            {processes.filter((p) => p.status === 'draft').length}
+            {pendingCount}
           </div>
-          <div className="text-sm text-gray-600">草稿</div>
+          <div className="text-sm text-gray-600">待处理</div>
         </div>
         <div className="bg-white rounded-lg shadow-md p-4">
           <div className="text-2xl font-bold text-purple-600">{categories.length}</div>
@@ -202,43 +233,111 @@ export default function ProcessLibraryPage() {
                   </div>
                   <div className="flex items-center gap-4 text-sm text-gray-600">
                     <span>代码: {process.processCode}</span>
-                    <span>分类: {process.processCategory}</span>
+                    <span>分类: {process.processCategory || '-'}</span>
                   </div>
                 </div>
-                <div className="flex items-center gap-2">
-                  <span className={`px-3 py-1 rounded-full text-sm font-semibold ${getFalLevelColor(process.falLevel)}`}>
-                    {process.falLevel}
-                  </span>
-                </div>
+                {process.falLevel && (
+                  <div className="flex items-center gap-2">
+                    <span className={`px-3 py-1 rounded-full text-sm font-semibold ${getFalLevelColor(process.falLevel)}`}>
+                      {process.falLevel}
+                    </span>
+                  </div>
+                )}
               </div>
 
               {/* API信息 */}
               {process.uiHints && (
                 <div className="bg-gray-50 rounded-lg p-4 mb-4">
-                  <div className="flex items-center gap-2 mb-2">
-                    <span className="px-2 py-1 bg-blue-100 text-blue-700 text-xs font-semibold rounded">
-                      {process.uiHints.apiMethod}
-                    </span>
-                    <span className="font-mono text-sm text-gray-700">{process.uiHints.apiPath}</span>
-                  </div>
-                  {process.uiHints.confidence && (
+                  {process.sourceType === 'published' && process.uiHints.apiMethod && process.uiHints.apiPath && (
+                    <div className="flex items-center gap-2 mb-2">
+                      <span className="px-2 py-1 bg-blue-100 text-blue-700 text-xs font-semibold rounded">
+                        {process.uiHints.apiMethod}
+                      </span>
+                      <span className="font-mono text-sm text-gray-700">{process.uiHints.apiPath}</span>
+                    </div>
+                  )}
+                  {process.sourceType === 'published' && process.uiHints.confidence && (
                     <div className="text-sm text-gray-600">
                       识别置信度: {(process.uiHints.confidence * 100).toFixed(0)}%
                     </div>
                   )}
-                  {process.uiHints.validationResult && (
-                    <div className="mt-2 flex items-center gap-2 text-sm">
-                      {process.uiHints.validationResult.isAccessible ? (
-                        <>
-                          <CheckCircle className="w-4 h-4 text-green-500" />
-                          <span className="text-green-600">接口验证通过</span>
-                        </>
-                      ) : (
-                        <>
-                          <AlertCircle className="w-4 h-4 text-red-500" />
-                          <span className="text-red-600">接口验证失败</span>
-                        </>
+                  {process.sourceType === 'published' && process.connector && (
+                    <div className="mt-2 text-sm text-gray-600">
+                      连接器: {process.connector.name}
+                    </div>
+                  )}
+                  {process.sourceType === 'bootstrap_candidate' && (
+                    <div className="space-y-2 text-sm">
+                      <div className="flex items-center gap-2">
+                        <AlertCircle className="w-4 h-4 text-red-500" />
+                        <span className="text-red-600">该流程尚未通过验证，未注册到 MCP</span>
+                      </div>
+                      {process.uiHints.repairResult && process.uiHints.repairResult.attempts > 0 && (
+                        <div className="text-gray-600">
+                          自动修复: 已尝试 {process.uiHints.repairResult.attempts} 次，最近结果为 {getRepairStatusText(process.uiHints.repairResult.lastStatus)}
+                        </div>
                       )}
+                      {process.uiHints.repairResult?.lastSummary && (
+                        <div className="text-gray-600">
+                          修复摘要: {process.uiHints.repairResult.lastSummary}
+                        </div>
+                      )}
+                      {process.uiHints.sourceUrl && (
+                        <div className="text-gray-600 break-all">来源: {process.uiHints.sourceUrl}</div>
+                      )}
+                    </div>
+                  )}
+                  {process.uiHints.validationResult && (
+                    <div className="mt-2 space-y-1 text-sm">
+                      <div className="flex items-center gap-2">
+                        {process.uiHints.validationResult.status === 'passed' ? (
+                          <>
+                            <CheckCircle className="w-4 h-4 text-green-500" />
+                            <span className="text-green-600">接口验证通过</span>
+                          </>
+                        ) : (
+                          <>
+                            <AlertCircle className="w-4 h-4 text-red-500" />
+                            <span className="text-red-600">接口验证未通过</span>
+                          </>
+                        )}
+                      </div>
+                      {process.uiHints.validationResult.reason && (
+                        <div className="text-gray-600">
+                          原因: {process.uiHints.validationResult.reason}
+                        </div>
+                      )}
+                      {typeof process.uiHints.validationResult.endpointCheckedCount === 'number' && (
+                        <div className="text-gray-600">
+                          端点验证: {process.uiHints.validationResult.endpointPassedCount || 0}/
+                          {process.uiHints.validationResult.endpointCheckedCount} 通过
+                        </div>
+                      )}
+                      {Array.isArray(process.uiHints.validationResult.failedEndpoints) &&
+                        process.uiHints.validationResult.failedEndpoints.length > 0 && (
+                          <div className="text-gray-600">
+                            失败端点:
+                            {' '}
+                            {process.uiHints.validationResult.failedEndpoints
+                              .map((endpoint: any) => `${endpoint.method} ${endpoint.path}`)
+                              .join('；')}
+                          </div>
+                        )}
+                      {process.uiHints.validationResult.error && (
+                        <div className="text-gray-600">
+                          错误: {process.uiHints.validationResult.error}
+                        </div>
+                      )}
+                    </div>
+                  )}
+                  {process.sourceType === 'bootstrap_candidate' && process.bootstrapJobId && (
+                    <div className="mt-3">
+                      <a
+                        href={`/bootstrap/${process.bootstrapJobId}`}
+                        className="inline-flex items-center gap-2 rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
+                      >
+                        前往初始化任务处理
+                      </a>
                     </div>
                   )}
                 </div>

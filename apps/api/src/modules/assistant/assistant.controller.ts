@@ -1,20 +1,17 @@
 import { Controller, Post, Body, Get, Param, Query, Delete, HttpException, HttpStatus, Logger, UseInterceptors, UploadedFiles } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiConsumes } from '@nestjs/swagger';
 import { FilesInterceptor } from '@nestjs/platform-express';
-import { diskStorage } from 'multer';
-import { extname, join } from 'path';
-import { existsSync, mkdirSync } from 'fs';
 import { AssistantService } from './assistant.service';
 import { IsString, IsOptional, IsArray } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
-
-// 上传目录
-const UPLOAD_DIR = join(process.cwd(), 'uploads', 'chat-attachments');
-if (!existsSync(UPLOAD_DIR)) {
-  mkdirSync(UPLOAD_DIR, { recursive: true });
-}
+import { AttachmentService } from '../attachment/attachment.service';
+import { attachmentUploadInterceptorOptions } from '../attachment/attachment-upload.config';
+import { TenantUserResolverService } from '../common/tenant-user-resolver.service';
 
 class ChatAttachment {
+  @ApiProperty({ description: '附件ID' })
+  attachmentId: string;
+
   @ApiProperty({ description: '文件ID' })
   fileId: string;
 
@@ -27,8 +24,172 @@ class ChatAttachment {
   @ApiProperty({ description: '文件MIME类型' })
   mimeType: string;
 
-  @ApiProperty({ description: '文件存储路径' })
-  filePath: string;
+  @ApiProperty({ required: false, description: '绑定字段键' })
+  fieldKey?: string;
+
+  @ApiProperty({ required: false, description: '绑定范围', enum: ['field', 'general'] })
+  bindScope?: 'field' | 'general';
+
+  @ApiProperty({ required: false, description: '预览状态' })
+  previewStatus?: string;
+
+  @ApiProperty({ required: false, description: '是否可预览' })
+  canPreview?: boolean;
+
+  @ApiProperty({ required: false, description: '预览链接' })
+  previewUrl?: string;
+
+  @ApiProperty({ required: false, description: '下载链接' })
+  downloadUrl?: string;
+}
+
+class MissingFieldDto {
+  @ApiProperty({ description: '字段键' })
+  key: string;
+
+  @ApiProperty({ description: '字段标签' })
+  label: string;
+
+  @ApiProperty({ description: '补充提示语' })
+  question: string;
+
+  @ApiProperty({ required: false, description: '字段类型' })
+  type?: string;
+}
+
+class ActionButtonDto {
+  @ApiProperty({ description: '按钮文案' })
+  label: string;
+
+  @ApiProperty({ description: '动作标识' })
+  action: string;
+
+  @ApiProperty({ description: '按钮类型', enum: ['primary', 'default', 'danger'] })
+  type: 'primary' | 'default' | 'danger';
+}
+
+class ProcessCardFieldDto {
+  @ApiProperty({ description: '字段键' })
+  key: string;
+
+  @ApiProperty({ description: '字段标签' })
+  label: string;
+
+  @ApiProperty({ required: false, description: '原始值' })
+  value?: any;
+
+  @ApiProperty({ required: false, description: '展示值' })
+  displayValue?: any;
+
+  @ApiProperty({ description: '字段类型' })
+  type: string;
+
+  @ApiProperty({ required: false, description: '是否必填' })
+  required?: boolean;
+}
+
+class ProcessCardDto {
+  @ApiProperty({ description: '流程实例ID' })
+  processInstanceId: string;
+
+  @ApiProperty({ description: '流程编码' })
+  processCode: string;
+
+  @ApiProperty({ description: '流程名称' })
+  processName: string;
+
+  @ApiProperty({ required: false, description: '流程分类' })
+  processCategory?: string | null;
+
+  @ApiProperty({ required: false, description: '流程状态' })
+  processStatus?: string;
+
+  @ApiProperty({
+    description: '流程阶段',
+    enum: ['collecting', 'confirming', 'executing', 'submitted', 'rework', 'completed', 'failed', 'cancelled'],
+  })
+  stage: 'collecting' | 'confirming' | 'executing' | 'submitted' | 'rework' | 'completed' | 'failed' | 'cancelled';
+
+  @ApiProperty({ description: '卡片操作状态', enum: ['available', 'readonly'] })
+  actionState: 'available' | 'readonly';
+
+  @ApiProperty({ description: '是否可继续办理' })
+  canContinue: boolean;
+
+  @ApiProperty({ description: '状态文案' })
+  statusText: string;
+
+  @ApiProperty({ required: false, description: '表单原始数据' })
+  formData?: Record<string, any>;
+
+  @ApiProperty({ type: [ProcessCardFieldDto], description: '结构化表单字段' })
+  fields: ProcessCardFieldDto[];
+
+  @ApiProperty({ required: false, type: [MissingFieldDto], description: '待补充字段' })
+  missingFields?: MissingFieldDto[];
+
+  @ApiProperty({ required: false, type: [ActionButtonDto], description: '可用操作按钮' })
+  actionButtons?: ActionButtonDto[];
+
+  @ApiProperty({ required: false, description: '是否需要附件' })
+  needsAttachment?: boolean;
+
+  @ApiProperty({ required: false, description: '草稿ID' })
+  draftId?: string;
+
+  @ApiProperty({ required: false, description: '提交记录ID' })
+  submissionId?: string;
+
+  @ApiProperty({ required: false, description: 'OA单号' })
+  oaSubmissionId?: string | null;
+
+  @ApiProperty({ required: false, description: '返工提示类型', enum: ['supplement', 'modify', 'unknown'] })
+  reworkHint?: 'supplement' | 'modify' | 'unknown';
+
+  @ApiProperty({ required: false, description: '驳回原因' })
+  reworkReason?: string | null;
+
+  @ApiProperty({ description: '更新时间' })
+  updatedAt: string;
+}
+
+class SessionStateDto {
+  @ApiProperty({ description: '是否存在进行中的流程' })
+  hasActiveProcess: boolean;
+
+  @ApiProperty({ required: false, description: '流程实例ID' })
+  processInstanceId?: string;
+
+  @ApiProperty({ required: false, description: '流程编码' })
+  processCode?: string;
+
+  @ApiProperty({ required: false, description: '流程名称' })
+  processName?: string;
+
+  @ApiProperty({ required: false, description: '流程分类' })
+  processCategory?: string | null;
+
+  @ApiProperty({ required: false, description: '流程状态' })
+  processStatus?: string;
+
+  @ApiProperty({
+    required: false,
+    description: '流程阶段',
+    enum: ['collecting', 'confirming', 'executing', 'submitted', 'rework', 'completed', 'failed', 'cancelled'],
+  })
+  stage?: 'collecting' | 'confirming' | 'executing' | 'submitted' | 'rework' | 'completed' | 'failed' | 'cancelled';
+
+  @ApiProperty({ required: false, description: '返工提示类型', enum: ['supplement', 'modify', 'unknown'] })
+  reworkHint?: 'supplement' | 'modify' | 'unknown';
+
+  @ApiProperty({ required: false, description: '驳回原因' })
+  reworkReason?: string | null;
+
+  @ApiProperty({ required: false, description: '是否终态' })
+  isTerminal?: boolean;
+
+  @ApiProperty({ required: false, type: ProcessCardDto, description: '当前激活流程卡片' })
+  activeProcessCard?: ProcessCardDto | null;
 }
 
 class ChatDto {
@@ -79,11 +240,23 @@ class ChatResponseDto {
   @ApiProperty({ required: false, description: '表单数据' })
   formData?: Record<string, any>;
 
-  @ApiProperty({ required: false, description: '缺失的字段' })
-  missingFields?: Array<{ key: string; label: string; question: string }>;
+  @ApiProperty({ required: false, type: [MissingFieldDto], description: '缺失的字段' })
+  missingFields?: MissingFieldDto[];
 
   @ApiProperty({ required: false, description: '流程状态' })
   processStatus?: string;
+
+  @ApiProperty({ required: false, type: [ActionButtonDto], description: '卡片可用按钮' })
+  actionButtons?: ActionButtonDto[];
+
+  @ApiProperty({ required: false, description: '是否需要上传附件' })
+  needsAttachment?: boolean;
+
+  @ApiProperty({ required: false, type: ProcessCardDto, description: '结构化流程卡片' })
+  processCard?: ProcessCardDto;
+
+  @ApiProperty({ required: false, type: SessionStateDto, description: '会话流程态' })
+  sessionState?: SessionStateDto;
 }
 
 @ApiTags('assistant')
@@ -91,7 +264,11 @@ class ChatResponseDto {
 export class AssistantController {
   private readonly logger = new Logger(AssistantController.name);
 
-  constructor(private readonly assistantService: AssistantService) {}
+  constructor(
+    private readonly assistantService: AssistantService,
+    private readonly attachmentService: AttachmentService,
+    private readonly tenantUserResolver: TenantUserResolverService,
+  ) {}
 
   @Post('chat')
   @ApiOperation({
@@ -114,12 +291,10 @@ export class AssistantController {
   async chat(@Body() dto: ChatDto) {
     try {
       const tenantId = dto.tenantId || process.env.DEFAULT_TENANT_ID || 'default-tenant';
-      // Use admin user as default if userId is not provided or invalid
-      const userId = dto.userId || 'e228391e-81b2-401c-8381-995be98b3866';
 
       return await this.assistantService.chat({
         tenantId,
-        userId,
+        userId: dto.userId?.trim(),
         sessionId: dto.sessionId,
         message: dto.message,
         attachments: dto.attachments,
@@ -164,9 +339,13 @@ export class AssistantController {
   ) {
     try {
       const resolvedTenantId = tenantId || process.env.DEFAULT_TENANT_ID || 'default-tenant';
-      const resolvedUserId = userId || 'e228391e-81b2-401c-8381-995be98b3866';
+      const resolvedUser = await this.tenantUserResolver.resolve({
+        tenantId: resolvedTenantId,
+        userId,
+        allowFallback: true,
+      });
 
-      return await this.assistantService.listSessions(resolvedTenantId, resolvedUserId);
+      return await this.assistantService.listSessions(resolvedTenantId, resolvedUser.id);
     } catch (error: any) {
       this.logger.error(`listSessions error: ${error.message}`);
       throw new HttpException(
@@ -211,6 +390,9 @@ export class AssistantController {
       await this.assistantService.deleteSession(sessionId);
       return { success: true, message: '会话已删除' };
     } catch (error: any) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
       this.logger.error(`deleteSession error: ${error.message}`);
       throw new HttpException(
         error.message || 'Failed to delete session',
@@ -244,39 +426,31 @@ export class AssistantController {
   @Post('upload')
   @ApiOperation({
     summary: '上传聊天附件',
-    description: '上传文件作为聊天附件（如报销发票、请假证明等），最多5个文件，单文件最大10MB'
+    description: '上传文件作为聊天附件或表单附件，返回 attachmentId 供草稿和提交链路使用'
   })
   @ApiConsumes('multipart/form-data')
-  @UseInterceptors(FilesInterceptor('files', 5, {
-    storage: diskStorage({
-      destination: (_req, _file, cb) => cb(null, UPLOAD_DIR),
-      filename: (_req, file, cb) => {
-        const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-        const ext = extname(file.originalname);
-        cb(null, `${uniqueSuffix}${ext}`);
-      },
-    }),
-    limits: { fileSize: 10 * 1024 * 1024 },
-    fileFilter: (_req, file, cb) => {
-      const allowed = /\.(jpg|jpeg|png|gif|pdf|doc|docx|xls|xlsx|ppt|pptx|txt|zip|rar)$/i;
-      if (allowed.test(extname(file.originalname))) {
-        cb(null, true);
-      } else {
-        cb(new HttpException('不支持的文件类型', HttpStatus.BAD_REQUEST), false);
-      }
-    },
-  }))
-  async uploadFiles(@UploadedFiles() files: Express.Multer.File[]) {
-    if (!files || files.length === 0) {
-      throw new HttpException('请选择要上传的文件', HttpStatus.BAD_REQUEST);
-    }
+  @UseInterceptors(FilesInterceptor('files', 10, attachmentUploadInterceptorOptions))
+  async uploadFiles(
+    @Query('tenantId') tenantId: string,
+    @Query('userId') userId: string,
+    @Query('sessionId') sessionId: string | undefined,
+    @Query('fieldKey') fieldKey: string | undefined,
+    @Query('bindScope') bindScope: 'field' | 'general' | undefined,
+    @UploadedFiles() files: Express.Multer.File[],
+  ) {
+    const resolvedUser = await this.tenantUserResolver.resolve({
+      tenantId,
+      userId,
+      allowFallback: false,
+    });
 
-    return files.map(file => ({
-      fileId: file.filename.replace(extname(file.filename), ''),
-      fileName: file.originalname,
-      fileSize: file.size,
-      mimeType: file.mimetype,
-      filePath: file.path,
-    }));
+    return this.attachmentService.upload({
+      tenantId,
+      userId: resolvedUser.id,
+      sessionId,
+      fieldKey,
+      bindScope,
+      files,
+    });
   }
 }

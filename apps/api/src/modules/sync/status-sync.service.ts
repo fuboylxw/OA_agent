@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../common/prisma.service';
+import { ChatSessionProcessService } from '../common/chat-session-process.service';
 import { AdapterRuntimeService } from '../adapter-runtime/adapter-runtime.service';
 import { buildStatusEventRemoteId } from '@uniflow/shared-types';
 import {
@@ -12,6 +13,7 @@ import {
 export class StatusSyncService {
   constructor(
     private readonly prisma: PrismaService,
+    private readonly chatSessionProcessService: ChatSessionProcessService,
     private readonly adapterRuntimeService: AdapterRuntimeService,
   ) {}
 
@@ -56,8 +58,9 @@ export class StatusSyncService {
       }
 
       try {
+        const previousStatus = submission.status;
         const result = await adapter.queryStatus(submission.oaSubmissionId);
-        const mappedStatus = mapExternalStatusToSubmissionStatus(result.status, submission.status);
+        const mappedStatus = mapExternalStatusToSubmissionStatus(result.status, previousStatus);
         const remoteEventId = buildStatusEventRemoteId(submission.oaSubmissionId, result as Record<string, any>);
 
         const eventCreated = await this.createSubmissionEvent({
@@ -92,6 +95,16 @@ export class StatusSyncService {
             status: mappedStatus,
           },
         });
+
+        if (eventCreated || mappedStatus !== previousStatus) {
+          await this.chatSessionProcessService.syncSubmissionStatusToSession({
+            submissionId: submission.id,
+            previousSubmissionStatus: previousStatus,
+            externalStatus: result.status,
+            payload: result as Record<string, any>,
+            createStatusMessage: eventCreated,
+          });
+        }
       } catch {
         failedStatuses += 1;
       }

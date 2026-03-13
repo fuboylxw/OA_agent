@@ -178,7 +178,15 @@ ${fieldDescriptions.join('\n')}
       { role: 'user', content: userPrompt },
     ];
 
-    const response = await this.llmClient.chat(messages);
+    const response = await this.llmClient.chat(messages, {
+      trace: {
+        scope: 'assistant.form.extract',
+        metadata: {
+          processCode,
+          pendingFieldCount: pendingFields.length,
+        },
+      },
+    });
 
     // 解析 JSON 响应
     let jsonStr = response.content.trim();

@@ -15,6 +15,7 @@ import type {
   SupplementResult,
 } from '@uniflow/oa-adapters';
 import type { AdapterLifecycle } from '@uniflow/oa-adapters';
+import { classifyProbeStatus, type ProbeStatus } from '@uniflow/shared-types';
 
 // ============================================================
 // MCPTool 端点定义（从数据库读取后的运行时结构）
@@ -171,7 +172,10 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
     }
 
     try {
-      const mappedParams = this.applyParamMapping(request.formData, endpoint.paramMapping);
+      const mappedParams = this.applyParamMapping({
+        ...request.formData,
+        attachments: this.serializeAttachments(request.attachments),
+      }, endpoint.paramMapping);
       const response = await this.executeEndpoint(endpoint, mappedParams);
       const mapped = this.applyResponseMapping(response, endpoint.responseMapping);
 
@@ -279,7 +283,23 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
   }
 
   async supplement(request: SupplementRequest): Promise<SupplementResult> {
-    return { success: false, message: 'Supplement not supported by generic adapter' };
+    const endpoint = this.findFirstByCategory('supplement') || this.findFirstByCategory('other');
+    if (!endpoint) {
+      return { success: false, message: 'Supplement not supported by generic adapter' };
+    }
+
+    try {
+      const params = this.applyParamMapping({
+        submissionId: request.submissionId,
+        id: request.submissionId,
+        ...request.supplementData,
+        attachments: this.serializeAttachments(request.attachments),
+      }, endpoint.paramMapping);
+      await this.executeEndpoint(endpoint, params);
+      return { success: true, message: 'Supplement submitted successfully' };
+    } catch (error: any) {
+      return { success: false, message: error.message };
+    }
   }
 
   // ── Private: endpoint execution ───────────────────────────
@@ -445,6 +465,15 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
     return template;
   }
 
+  private serializeAttachments(attachments?: SubmitRequest['attachments']) {
+    return (attachments || []).map((item) => ({
+      fileName: item.filename,
+      filename: item.filename,
+      mimeType: 'application/octet-stream',
+      content: item.content.toString('base64'),
+    }));
+  }
+
   // ── Private: endpoint lookup ──────────────────────────────
 
   private indexEndpoints(): void {
@@ -505,7 +534,7 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
    * GET → HEAD, POST/PUT/DELETE → OPTIONS (降级 HEAD)
    */
   async probeEndpoint(endpoint: EndpointDef): Promise<{
-    status: 'reachable' | 'unreachable' | 'auth_failed' | 'not_found' | 'server_error' | 'unknown';
+    status: ProbeStatus;
     statusCode?: number;
     responseTimeMs?: number;
     error?: string;
@@ -536,10 +565,12 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
           timeout: 5000,
           validateStatus: () => true,
         });
-        return this.classifyProbeStatus(headResp.status, Date.now() - start);
+        const result = classifyProbeStatus(headResp.status);
+        return { ...result, responseTimeMs: Date.now() - start };
       }
 
-      return this.classifyProbeStatus(resp.status, Date.now() - start);
+      const result = classifyProbeStatus(resp.status);
+      return { ...result, responseTimeMs: Date.now() - start };
     } catch (error: any) {
       return {
         status: 'unreachable',
@@ -554,32 +585,5 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
    */
   getLoadedEndpoints(): EndpointDef[] {
     return [...this.endpoints];
-  }
-
-  private classifyProbeStatus(
-    statusCode: number,
-    responseTimeMs: number,
-  ): {
-    status: 'reachable' | 'unreachable' | 'auth_failed' | 'not_found' | 'server_error' | 'unknown';
-    statusCode: number;
-    responseTimeMs: number;
-  } {
-    let status: 'reachable' | 'unreachable' | 'auth_failed' | 'not_found' | 'server_error' | 'unknown';
-
-    if (statusCode >= 200 && statusCode < 400) {
-      status = 'reachable';
-    } else if (statusCode === 401 || statusCode === 403) {
-      status = 'auth_failed';
-    } else if (statusCode === 404) {
-      status = 'not_found';
-    } else if (statusCode === 405) {
-      status = 'unknown'; // 方法不允许，但端点可能存在
-    } else if (statusCode >= 500) {
-      status = 'server_error';
-    } else {
-      status = 'unknown';
-    }
-
-    return { status, statusCode, responseTimeMs };
   }
 }

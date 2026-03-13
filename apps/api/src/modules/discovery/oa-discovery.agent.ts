@@ -6,7 +6,7 @@ import {
   type OADiscoveryInput,
   type OADiscoveryOutput,
 } from '@uniflow/shared-schema';
-import { detectCapabilities, calculateOCL } from '@uniflow/compat-engine';
+import { detectCapabilities, calculateOCL, type OCLInput } from '@uniflow/compat-engine';
 import { AdapterFactory, hasLifecycle } from '@uniflow/oa-adapters';
 
 @Injectable()
@@ -83,7 +83,7 @@ export class OADiscoveryAgent extends BaseAgent<OADiscoveryInput, OADiscoveryOut
   private inferCapabilities(
     discoverResult: any,
     input: OADiscoveryInput,
-  ): Record<string, boolean> {
+  ): OCLInput {
     const flows = discoverResult.discoveredFlows || [];
     const hasSubmit = flows.some((f: any) => f.submitUrl);
     const hasQuery = flows.some((f: any) => f.queryUrl);

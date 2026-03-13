@@ -26,10 +26,21 @@ export class MCPGeneratorService {
     connectorId: string,
     workflows: IdentifiedWorkflow[],
     syncCapabilities: DetectedSyncCapabilities,
+    baseUrl?: string,
   ): Promise<GenerateResult> {
     const generatedTools: GeneratedTool[] = [];
     const processTemplates: GenerateResult['processTemplates'] = [];
     const usedToolNames = new Set<string>();
+
+    // 获取 connector baseUrl（如果调用方未传入）
+    let resolvedBaseUrl = baseUrl;
+    if (!resolvedBaseUrl) {
+      const connector = await this.prisma.connector.findUnique({
+        where: { id: connectorId },
+        select: { baseUrl: true },
+      });
+      resolvedBaseUrl = connector?.baseUrl || '';
+    }
 
     // 1. 为每个 workflow 的每个 endpoint 生成 MCPTool
     for (const workflow of workflows) {
@@ -45,6 +56,7 @@ export class MCPGeneratorService {
           toolName,
           workflow,
           wep,
+          resolvedBaseUrl,
         );
 
         generatedTools.push({
@@ -78,6 +90,7 @@ export class MCPGeneratorService {
       syncCapabilities,
       usedToolNames,
       generatedTools,
+      resolvedBaseUrl,
     );
 
     // 3. 确定同步策略
@@ -112,8 +125,10 @@ export class MCPGeneratorService {
     toolName: string,
     workflow: IdentifiedWorkflow,
     wep: WorkflowEndpoint,
+    baseUrl: string,
   ) {
     const ep = wep.endpoint;
+    const fullUrl = this.buildFullUrl(baseUrl, ep.path);
     const allParams = this.extractAllParams(ep);
     const toolSchema = this.buildToolSchema(allParams);
     const paramMapping = this.buildParamMapping(allParams);
@@ -130,7 +145,7 @@ export class MCPGeneratorService {
         toolName,
         toolDescription: `${workflow.processName} — ${ep.summary}`,
         toolSchema,
-        apiEndpoint: ep.path,
+        apiEndpoint: fullUrl,
         httpMethod: ep.method,
         headers: {},
         bodyTemplate,
@@ -149,7 +164,7 @@ export class MCPGeneratorService {
       update: {
         toolDescription: `${workflow.processName} — ${ep.summary}`,
         toolSchema,
-        apiEndpoint: ep.path,
+        apiEndpoint: fullUrl,
         httpMethod: ep.method,
         bodyTemplate,
         paramMapping,
@@ -168,10 +183,12 @@ export class MCPGeneratorService {
     syncCapabilities: DetectedSyncCapabilities,
     usedToolNames: Set<string>,
     generatedTools: GeneratedTool[],
+    baseUrl: string,
   ) {
     // webhook_register
     if (syncCapabilities.webhookEndpoint) {
       const ep = syncCapabilities.webhookEndpoint;
+      const fullUrl = this.buildFullUrl(baseUrl, ep.path);
       const toolName = this.uniqueToolName('_system_webhook_register', usedToolNames);
       await this.prisma.mCPTool.upsert({
         where: { connectorId_toolName: { connectorId, toolName } },
@@ -181,7 +198,7 @@ export class MCPGeneratorService {
           toolName,
           toolDescription: ep.description || 'Register webhook callback',
           toolSchema: { type: 'object', properties: { callbackUrl: { type: 'string' }, events: { type: 'array', items: { type: 'string' } } }, required: ['callbackUrl'] },
-          apiEndpoint: ep.path,
+          apiEndpoint: fullUrl,
           httpMethod: ep.method,
           headers: {},
           paramMapping: { callbackUrl: 'callbackUrl', events: 'events' },
@@ -190,14 +207,14 @@ export class MCPGeneratorService {
           category: 'webhook_register',
           enabled: true,
         },
-        update: { apiEndpoint: ep.path, httpMethod: ep.method, updatedAt: new Date() },
+        update: { apiEndpoint: fullUrl, httpMethod: ep.method, updatedAt: new Date() },
       });
       generatedTools.push({
         toolName,
         toolDescription: ep.description || 'Register webhook callback',
         category: 'webhook_register',
         flowCode: null,
-        apiEndpoint: ep.path,
+        apiEndpoint: fullUrl,
         httpMethod: ep.method,
       });
     }
@@ -205,6 +222,7 @@ export class MCPGeneratorService {
     // batch_query
     if (syncCapabilities.batchQueryEndpoint) {
       const ep = syncCapabilities.batchQueryEndpoint;
+      const fullUrl = this.buildFullUrl(baseUrl, ep.path);
       const toolName = this.uniqueToolName('_system_batch_query', usedToolNames);
       await this.prisma.mCPTool.upsert({
         where: { connectorId_toolName: { connectorId, toolName } },
@@ -214,7 +232,7 @@ export class MCPGeneratorService {
           toolName,
           toolDescription: ep.description || 'Batch query submission status',
           toolSchema: { type: 'object', properties: { ids: { type: 'array', items: { type: 'string' } } }, required: ['ids'] },
-          apiEndpoint: ep.path,
+          apiEndpoint: fullUrl,
           httpMethod: ep.method,
           headers: {},
           paramMapping: { ids: 'ids' },
@@ -223,20 +241,21 @@ export class MCPGeneratorService {
           category: 'batch_query',
           enabled: true,
         },
-        update: { apiEndpoint: ep.path, httpMethod: ep.method, updatedAt: new Date() },
+        update: { apiEndpoint: fullUrl, httpMethod: ep.method, updatedAt: new Date() },
       });
       generatedTools.push({
         toolName,
         toolDescription: ep.description || 'Batch query submission status',
         category: 'batch_query',
         flowCode: null,
-        apiEndpoint: ep.path,
+        apiEndpoint: fullUrl,
         httpMethod: ep.method,
       });
     }
 
     // status_query (per-process)
     for (const sq of syncCapabilities.singleQueryEndpoints) {
+      const fullUrl = this.buildFullUrl(baseUrl, sq.path);
       const toolName = this.uniqueToolName(
         sq.processCode === '_global' ? '_system_status_query' : `${sq.processCode}_status_query`,
         usedToolNames,
@@ -249,7 +268,7 @@ export class MCPGeneratorService {
           toolName,
           toolDescription: `Query status for ${sq.processCode}`,
           toolSchema: { type: 'object', properties: { id: { type: 'string' } }, required: ['id'] },
-          apiEndpoint: sq.path,
+          apiEndpoint: fullUrl,
           httpMethod: sq.method,
           headers: {},
           paramMapping: { id: 'id' },
@@ -258,14 +277,14 @@ export class MCPGeneratorService {
           category: 'status_query',
           enabled: true,
         },
-        update: { apiEndpoint: sq.path, httpMethod: sq.method, updatedAt: new Date() },
+        update: { apiEndpoint: fullUrl, httpMethod: sq.method, updatedAt: new Date() },
       });
       generatedTools.push({
         toolName,
         toolDescription: `Query status for ${sq.processCode}`,
         category: 'status_query',
         flowCode: sq.processCode === '_global' ? null : sq.processCode,
-        apiEndpoint: sq.path,
+        apiEndpoint: fullUrl,
         httpMethod: sq.method,
       });
     }
@@ -273,6 +292,7 @@ export class MCPGeneratorService {
     // flow_list — 流程列表接口，用于运行时动态发现流程类型
     if (syncCapabilities.flowListEndpoint) {
       const ep = syncCapabilities.flowListEndpoint;
+      const fullUrl = this.buildFullUrl(baseUrl, ep.path);
       const toolName = this.uniqueToolName('_system_flow_list', usedToolNames);
       await this.prisma.mCPTool.upsert({
         where: { connectorId_toolName: { connectorId, toolName } },
@@ -282,7 +302,7 @@ export class MCPGeneratorService {
           toolName,
           toolDescription: ep.description || 'List available flow/form types',
           toolSchema: { type: 'object', properties: {} },
-          apiEndpoint: ep.path,
+          apiEndpoint: fullUrl,
           httpMethod: ep.method,
           headers: {},
           paramMapping: {},
@@ -297,7 +317,7 @@ export class MCPGeneratorService {
           enabled: true,
         },
         update: {
-          apiEndpoint: ep.path,
+          apiEndpoint: fullUrl,
           httpMethod: ep.method,
           responseMapping: {
             listPath: ep.responseListPath || 'data',
@@ -313,7 +333,7 @@ export class MCPGeneratorService {
         toolDescription: ep.description || 'List available flow/form types',
         category: 'flow_list',
         flowCode: null,
-        apiEndpoint: ep.path,
+        apiEndpoint: fullUrl,
         httpMethod: ep.method,
       });
     }
@@ -620,5 +640,14 @@ export class MCPGeneratorService {
     name = `${name}_${suffix}`;
     used.add(name);
     return name;
+  }
+
+  private buildFullUrl(baseUrl: string, path: string): string {
+    if (path.startsWith('http://') || path.startsWith('https://')) {
+      return path;
+    }
+    const normalizedBase = baseUrl.replace(/\/+$/, '');
+    const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+    return `${normalizedBase}${normalizedPath}`;
   }
 }

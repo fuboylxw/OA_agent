@@ -12,6 +12,15 @@ import { PrismaService } from '../common/prisma.service';
 import { GenericHttpAdapter } from './generic-http-adapter';
 import { PrismaEndpointLoader } from './prisma-endpoint-loader';
 
+const SENSITIVE_AUTH_KEYS = new Set([
+  'password',
+  'token',
+  'appSecret',
+  'accessToken',
+  'refreshToken',
+  'secret',
+]);
+
 @Injectable()
 export class AdapterRuntimeService {
   private readonly logger = new Logger(AdapterRuntimeService.name);
@@ -53,7 +62,7 @@ export class AdapterRuntimeService {
     flows?: Array<{ flowCode: string; flowName: string }>,
   ): Promise<OAAdapter> {
     const connector = await this.getConnectorWithSecrets(connectorId);
-    const authConfig = this.resolveAuthConfig(connector);
+    const authConfig = await this.resolveAuthConfig(connector);
 
     const config = {
       oaVendor: connector.oaVendor || undefined,
@@ -144,7 +153,8 @@ export class AdapterRuntimeService {
     return connector;
   }
 
-  resolveAuthConfig(connector: {
+  async resolveAuthConfig(connector: {
+    id?: string;
     authType: string;
     authConfig: any;
     secretRef?: {
@@ -160,14 +170,19 @@ export class AdapterRuntimeService {
       return baseConfig;
     }
 
-    const resolvedSecret = this.resolveSecretPayload(secretRef, connector.authType);
+    const resolvedSecret = await this.resolveSecretPayload(
+      connector.id,
+      secretRef,
+      connector.authType,
+    );
     return {
       ...baseConfig,
       ...resolvedSecret,
     };
   }
 
-  private resolveSecretPayload(
+  private async resolveSecretPayload(
+    connectorId: string | undefined,
     secretRef: {
       secretProvider: string;
       secretPath: string;
@@ -180,10 +195,60 @@ export class AdapterRuntimeService {
     }
 
     const raw = process.env[secretRef.secretPath];
-    if (!raw) {
+    if (raw) {
+      return this.mapRawSecret(raw, authType);
+    }
+
+    if (!connectorId) {
       return {};
     }
 
+    const bootstrapSecret = await this.loadBootstrapSecretPayload(connectorId);
+    if (bootstrapSecret) {
+      this.logger.warn(
+        `Secret ${secretRef.secretPath} not found in process env, falling back to latest bootstrap auth for connector ${connectorId}`,
+      );
+      return bootstrapSecret;
+    }
+
+    return {};
+  }
+
+  private async loadBootstrapSecretPayload(connectorId: string) {
+    const latestPublishedJob = await this.prisma.bootstrapJob.findFirst({
+      where: {
+        connectorId,
+        status: {
+          in: ['PUBLISHED', 'PARTIALLY_PUBLISHED'],
+        },
+      },
+      orderBy: [
+        { completedAt: 'desc' },
+        { updatedAt: 'desc' },
+      ],
+      select: {
+        id: true,
+        authConfig: true,
+      },
+    });
+
+    const authConfig = latestPublishedJob?.authConfig;
+    if (!authConfig || typeof authConfig !== 'object' || Array.isArray(authConfig)) {
+      return {};
+    }
+
+    return this.extractSensitiveAuthFields(authConfig as Record<string, any>);
+  }
+
+  private extractSensitiveAuthFields(authConfig: Record<string, any>) {
+    return Object.fromEntries(
+      Object.entries(authConfig).filter(([key, value]) =>
+        SENSITIVE_AUTH_KEYS.has(key) && value !== undefined && value !== null && value !== ''
+      ),
+    );
+  }
+
+  private mapRawSecret(raw: string, authType: string) {
     try {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === 'object') {
