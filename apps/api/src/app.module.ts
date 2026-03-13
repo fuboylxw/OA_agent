@@ -22,6 +22,7 @@ import { MCPModule } from './modules/mcp/mcp.module';
 import { SyncModule } from './modules/sync/sync.module';
 import { WebhookModule } from './modules/webhook/webhook.module';
 import { ApiParseModule } from './modules/api-parse/api-parse.module';
+import { AttachmentModule } from './modules/attachment/attachment.module';
 import { HealthController } from './health.controller';
 
 @Module({
@@ -61,6 +62,7 @@ import { HealthController } from './health.controller';
     DashboardModule,
     AuthModule,
     MCPModule,
+    AttachmentModule,
     SyncModule,
     WebhookModule,
     ApiParseModule,

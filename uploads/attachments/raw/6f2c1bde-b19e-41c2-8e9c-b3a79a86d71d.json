@@ -1,0 +1,694 @@
+
+{
+  "openapi": "3.0.3",
+  "info": {
+    "title": "学校 OA 系统 API",
+    "version": "1.1.0",
+    "description": "学校 OA 系统本地接口文档，覆盖鉴权、流程申请、审批、附件、抄送和权限管理。"
+  },
+  "servers": [
+    {
+      "url": "http://127.0.0.1:3210",
+      "description": "默认本地开发地址"
+    },
+    {
+      "url": "http://127.0.0.1:3211",
+      "description": "示例验证地址"
+    }
+  ],
+  "tags": [
+    { "name": "Health", "description": "服务健康状态" },
+    { "name": "Auth", "description": "登录与会话" },
+    { "name": "Forms", "description": "流程模板与工作台" },
+    { "name": "Applications", "description": "申请单、审批、撤回、抄送、附件" },
+    { "name": "Admin", "description": "用户和角色管理" }
+  ],
+  "components": {
+    "securitySchemes": {
+      "cookieAuth": {
+        "type": "apiKey",
+        "in": "cookie",
+        "name": "oa_session"
+      }
+    },
+    "schemas": {
+      "User": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "username": { "type": "string" },
+          "displayName": { "type": "string" },
+          "email": { "type": "string" },
+          "department": { "type": "string" },
+          "employeeNo": { "type": "string" },
+          "status": { "type": "string", "enum": ["active", "inactive"] },
+          "roleIds": { "type": "array", "items": { "type": "string" } },
+          "roles": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "Role": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "name": { "type": "string" },
+          "description": { "type": "string" },
+          "permissions": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "DirectoryUser": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "username": { "type": "string" },
+          "displayName": { "type": "string" },
+          "department": { "type": "string" },
+          "roleIds": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "AttachmentPayload": {
+        "type": "object",
+        "required": ["name", "contentBase64"],
+        "properties": {
+          "name": { "type": "string", "example": "leave-note.txt" },
+          "type": { "type": "string", "example": "text/plain" },
+          "contentBase64": { "type": "string", "description": "文件的 Base64 内容，不含或含 data: 前缀均可" }
+        }
+      },
+      "Attachment": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "originalName": { "type": "string" },
+          "storedName": { "type": "string" },
+          "mimeType": { "type": "string" },
+          "size": { "type": "integer" },
+          "uploadedById": { "type": "string" },
+          "uploadedByName": { "type": "string" },
+          "uploadedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "WorkflowStep": {
+        "type": "object",
+        "properties": {
+          "key": { "type": "string" },
+          "name": { "type": "string" },
+          "approverRoles": { "type": "array", "items": { "type": "string" } },
+          "scope": { "type": "string" },
+          "status": { "type": "string" },
+          "actedBy": { "type": ["string", "null"] },
+          "actedByName": { "type": "string" },
+          "actedAt": { "type": "string" },
+          "comment": { "type": "string" }
+        }
+      },
+      "ApplicationLog": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "action": { "type": "string" },
+          "actorId": { "type": "string" },
+          "actorName": { "type": "string" },
+          "actorRoles": { "type": "array", "items": { "type": "string" } },
+          "comment": { "type": "string" },
+          "at": { "type": "string", "format": "date-time" }
+        }
+      },
+      "Application": {
+        "type": "object",
+        "properties": {
+          "id": { "type": "string" },
+          "formCode": { "type": "string" },
+          "formName": { "type": "string" },
+          "category": { "type": "string" },
+          "applicantId": { "type": "string" },
+          "applicantName": { "type": "string" },
+          "department": { "type": "string" },
+          "status": { "type": "string", "enum": ["pending", "in_review", "approved", "rejected", "recalled"] },
+          "currentStepIndex": { "type": "integer" },
+          "data": { "type": "object", "additionalProperties": true },
+          "attachments": { "type": "array", "items": { "$ref": "#/components/schemas/Attachment" } },
+          "ccUserIds": { "type": "array", "items": { "type": "string" } },
+          "ccUsers": { "type": "array", "items": { "$ref": "#/components/schemas/DirectoryUser" } },
+          "workflow": { "type": "array", "items": { "$ref": "#/components/schemas/WorkflowStep" } },
+          "logs": { "type": "array", "items": { "$ref": "#/components/schemas/ApplicationLog" } },
+          "summary": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "label": { "type": "string" },
+                "value": {}
+              }
+            }
+          },
+          "permissions": {
+            "type": "object",
+            "properties": {
+              "canApprove": { "type": "boolean" },
+              "canRecall": { "type": "boolean" },
+              "canSupplement": { "type": "boolean" },
+              "canManageCc": { "type": "boolean" },
+              "isCcRecipient": { "type": "boolean" }
+            }
+          },
+          "createdAt": { "type": "string", "format": "date-time" },
+          "updatedAt": { "type": "string", "format": "date-time" }
+        }
+      },
+      "ApplicationCreateRequest": {
+        "type": "object",
+        "required": ["formCode", "data"],
+        "properties": {
+          "formCode": { "type": "string", "example": "leave" },
+          "data": {
+            "type": "object",
+            "example": {
+              "leaveType": "personal",
+              "startDate": "2026-03-14",
+              "endDate": "2026-03-15",
+              "days": 2,
+              "contactPhone": "13812340000",
+              "reason": "外出参加会议"
+            }
+          },
+          "ccUserIds": { "type": "array", "items": { "type": "string" } },
+          "attachments": { "type": "array", "items": { "$ref": "#/components/schemas/AttachmentPayload" } }
+        }
+      },
+      "LoginRequest": {
+        "type": "object",
+        "required": ["username", "password"],
+        "properties": {
+          "username": { "type": "string", "example": "teacher" },
+          "password": { "type": "string", "example": "Teacher@123" }
+        }
+      },
+      "CommentRequest": {
+        "type": "object",
+        "properties": {
+          "comment": { "type": "string", "example": "同意" }
+        }
+      },
+      "CcRequest": {
+        "type": "object",
+        "required": ["ccUserIds"],
+        "properties": {
+          "ccUserIds": { "type": "array", "items": { "type": "string" } }
+        }
+      },
+      "AttachmentAppendRequest": {
+        "type": "object",
+        "required": ["attachments"],
+        "properties": {
+          "attachments": { "type": "array", "items": { "$ref": "#/components/schemas/AttachmentPayload" } }
+        }
+      },
+      "Form": {
+        "type": "object",
+        "properties": {
+          "code": { "type": "string" },
+          "name": { "type": "string" },
+          "category": { "type": "string" },
+          "icon": { "type": "string" },
+          "description": { "type": "string" },
+          "submitRoles": { "type": "array", "items": { "type": "string" } },
+          "canSubmit": { "type": "boolean" },
+          "fields": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+          "workflow": { "type": "array", "items": { "type": "object", "additionalProperties": true } }
+        }
+      }
+    }
+  },
+  "security": [
+    { "cookieAuth": [] }
+  ],
+  "paths": {
+    "/api/health": {
+      "get": {
+        "tags": ["Health"],
+        "summary": "健康检查",
+        "security": [],
+        "responses": {
+          "200": {
+            "description": "服务正常",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "status": { "type": "string" },
+                    "project": { "type": "string" },
+                    "version": { "type": "string" },
+                    "features": { "type": "array", "items": { "type": "string" } },
+                    "timestamp": { "type": "string", "format": "date-time" }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/auth/login": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "用户登录",
+        "security": [],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/LoginRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "登录成功，并通过 Cookie 下发会话",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string" },
+                    "user": { "$ref": "#/components/schemas/User" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "description": "用户名或密码错误" }
+        }
+      }
+    },
+    "/api/auth/logout": {
+      "post": {
+        "tags": ["Auth"],
+        "summary": "退出登录",
+        "responses": {
+          "200": { "description": "退出成功" }
+        }
+      }
+    },
+    "/api/auth/me": {
+      "get": {
+        "tags": ["Auth"],
+        "summary": "获取当前登录用户",
+        "responses": {
+          "200": {
+            "description": "返回当前用户",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "user": { "$ref": "#/components/schemas/User" }
+                  }
+                }
+              }
+            }
+          },
+          "401": { "description": "未登录" }
+        }
+      }
+    },
+    "/api/directory": {
+      "get": {
+        "tags": ["Forms"],
+        "summary": "获取通讯录用户",
+        "responses": {
+          "200": {
+            "description": "返回可抄送用户列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "users": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/DirectoryUser" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/forms": {
+      "get": {
+        "tags": ["Forms"],
+        "summary": "获取流程模板列表",
+        "responses": {
+          "200": {
+            "description": "返回全部流程模板",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "forms": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/Form" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/dashboard": {
+      "get": {
+        "tags": ["Forms"],
+        "summary": "获取工作台统计",
+        "responses": {
+          "200": {
+            "description": "返回工作台数据",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "user": { "$ref": "#/components/schemas/User" },
+                    "stats": { "type": "object", "additionalProperties": true },
+                    "categories": { "type": "array", "items": { "type": "object", "additionalProperties": true } },
+                    "recentApplications": { "type": "array", "items": { "$ref": "#/components/schemas/Application" } }
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/api/applications": {
+      "get": {
+        "tags": ["Applications"],
+        "summary": "查询申请单列表",
+        "parameters": [
+          {
+            "name": "scope",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": ["mine", "approval", "cc", "all"],
+              "default": "mine"
+            },
+            "description": "mine=我的申请；approval=待我审批；cc=抄送给我；all=全部可见申请"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回申请列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "applications": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/Application" }
+                    }
+                  }
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": ["Applications"],
+        "summary": "创建新申请",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/ApplicationCreateRequest" }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "创建成功",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "message": { "type": "string" },
+                    "application": { "$ref": "#/components/schemas/Application" }
+                  }
+                }
+              }
+            }
+          },
+          "400": { "description": "表单或附件校验失败" }
+        }
+      }
+    },
+    "/api/applications/{applicationId}": {
+      "get": {
+        "tags": ["Applications"],
+        "summary": "获取单个申请详情",
+        "parameters": [
+          {
+            "name": "applicationId",
+            "in": "path",
+            "required": true,
+            "schema": { "type": "string" }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "返回申请详情",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "application": { "$ref": "#/components/schemas/Application" }
+                  }
+                }
+              }
+            }
+          },
+          "403": { "description": "无查看权限" },
+          "404": { "description": "申请不存在" }
+        }
+      }
+    },
+    "/api/applications/{applicationId}/approve": {
+      "post": {
+        "tags": ["Applications"],
+        "summary": "审批通过",
+        "parameters": [
+          { "name": "applicationId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CommentRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "审批通过" },
+          "403": { "description": "无审批权限" }
+        }
+      }
+    },
+    "/api/applications/{applicationId}/reject": {
+      "post": {
+        "tags": ["Applications"],
+        "summary": "审批驳回",
+        "parameters": [
+          { "name": "applicationId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CommentRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "驳回成功" },
+          "403": { "description": "无审批权限" }
+        }
+      }
+    },
+    "/api/applications/{applicationId}/recall": {
+      "post": {
+        "tags": ["Applications"],
+        "summary": "撤回申请",
+        "parameters": [
+          { "name": "applicationId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CommentRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "撤回成功" },
+          "403": { "description": "无撤回权限" }
+        }
+      }
+    },
+    "/api/applications/{applicationId}/attachments": {
+      "post": {
+        "tags": ["Applications"],
+        "summary": "补充附件",
+        "parameters": [
+          { "name": "applicationId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/AttachmentAppendRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "附件补充成功" },
+          "400": { "description": "附件校验失败" },
+          "403": { "description": "无补件权限" }
+        }
+      }
+    },
+    "/api/applications/{applicationId}/cc": {
+      "post": {
+        "tags": ["Applications"],
+        "summary": "追加抄送对象",
+        "parameters": [
+          { "name": "applicationId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": { "$ref": "#/components/schemas/CcRequest" }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "抄送更新成功" },
+          "400": { "description": "抄送对象无效" },
+          "403": { "description": "无抄送权限" }
+        }
+      }
+    },
+    "/api/applications/{applicationId}/attachments/{attachmentId}": {
+      "get": {
+        "tags": ["Applications"],
+        "summary": "下载附件",
+        "parameters": [
+          { "name": "applicationId", "in": "path", "required": true, "schema": { "type": "string" } },
+          { "name": "attachmentId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "responses": {
+          "200": {
+            "description": "附件二进制流",
+            "content": {
+              "application/octet-stream": {
+                "schema": {
+                  "type": "string",
+                  "format": "binary"
+                }
+              }
+            }
+          },
+          "403": { "description": "无查看权限" },
+          "404": { "description": "附件不存在" }
+        }
+      }
+    },
+    "/api/users": {
+      "get": {
+        "tags": ["Admin"],
+        "summary": "获取用户列表",
+        "responses": {
+          "200": {
+            "description": "管理员获取用户列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "users": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/User" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": { "description": "仅管理员可访问" }
+        }
+      }
+    },
+    "/api/roles": {
+      "get": {
+        "tags": ["Admin"],
+        "summary": "获取角色列表",
+        "responses": {
+          "200": {
+            "description": "管理员获取角色列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "object",
+                  "properties": {
+                    "roles": {
+                      "type": "array",
+                      "items": { "$ref": "#/components/schemas/Role" }
+                    }
+                  }
+                }
+              }
+            }
+          },
+          "403": { "description": "仅管理员可访问" }
+        }
+      }
+    },
+    "/api/users/{userId}/roles": {
+      "patch": {
+        "tags": ["Admin"],
+        "summary": "修改用户角色和状态",
+        "parameters": [
+          { "name": "userId", "in": "path", "required": true, "schema": { "type": "string" } }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "type": "object",
+                "required": ["roleIds"],
+                "properties": {
+                  "roleIds": { "type": "array", "items": { "type": "string" } },
+                  "department": { "type": "string" },
+                  "status": { "type": "string", "enum": ["active", "inactive"] }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": { "description": "更新成功" },
+          "400": { "description": "角色配置无效" },
+          "403": { "description": "仅管理员可访问" }
+        }
+      }
+    }
+  }
+}

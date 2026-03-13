@@ -62,7 +62,7 @@ export class FlowAgent {
     }
 
     try {
-      return await this.matchFlowWithLLM(message, availableFlows);
+      return await this.matchFlowWithLLM(message, availableFlows, intent);
     } catch (error: any) {
       this.logger.warn(`LLM 流程匹配失败，回退到简单匹配: ${error.message}`);
       return this.matchFlowFallback(message, availableFlows);
@@ -72,6 +72,7 @@ export class FlowAgent {
   private async matchFlowWithLLM(
     message: string,
     availableFlows: FlowInfo[],
+    intent?: string,
   ): Promise<FlowMatchResult> {
     const flowList = availableFlows
       .map(f => `- ${f.processCode} | ${f.processName} | 分类: ${f.processCategory}`)
@@ -89,7 +90,15 @@ ${flowList}
       { role: 'user', content: userPrompt },
     ];
 
-    const response = await this.llmClient.chat(messages);
+    const response = await this.llmClient.chat(messages, {
+      trace: {
+        scope: 'assistant.flow.match',
+        metadata: {
+          intent: intent || null,
+          availableFlowCount: availableFlows.length,
+        },
+      },
+    });
 
     let jsonStr = response.content.trim();
     if (jsonStr.startsWith('```')) {

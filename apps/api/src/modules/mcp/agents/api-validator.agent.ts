@@ -150,7 +150,7 @@ export class ApiValidatorAgent extends BaseAgent<
     path: string,
     authConfig: any,
   ): Promise<{ exists: boolean; authValid: boolean; statusCode?: number }> {
-    const url = `${baseUrl}${path}`;
+    const url = this.buildFullUrl(baseUrl, path);
     const headers: any = {};
 
     // 配置认证
@@ -297,5 +297,14 @@ export class ApiValidatorAgent extends BaseAgent<
     }
 
     return 'API端点验证通过，可以正常使用。';
+  }
+
+  private buildFullUrl(baseUrl: string, path: string): string {
+    if (path.startsWith('http://') || path.startsWith('https://')) {
+      return path;
+    }
+    const normalizedBase = baseUrl.replace(/\/+$/, '');
+    const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+    return `${normalizedBase}${normalizedPath}`;
   }
 }

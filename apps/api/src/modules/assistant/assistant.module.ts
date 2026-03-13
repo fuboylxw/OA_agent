@@ -10,9 +10,10 @@ import { AuditModule } from '../audit/audit.module';
 import { ProcessLibraryModule } from '../process-library/process-library.module';
 import { MCPModule } from '../mcp/mcp.module';
 import { SubmissionModule } from '../submission/submission.module';
+import { AttachmentModule } from '../attachment/attachment.module';
 
 @Module({
-  imports: [PermissionModule, AuditModule, ProcessLibraryModule, MCPModule, SubmissionModule],
+  imports: [PermissionModule, AuditModule, ProcessLibraryModule, MCPModule, SubmissionModule, AttachmentModule],
   controllers: [AssistantController],
   providers: [AssistantService, IntentAgent, FlowAgent, FormAgent, ConnectorRouter],
   exports: [AssistantService],

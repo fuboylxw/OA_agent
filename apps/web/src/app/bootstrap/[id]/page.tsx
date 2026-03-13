@@ -62,7 +62,7 @@ export default async function BootstrapJobDetailPage({
               {job.name || `初始化任务 ${job.id.slice(0, 8)}`}
             </h1>
             <p className="mt-1 text-sm text-gray-600">
-              状态：{job.status} · 创建时间：{formatDate(job.createdAt)}
+              状态：{job.status} · 当前阶段：{job.currentStage || '-'} · 创建时间：{formatDate(job.createdAt)}
             </p>
           </div>
           <span className="rounded-full bg-blue-100 px-3 py-1 text-sm font-medium text-blue-700">
@@ -84,6 +84,34 @@ export default async function BootstrapJobDetailPage({
             <div className="mt-2 break-all font-mono text-sm text-gray-900">{job.tenantId}</div>
           </div>
         </div>
+
+        <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-4">
+          <div className="rounded-xl border border-gray-200 bg-white p-5">
+            <div className="text-sm text-gray-500">队列令牌</div>
+            <div className="mt-2 break-all font-mono text-xs text-gray-900">{job.queueJobId || '-'}</div>
+          </div>
+          <div className="rounded-xl border border-gray-200 bg-white p-5">
+            <div className="text-sm text-gray-500">阶段开始时间</div>
+            <div className="mt-2 text-sm text-gray-900">{formatDate(job.stageStartedAt)}</div>
+          </div>
+          <div className="rounded-xl border border-gray-200 bg-white p-5">
+            <div className="text-sm text-gray-500">最近心跳</div>
+            <div className="mt-2 text-sm text-gray-900">{formatDate(job.lastHeartbeatAt)}</div>
+          </div>
+          <div className="rounded-xl border border-gray-200 bg-white p-5">
+            <div className="text-sm text-gray-500">自动恢复计数</div>
+            <div className="mt-2 text-sm text-gray-900">
+              恢复 {job.recoveryAttemptCount || 0} 次 / 补齐 {job.reconcileAttemptCount || 0} 次
+            </div>
+          </div>
+        </div>
+
+        {job.stalledReason && (
+          <div className="mb-6 rounded-xl border border-amber-200 bg-amber-50 p-4 text-sm text-amber-900">
+            <div className="font-medium">卡顿说明</div>
+            <div className="mt-2 whitespace-pre-wrap break-words">{job.stalledReason}</div>
+          </div>
+        )}
 
         <div className="mb-6 rounded-xl border border-gray-200 bg-white p-6">
           <h2 className="mb-4 text-lg font-semibold text-gray-900">任务明细</h2>
@@ -122,6 +150,10 @@ export default async function BootstrapJobDetailPage({
                   <div className="text-xs text-gray-500">回放用例</div>
                   <div className="mt-1 text-lg font-semibold text-gray-900">{job.replayCases?.length || 0}</div>
                 </div>
+                <div className="rounded-lg bg-gray-50 p-4">
+                  <div className="text-xs text-gray-500">自动修复尝试</div>
+                  <div className="mt-1 text-lg font-semibold text-gray-900">{job.repairAttempts?.length || 0}</div>
+                </div>
               </div>
             </div>
           </div>
@@ -130,6 +162,36 @@ export default async function BootstrapJobDetailPage({
         <div className="mb-6 rounded-xl border border-gray-200 bg-white p-6">
           <h2 className="mb-4 text-lg font-semibold text-gray-900">最新报告</h2>
           {report ? renderJson(report) : <div className="text-sm text-gray-500">暂无报告</div>}
+        </div>
+
+        <div className="mb-6 rounded-xl border border-gray-200 bg-white p-6">
+          <h2 className="mb-4 text-lg font-semibold text-gray-900">自动修复记录</h2>
+          {job.repairAttempts?.length ? (
+            <div className="space-y-3">
+              {job.repairAttempts.map((attempt: any) => (
+                <div key={attempt.id} className="rounded-lg bg-gray-50 p-4">
+                  <div className="flex flex-wrap items-center gap-3 text-sm">
+                    <span className="font-medium text-gray-900">{attempt.flowCode}</span>
+                    <span className="rounded-full bg-white px-2 py-0.5 text-xs text-gray-600">
+                      第 {attempt.attemptNo} 次
+                    </span>
+                    <span className="rounded-full bg-white px-2 py-0.5 text-xs text-gray-600">
+                      {attempt.status}
+                    </span>
+                    <span className="text-xs text-gray-500">{formatDate(attempt.createdAt)}</span>
+                  </div>
+                  {attempt.errorMessage && (
+                    <div className="mt-2 text-sm text-red-600">{attempt.errorMessage}</div>
+                  )}
+                  {attempt.proposedPatch && (
+                    <div className="mt-3">{renderJson(attempt.proposedPatch)}</div>
+                  )}
+                </div>
+              ))}
+            </div>
+          ) : (
+            <div className="text-sm text-gray-500">暂无自动修复记录</div>
+          )}
         </div>
 
         <div className="rounded-xl border border-gray-200 bg-white p-6">

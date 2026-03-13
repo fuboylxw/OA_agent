@@ -69,12 +69,12 @@ export class ApiParseService {
 
     this.logger.log(`Stage 2 complete: ${identifyResult.workflows.length} workflows identified`);
 
-    // ── Stage 3: 端点验证（可选） ────────────────────────────
+    // ── Stage 3: 端点验证（可选，默认跳过因为 bootstrap 已经做过深度验证） ────────────────────────────
     let validation: ValidationReport | undefined;
-    if (input.autoValidate !== false) {
+    if (input.autoValidate === true) {
       this.logger.log(`Stage 3: Validating endpoints for connector ${input.connectorId}`);
       try {
-        validation = await this.endpointValidator.validate(input.connectorId);
+        validation = await this.endpointValidator.validate(input.connectorId, false); // skipProbe=false 强制重新探测
         if (validation.overall === 'failed') {
           warnings.push(`Endpoint validation failed: connectivity=${validation.connectivity}, auth=${validation.authValid}`);
         } else if (validation.overall === 'partial') {
@@ -110,10 +110,10 @@ export class ApiParseService {
   }
 
   /**
-   * 仅执行 Stage 3: 端点验证
+   * 仅执行 Stage 3: 端点验证（手动触发）
    */
   async validateConnector(connectorId: string): Promise<ValidationReport> {
-    return this.endpointValidator.validate(connectorId);
+    return this.endpointValidator.validate(connectorId, false); // skipProbe=false 强制探测
   }
 
   // ── 辅助方法 ──────────────────────────────────────────────

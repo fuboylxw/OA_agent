@@ -79,7 +79,7 @@ export class WorkflowApiIdentifierAgent extends BaseAgent<
     this.logger.log(`${candidates.length} candidates after rule-based filtering`);
 
     // 使用LLM进行智能识别
-    const result = await this.identifyWithLLM(candidates);
+    const result = await this.identifyWithLLM(candidates, context);
 
     this.logger.log(`Identified ${result.workflowApis.length} workflow APIs`);
 
@@ -120,6 +120,7 @@ export class WorkflowApiIdentifierAgent extends BaseAgent<
    */
   private async identifyWithLLM(
     endpoints: any[],
+    context?: AgentContext,
   ): Promise<WorkflowApiIdentifierOutput> {
     const prompt = `
 你是一个OA系统API分析专家。请分析以下API端点列表，识别哪些是办事流程接口。
@@ -167,7 +168,17 @@ ${JSON.stringify(endpoints, null, 2)}
 
     try {
       const messages = [{ role: 'user' as const, content: prompt }];
-      const response = await this.llmClient.chat(messages);
+      const response = await this.llmClient.chat(messages, {
+        trace: {
+          scope: 'mcp.workflow_api_identifier.identify',
+          traceId: context?.traceId,
+          tenantId: context?.tenantId,
+          userId: context?.userId,
+          metadata: {
+            endpointCount: endpoints.length,
+          },
+        },
+      });
       let jsonStr = response.content.trim();
 
       // Remove markdown code blocks

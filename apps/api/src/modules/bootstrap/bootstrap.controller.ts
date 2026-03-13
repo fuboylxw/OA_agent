@@ -36,12 +36,21 @@ export class BootstrapController {
   @ApiOperation({ summary: 'Reactivate a bootstrap job after connector deletion' })
   async reactivate(
     @Param('id') id: string,
-    @Body() body: { mode: 'reuse' | 'new'; apiDocContent?: string; apiDocUrl?: string; apiDocType?: string },
+    @Body() body: {
+      mode: 'reuse' | 'new';
+      apiDocContent?: string;
+      apiDocUrl?: string;
+      apiDocType?: string;
+      oaUrl?: string;
+      authConfig?: Record<string, any>;
+    },
   ) {
     return this.bootstrapService.reactivate(id, body.mode, {
       apiDocContent: body.apiDocContent,
       apiDocUrl: body.apiDocUrl,
       apiDocType: body.apiDocType,
+      oaUrl: body.oaUrl,
+      authConfig: body.authConfig,
     });
   }
 

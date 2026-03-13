@@ -1,6 +1,7 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../common/prisma.service';
+import { ChatSessionProcessService } from '../common/chat-session-process.service';
 import { AuditService } from '../audit/audit.service';
 import { AdapterRuntimeService } from '../adapter-runtime/adapter-runtime.service';
 import { buildStatusEventRemoteId } from '@uniflow/shared-types';
@@ -10,6 +11,7 @@ import { mapExternalStatusToSubmissionStatus } from '../common/submission-status
 export class StatusService {
   constructor(
     private readonly prisma: PrismaService,
+    private readonly chatSessionProcessService: ChatSessionProcessService,
     private readonly auditService: AuditService,
     private readonly adapterRuntimeService: AdapterRuntimeService,
   ) {}
@@ -39,6 +41,7 @@ export class StatusService {
     let effectiveStatusRecords = submission.statusRecords;
     let effectiveEvents = submission.events;
     if (submission.oaSubmissionId) {
+      const previousStatus = submission.status;
       const template = await this.prisma.processTemplate.findUnique({
         where: { id: submission.templateId },
       });
@@ -99,6 +102,16 @@ export class StatusService {
           status: mappedStatus,
         },
       });
+
+      if (eventCreated || mappedStatus !== previousStatus) {
+        await this.chatSessionProcessService.syncSubmissionStatusToSession({
+          submissionId: submission.id,
+          previousSubmissionStatus: previousStatus,
+          externalStatus: result.status,
+          payload: result as Record<string, any>,
+          createStatusMessage: eventCreated,
+        });
+      }
 
       effectiveStatus = mappedStatus;
       effectiveStatusRecords = eventCreated

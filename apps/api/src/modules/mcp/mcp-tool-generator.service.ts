@@ -41,7 +41,7 @@ export class MCPToolGeneratorService {
         toolName: this.generateToolName(api.path, api.method),
         toolDescription: api.description || `Call ${api.method} ${api.path}`,
         toolSchema: this.buildToolSchema(api.parameters),
-        apiEndpoint: api.path,
+        apiEndpoint: this.buildFullUrl(parsedApis.baseUrl, api.path),
         httpMethod: api.method.toUpperCase(),
         headers: {},
         bodyTemplate: api.requestBody || null,
@@ -91,6 +91,7 @@ export class MCPToolGeneratorService {
     const headers = this.buildAuthHeaders(authConfig);
     const bodyTemplate = this.buildBodyTemplate(workflowApi.requestBody?.properties);
     const testInput = this.buildTestInput(allParams);
+    const fullUrl = this.buildFullUrl(baseUrl, workflowApi.path);
 
     const mcpTool = await this.prisma.mCPTool.upsert({
       where: {
@@ -102,7 +103,7 @@ export class MCPToolGeneratorService {
         toolName,
         toolDescription: workflowApi.description,
         toolSchema,
-        apiEndpoint: workflowApi.path,
+        apiEndpoint: fullUrl,
         httpMethod: workflowApi.method,
         headers,
         bodyTemplate,
@@ -117,7 +118,7 @@ export class MCPToolGeneratorService {
       update: {
         toolDescription: workflowApi.description,
         toolSchema,
-        apiEndpoint: workflowApi.path,
+        apiEndpoint: fullUrl,
         httpMethod: workflowApi.method,
         headers,
         bodyTemplate,
@@ -193,7 +194,7 @@ export class MCPToolGeneratorService {
   }
 
   private extractResource(path: string): string {
-    const parts = path.split('/').filter(p => p && !p.match(/^(api|v\d+|jaxrs)$/i));
+    const parts = path.split('/').filter(p => p && !p.match(/^(api|v\d+)$/i));
     return parts[parts.length - 1] || 'resource';
   }
 
@@ -274,5 +275,14 @@ export class MCPToolGeneratorService {
       template[key] = `{{${key}}}`;
     }
     return template;
+  }
+
+  private buildFullUrl(baseUrl: string, path: string): string {
+    if (path.startsWith('http://') || path.startsWith('https://')) {
+      return path;
+    }
+    const normalizedBase = baseUrl.replace(/\/+$/, '');
+    const normalizedPath = path.startsWith('/') ? path : `/${path}`;
+    return `${normalizedBase}${normalizedPath}`;
   }
 }

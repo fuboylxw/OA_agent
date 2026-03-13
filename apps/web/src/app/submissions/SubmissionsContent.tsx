@@ -1,6 +1,7 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import OaFormPreview from '../components/OaFormPreview';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
@@ -19,6 +20,7 @@ interface FieldWithLabel {
   value: any;
   displayValue: any;
   type: string;
+  required?: boolean;
 }
 
 interface Submission {
@@ -50,6 +52,22 @@ export default function SubmissionsContent({
 
   const getStatus = (status: string) => STATUS_MAP[status] || { label: status, bgClass: 'bg-blue-100', textClass: 'text-blue-600' };
   const toggleExpand = (id: string) => setExpandedId(expandedId === id ? null : id);
+  const getTone = (status: string): 'blue' | 'amber' | 'green' | 'red' | 'gray' => {
+    switch (status) {
+      case 'submitted':
+      case 'pending':
+        return 'blue';
+      case 'approved':
+        return 'green';
+      case 'rejected':
+      case 'failed':
+        return 'red';
+      case 'cancelled':
+        return 'gray';
+      default:
+        return 'amber';
+    }
+  };
 
   useEffect(() => {
     if (!tenantId || !userId) return undefined;
@@ -225,18 +243,28 @@ export default function SubmissionsContent({
                         </div>
                       </div>
 
-                      {isExpanded && submission.formDataWithLabels && (
-                        <div className="px-6 pb-4 bg-gray-50 border-t border-gray-100">
-                          <div className="grid grid-cols-1 md:grid-cols-2 gap-3 py-3">
-                            {submission.formDataWithLabels.map((field) => (
-                              <div key={field.key} className="flex items-start gap-2">
-                                <span className="text-sm text-gray-500 flex-shrink-0 min-w-[80px]">{field.label}：</span>
-                                <span className="text-sm text-gray-900">{String(field.displayValue)}</span>
+                      {isExpanded ? (
+                        <div className="border-t border-gray-100 bg-[linear-gradient(180deg,#fbfdff_0%,#f8fafc_100%)] px-6 py-5">
+                          <OaFormPreview
+                            title={submission.processName || '申请单据'}
+                            subtitle={[
+                              submission.processCategory || null,
+                              submission.oaSubmissionId ? `单号 ${submission.oaSubmissionId}` : null,
+                              `提交于 ${new Date(submission.submittedAt || submission.createdAt).toLocaleString('zh-CN')}`,
+                            ].filter(Boolean).join(' · ')}
+                            statusLabel={submission.statusText || status.label}
+                            tone={getTone(submission.status)}
+                            fields={submission.formDataWithLabels || []}
+                            emptyText="暂无表单详情"
+                            footer={
+                              <div className="flex flex-wrap items-center gap-3 text-sm text-gray-500">
+                                <span>状态：{submission.statusText || status.label}</span>
+                                {submission.user?.displayName ? <span>提交人：{submission.user.displayName}</span> : null}
                               </div>
-                            ))}
-                          </div>
+                            }
+                          />
                         </div>
-                      )}
+                      ) : null}
                     </td>
                   </tr>
                 );

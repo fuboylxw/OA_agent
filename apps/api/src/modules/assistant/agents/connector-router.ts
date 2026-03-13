@@ -112,7 +112,11 @@ export class ConnectorRouter {
     }
 
     // 4. 多个 connector → LLM 判断或让用户选
-    return this.routeWithLLM(message, connectors);
+    return this.routeWithLLM(message, connectors, {
+      tenantId,
+      userId,
+      sessionConnectorId,
+    });
   }
 
   /**
@@ -157,6 +161,11 @@ export class ConnectorRouter {
   private async routeWithLLM(
     message: string,
     connectors: ConnectorInfo[],
+    context: {
+      tenantId: string;
+      userId: string;
+      sessionConnectorId?: string | null;
+    },
   ): Promise<ConnectorRouteResult> {
     try {
       const connectorList = connectors
@@ -171,7 +180,17 @@ export class ConnectorRouter {
         },
       ];
 
-      const response = await this.llmClient.chat(messages);
+      const response = await this.llmClient.chat(messages, {
+        trace: {
+          scope: 'assistant.connector.route',
+          tenantId: context.tenantId,
+          userId: context.userId,
+          metadata: {
+            connectorCount: connectors.length,
+            sessionConnectorId: context.sessionConnectorId || null,
+          },
+        },
+      });
 
       let jsonStr = response.content.trim();
       if (jsonStr.startsWith('```')) {

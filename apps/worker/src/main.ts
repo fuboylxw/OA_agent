@@ -1,8 +1,10 @@
 import { NestFactory } from '@nestjs/core';
 import { Logger } from '@nestjs/common';
+import { registerRuntimeDiagnosticsProcessHandlers } from '@uniflow/agent-kernel';
 
 async function bootstrap() {
   const logger = new Logger('WorkerBootstrap');
+  registerRuntimeDiagnosticsProcessHandlers('worker');
   // Worker reuses the API's WorkerModule which registers Bull processors
   const { WorkerModule } = await import('./worker.module');
   const app = await NestFactory.createApplicationContext(WorkerModule);

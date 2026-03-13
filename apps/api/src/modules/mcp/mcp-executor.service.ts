@@ -63,7 +63,7 @@ export class MCPExecutorService {
     );
 
     // 3. Build HTTP request
-    const resolvedAuthConfig = this.adapterRuntimeService.resolveAuthConfig(tool.connector);
+    const resolvedAuthConfig = await this.adapterRuntimeService.resolveAuthConfig(tool.connector);
     const request = this.buildRequest(tool, mappedParams, resolvedAuthConfig);
 
     // 3.5 If cookie auth, get session cookie and attach
@@ -201,10 +201,12 @@ export class MCPExecutorService {
     resolvedAuthConfig: Record<string, any>,
   ): AxiosRequestConfig {
     const { connector, apiEndpoint, httpMethod, headers, bodyTemplate } = tool;
+    const resolvedUrl = this.resolveEndpointUrl(connector.baseUrl, apiEndpoint);
+    const pathParamKeys = this.extractPathParamKeys(resolvedUrl);
 
     const config: AxiosRequestConfig = {
       method: httpMethod.toLowerCase(),
-      url: `${connector.baseUrl}${apiEndpoint}`,
+      url: this.applyPathParams(resolvedUrl, mappedParams),
       headers: this.buildHeaders(headers, connector, resolvedAuthConfig),
       timeout: 30000,
     };
@@ -213,7 +215,7 @@ export class MCPExecutorService {
     if (['post', 'put', 'patch'].includes(config.method!)) {
       config.data = this.buildRequestBody(mappedParams, bodyTemplate);
     } else if (config.method === 'get') {
-      config.params = mappedParams;
+      config.params = this.omitPathParams(mappedParams, pathParamKeys);
     }
 
     return config;
@@ -272,7 +274,7 @@ export class MCPExecutorService {
     }
 
     const authConfig = resolvedAuthConfig as any;
-    const loginUrl = `${connector.baseUrl}${authConfig.loginPath || '/api/auth/login'}`;
+    const loginUrl = this.resolveEndpointUrl(connector.baseUrl, authConfig.loginPath || '/api/auth/login');
 
     this.logger.log(`Cookie auth: logging in to ${loginUrl}`);
 
@@ -336,6 +338,43 @@ export class MCPExecutorService {
     }
 
     return template;
+  }
+
+  /**
+   * 解析端点 URL：完整 URL 直接使用，相对路径则拼接 baseUrl（兼容旧数据）
+   */
+  private resolveEndpointUrl(baseUrl: string, apiEndpoint: string): string {
+    if (apiEndpoint.startsWith('http://') || apiEndpoint.startsWith('https://')) {
+      return apiEndpoint;
+    }
+    const normalizedBase = baseUrl.replace(/\/+$/, '');
+    const normalizedPath = apiEndpoint.startsWith('/') ? apiEndpoint : `/${apiEndpoint}`;
+    return `${normalizedBase}${normalizedPath}`;
+  }
+
+  private extractPathParamKeys(url: string): string[] {
+    return Array.from(url.matchAll(/\{(\w+)\}/g)).map(match => match[1]);
+  }
+
+  private applyPathParams(url: string, params: Record<string, any>) {
+    return url.replace(/\{(\w+)\}/g, (placeholder, key) => {
+      const value = params[key];
+      return value === undefined || value === null
+        ? placeholder
+        : encodeURIComponent(String(value));
+    });
+  }
+
+  private omitPathParams(params: Record<string, any>, pathParamKeys: string[]) {
+    if (pathParamKeys.length === 0) {
+      return params;
+    }
+
+    const result = { ...params };
+    for (const key of pathParamKeys) {
+      delete result[key];
+    }
+    return result;
   }
 
   /**

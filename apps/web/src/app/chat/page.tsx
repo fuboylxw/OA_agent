@@ -1,39 +1,63 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useEffect, useRef, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import axios from 'axios';
+import ProcessConversationCard, {
+  ActionButton,
+  ProcessCard,
+} from '../components/ProcessConversationCard';
 
 const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
 
 const QUICK_ACTIONS = [
-  { label: '报销差旅费', icon: 'fa-money-bill-wave', color: 'text-blue-600 bg-blue-100', message: '我要报销差旅费' },
-  { label: '请假申请', icon: 'fa-calendar-alt', color: 'text-green-600 bg-green-100', message: '我要请假三天' },
-  { label: '采购申请', icon: 'fa-shopping-cart', color: 'text-purple-600 bg-purple-100', message: '我要采购办公用品' },
-  { label: '查看进度', icon: 'fa-chart-bar', color: 'text-orange-600 bg-orange-100', message: '查看我的申请进度' },
+  { label: '报销差旅费', icon: 'fa-money-bill-wave', color: 'text-sky-700 bg-sky-100', message: '我要报销差旅费' },
+  { label: '请假申请', icon: 'fa-calendar-alt', color: 'text-emerald-700 bg-emerald-100', message: '我要请假三天' },
+  { label: '采购申请', icon: 'fa-shopping-cart', color: 'text-amber-700 bg-amber-100', message: '我要采购办公用品' },
+  { label: '查看进度', icon: 'fa-chart-bar', color: 'text-slate-700 bg-slate-100', message: '查看我的申请进度' },
 ];
 
-interface ActionButton {
-  label: string;
-  action: string;
-  type: 'primary' | 'default' | 'danger';
-}
-
 interface ChatAttachment {
+  attachmentId: string;
   fileId: string;
   fileName: string;
   fileSize: number;
   mimeType: string;
-  filePath: string;
+  fieldKey?: string | null;
+  bindScope?: 'field' | 'general';
+  previewStatus?: string;
+  canPreview?: boolean;
+  previewUrl?: string;
+  downloadUrl?: string;
+}
+
+interface SessionState {
+  hasActiveProcess: boolean;
+  processInstanceId?: string;
+  processCode?: string;
+  processName?: string;
+  processCategory?: string | null;
+  processStatus?: string;
+  stage?: ProcessCard['stage'];
+  reworkHint?: ProcessCard['reworkHint'];
+  reworkReason?: string | null;
+  isTerminal?: boolean;
+  activeProcessCard?: ProcessCard | null;
 }
 
 interface ChatMessage {
-  role: string;
+  id: string;
+  role: 'user' | 'assistant' | 'system';
   content: string;
+  createdAt?: string;
+  messageKind?: 'text' | 'process_card';
   actionButtons?: ActionButton[];
   formData?: Record<string, any>;
   processStatus?: string;
   needsAttachment?: boolean;
   attachments?: ChatAttachment[];
+  missingFields?: Array<{ key: string; label: string; question: string; type?: string }>;
+  processCard?: ProcessCard;
 }
 
 interface ChatSession {
@@ -42,41 +66,187 @@ interface ChatSession {
   lastMessage: string;
   messageCount: number;
   timestamp: string;
+  status: string;
+  hasActiveProcess?: boolean;
+  processName?: string | null;
+  processStatus?: string | null;
+  processStage?: ProcessCard['stage'] | null;
+  reworkHint?: ProcessCard['reworkHint'] | null;
 }
 
-// 获取用户信息
+function readCookieValue(name: string) {
+  if (typeof document === 'undefined') {
+    return '';
+  }
+
+  const target = `${name}=`;
+  const record = document.cookie
+    .split('; ')
+    .find((item) => item.startsWith(target));
+
+  if (!record) {
+    return '';
+  }
+
+  return decodeURIComponent(record.slice(target.length));
+}
+
 function getUserInfo() {
-  if (typeof window === 'undefined') return { userId: 'test-user-001', tenantId: '8ac5d38e-08ea-4fcd-b976-2ccb3df9a82c' };
+  if (typeof window === 'undefined') {
+    return {
+      userId: '',
+      tenantId: '',
+    };
+  }
+
   return {
-    userId: localStorage.getItem('userId') || 'test-user-001',
-    tenantId: localStorage.getItem('tenantId') || '8ac5d38e-08ea-4fcd-b976-2ccb3df9a82c',
+    userId: localStorage.getItem('userId') || readCookieValue('userId'),
+    tenantId: localStorage.getItem('tenantId') || readCookieValue('tenantId'),
   };
 }
 
+function formatRelativeTime(date: string) {
+  const now = new Date();
+  const target = new Date(date);
+  const diff = now.getTime() - target.getTime();
+  const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+
+  if (days <= 0) return '今天';
+  if (days === 1) return '昨天';
+  if (days < 7) return `${days}天前`;
+  return target.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
+}
+
+function getSessionBadge(session: ChatSession) {
+  if (session.processStage === 'rework') {
+    switch (session.reworkHint) {
+      case 'supplement':
+        return { label: '待补件', className: 'bg-amber-100 text-amber-800' };
+      case 'modify':
+        return { label: '打回修改', className: 'bg-amber-100 text-amber-800' };
+      default:
+        return { label: '驳回待处理', className: 'bg-amber-100 text-amber-800' };
+    }
+  }
+
+  if (session.hasActiveProcess) {
+    if (session.processStage === 'confirming') {
+      return { label: '待确认', className: 'bg-amber-100 text-amber-800' };
+    }
+    if (session.processStage === 'collecting') {
+      return { label: '待补充', className: 'bg-sky-100 text-sky-700' };
+    }
+    return {
+      label: '继续办理',
+      className: 'bg-sky-100 text-sky-700',
+    };
+  }
+
+  switch (session.processStage) {
+    case 'submitted':
+      return { label: '审批中', className: 'bg-indigo-100 text-indigo-700' };
+    case 'completed':
+      return { label: '已完成', className: 'bg-emerald-100 text-emerald-700' };
+    case 'failed':
+      return { label: '失败', className: 'bg-rose-100 text-rose-700' };
+    case 'cancelled':
+      return { label: '已取消', className: 'bg-slate-100 text-slate-600' };
+    case 'executing':
+      return { label: '处理中', className: 'bg-indigo-100 text-indigo-700' };
+    default:
+      return null;
+  }
+}
+
+function getActionMarker(action: string) {
+  const actionMap: Record<string, string> = {
+    confirm: '__ACTION_CONFIRM__',
+    cancel: '__ACTION_CANCEL__',
+    modify: '__ACTION_MODIFY__',
+  };
+  return actionMap[action] || action;
+}
+
 export default function ChatPage() {
+  const router = useRouter();
+  const searchParams = useSearchParams();
+  const flowCode = searchParams.get('flow');
+
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
   const [sessionId, setSessionId] = useState<string | null>(null);
+  const [sessionState, setSessionState] = useState<SessionState | null>(null);
   const [loading, setLoading] = useState(false);
   const [sessions, setSessions] = useState<ChatSession[]>([]);
   const [showHistory, setShowHistory] = useState(true);
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<ChatAttachment[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [uploadError, setUploadError] = useState('');
+  const [uploadTargetFieldKey, setUploadTargetFieldKey] = useState<string | null>(null);
+  const [authReady, setAuthReady] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const flowBootstrappedRef = useRef<string | null>(null);
 
   useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages]);
+  }, [messages, loading]);
 
   useEffect(() => {
-    loadSessions();
-  }, []);
+    const { userId, tenantId } = getUserInfo();
+    if (!userId || !tenantId) {
+      router.replace('/login');
+      return;
+    }
+
+    setAuthReady(true);
+  }, [router]);
+
+  useEffect(() => {
+    if (!authReady) {
+      return;
+    }
+
+    void loadSessions();
+  }, [authReady]);
+
+  useEffect(() => {
+    if (!authReady) {
+      return;
+    }
+    if (!flowCode) {
+      return;
+    }
+    if (flowBootstrappedRef.current === flowCode) {
+      return;
+    }
+    if (sessionId || messages.length > 0 || loading) {
+      return;
+    }
+
+    flowBootstrappedRef.current = flowCode;
+    void bootstrapFlow(flowCode);
+  }, [authReady, flowCode, loading, messages.length, sessionId]);
+
+  const ensureUserInfo = () => {
+    const auth = getUserInfo();
+    if (auth.userId && auth.tenantId) {
+      return auth;
+    }
+
+    router.replace('/login');
+    return null;
+  };
 
   const loadSessions = async () => {
     try {
-      const { userId, tenantId } = getUserInfo();
+      const auth = ensureUserInfo();
+      if (!auth) {
+        return;
+      }
+
+      const { userId, tenantId } = auth;
       const response = await axios.get(`${API_URL}/api/v1/assistant/sessions`, {
         params: { tenantId, userId },
       });
@@ -89,20 +259,13 @@ export default function ChatPage() {
   const loadSession = async (id: string) => {
     try {
       const response = await axios.get(`${API_URL}/api/v1/assistant/sessions/${id}/messages`);
-      const rawMessages = response.data || [];
-      // 将后端消息格式转为前端格式，过滤掉按钮动作消息
-      const formatted: ChatMessage[] = rawMessages
-        .filter((m: any) => !m.content.startsWith('__ACTION_'))
-        .map((m: any) => ({
-          role: m.role,
-          content: m.content,
-          actionButtons: m.metadata?.actionButtons,
-          formData: m.metadata?.formData,
-          processStatus: m.metadata?.processStatus,
-        }));
-      setMessages(formatted);
+      const data = response.data || {};
+      setMessages(Array.isArray(data.messages) ? data.messages : []);
       setSessionId(id);
+      setSessionState(data.session?.sessionState || null);
       setSidebarOpen(false);
+      setShowHistory(true);
+      setUploadError('');
     } catch (error) {
       console.error('Failed to load session:', error);
     }
@@ -110,203 +273,330 @@ export default function ChatPage() {
 
   const createNewChat = () => {
     setMessages([]);
+    setInput('');
     setSessionId(null);
+    setSessionState(null);
+    setPendingFiles([]);
+    setUploadError('');
+    setUploadTargetFieldKey(null);
     setShowHistory(false);
+    if (flowCode) {
+      flowBootstrappedRef.current = flowCode;
+    }
   };
 
-  const sendMessage = async (text?: string) => {
-    const msg = text || input.trim();
-    if (!msg && pendingFiles.length === 0) return;
+  const bootstrapFlow = async (code: string) => {
+    try {
+      const auth = ensureUserInfo();
+      if (!auth) {
+        return;
+      }
 
+      const { tenantId } = auth;
+      const response = await axios.get(`${API_URL}/api/v1/process-library/${encodeURIComponent(code)}`, {
+        params: { tenantId },
+      });
+      const processName = response.data?.processName || code;
+      setShowHistory(false);
+      await sendMessage(`我要办理${processName}`);
+    } catch {
+      setInput(`我要办理${code}`);
+      setShowHistory(false);
+    }
+  };
+
+  const sendMessage = async (
+    text?: string,
+    options?: { displayText?: string },
+  ) => {
+    const messageText = text || input.trim();
+    if (!messageText && pendingFiles.length === 0) {
+      return;
+    }
+
+    const createdAt = new Date().toISOString();
     const userMessage: ChatMessage = {
+      id: `user-${Date.now()}`,
       role: 'user',
-      content: msg || (pendingFiles.length > 0 ? `[已上传 ${pendingFiles.length} 个文件]` : ''),
+      content: options?.displayText || messageText || `[已上传 ${pendingFiles.length} 个文件]`,
+      createdAt,
       attachments: pendingFiles.length > 0 ? pendingFiles : undefined,
     };
+
     setMessages((prev) => [...prev, userMessage]);
     setInput('');
+    setUploadError('');
     const filesToSend = [...pendingFiles];
     setPendingFiles([]);
     setLoading(true);
 
     try {
-      const { userId, tenantId } = getUserInfo();
+      const auth = ensureUserInfo();
+      if (!auth) {
+        setLoading(false);
+        return;
+      }
+
+      const { userId, tenantId } = auth;
       const response = await axios.post(`${API_URL}/api/v1/assistant/chat`, {
         tenantId,
         userId,
         sessionId,
-        message: msg || '已上传文件',
+        message: messageText || '已上传文件',
         attachments: filesToSend.length > 0 ? filesToSend : undefined,
       });
 
-      const data = response.data;
-      setSessionId(data.sessionId);
+      const data = response.data || {};
+      setSessionId(data.sessionId || null);
+      setSessionState(data.sessionState || null);
 
-      const assistantMsg: ChatMessage = {
+      const assistantMessage: ChatMessage = {
+        id: `assistant-${Date.now()}`,
         role: 'assistant',
         content: data.message,
+        createdAt: new Date().toISOString(),
+        messageKind: data.processCard ? 'process_card' : 'text',
         actionButtons: data.actionButtons,
         formData: data.formData,
         processStatus: data.processStatus,
         needsAttachment: data.needsAttachment,
+        missingFields: data.missingFields,
+        processCard: data.processCard,
       };
-      setMessages((prev) => [...prev, assistantMsg]);
 
-      loadSessions();
-    } catch {
-      setMessages((prev) => [...prev, { role: 'assistant', content: '抱歉，服务暂时不可用，请稍后重试。' }]);
+      setMessages((prev) => [...prev, assistantMessage]);
+      void loadSessions();
+    } catch (error) {
+      console.error('Failed to send message:', error);
+      setMessages((prev) => [
+        ...prev,
+        {
+          id: `assistant-error-${Date.now()}`,
+          role: 'assistant',
+          content: '抱歉，服务暂时不可用，请稍后重试。',
+          createdAt: new Date().toISOString(),
+        },
+      ]);
     } finally {
       setLoading(false);
     }
   };
 
-  const handleFileUpload = async (e: React.ChangeEvent<HTMLInputElement>) => {
-    const files = e.target.files;
-    if (!files || files.length === 0) return;
+  const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
+    const files = event.target.files;
+    if (!files || files.length === 0) {
+      return;
+    }
 
     setUploading(true);
+    setUploadError('');
+
     try {
-      const formData = new FormData();
-      for (let i = 0; i < files.length; i++) {
-        formData.append('files', files[i]);
+      const auth = ensureUserInfo();
+      if (!auth) {
+        setUploading(false);
+        return;
       }
-      const response = await axios.post(`${API_URL}/api/v1/assistant/upload`, formData, {
+
+      const { userId, tenantId } = auth;
+      const formData = new FormData();
+      for (let index = 0; index < files.length; index += 1) {
+        formData.append('files', files[index]);
+      }
+      const query = new URLSearchParams({
+        tenantId,
+        userId,
+      });
+      if (sessionId) {
+        query.set('sessionId', sessionId);
+      }
+      if (uploadTargetFieldKey) {
+        query.set('fieldKey', uploadTargetFieldKey);
+        query.set('bindScope', 'field');
+      } else {
+        query.set('bindScope', 'general');
+      }
+      const response = await axios.post(`${API_URL}/api/v1/attachments/upload?${query.toString()}`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
-      setPendingFiles((prev) => [...prev, ...response.data]);
+      setPendingFiles((prev) => [...prev, ...(response.data || [])]);
     } catch (error: any) {
-      const msg = error.response?.data?.message || '文件上传失败';
-      alert(typeof msg === 'string' ? msg : JSON.stringify(msg));
+      const message = error.response?.data?.message || error.message || '文件上传失败';
+      setUploadError(typeof message === 'string' ? message : JSON.stringify(message));
     } finally {
       setUploading(false);
-      if (fileInputRef.current) fileInputRef.current.value = '';
+      setUploadTargetFieldKey(null);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = '';
+      }
     }
   };
 
   const removePendingFile = (fileId: string) => {
-    setPendingFiles((prev) => prev.filter((f) => f.fileId !== fileId));
+    setPendingFiles((prev) => prev.filter((file) => file.fileId !== fileId));
   };
 
-  // 记录已点击过按钮的消息索引
-  const [clickedActionIdx, setClickedActionIdx] = useState<Record<number, boolean>>({});
-
-  // 处理按钮点击
-  const handleActionButton = (action: string, msgIdx: number) => {
-    const actionMap: Record<string, string> = {
-      confirm: '__ACTION_CONFIRM__',
-      cancel: '__ACTION_CANCEL__',
-      modify: '__ACTION_MODIFY__',
-    };
-    const msg = actionMap[action] || action;
-    setClickedActionIdx((prev) => ({ ...prev, [msgIdx]: true }));
-    sendMessage(msg);
+  const openFilePicker = (fieldKey?: string) => {
+    setUploadTargetFieldKey(fieldKey || null);
+    fileInputRef.current?.click();
   };
 
-  const formatTime = (date: string) => {
-    const now = new Date();
-    const d = new Date(date);
-    const diff = now.getTime() - d.getTime();
-    const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+  const resolveFieldLabel = (fieldKey?: string | null) => {
+    if (!fieldKey) {
+      return '通用材料';
+    }
 
-    if (days === 0) return '今天';
-    if (days === 1) return '昨天';
-    if (days < 7) return `${days}天前`;
-    return d.toLocaleDateString('zh-CN', { month: 'numeric', day: 'numeric' });
+    for (let index = messages.length - 1; index >= 0; index -= 1) {
+      const message = messages[index];
+      const found = message.missingFields?.find((field) => field.key === fieldKey);
+      if (found) {
+        return found.label;
+      }
+    }
+
+    return fieldKey;
   };
 
-  const getButtonStyle = (type: string) => {
-    switch (type) {
-      case 'primary':
-        return 'bg-blue-600 hover:bg-blue-700 text-white';
-      case 'danger':
-        return 'bg-white hover:bg-red-50 text-red-600 border border-red-200';
-      default:
-        return 'bg-white hover:bg-gray-50 text-gray-700 border border-gray-200';
+  const handleActionButton = (messageId: string, action: string) => {
+    const sourceMessage = messages.find((message) => message.id === messageId);
+    const actionLabel = sourceMessage?.actionButtons?.find((button) => button.action === action)?.label || action;
+    setMessages((prev) =>
+      prev.map((message) => {
+        if (message.id !== messageId) {
+          return message;
+        }
+
+        return {
+          ...message,
+          actionButtons: undefined,
+          processCard: message.processCard
+            ? {
+              ...message.processCard,
+              actionState: 'readonly',
+            }
+            : undefined,
+        };
+      }),
+    );
+
+    void sendMessage(getActionMarker(action), { displayText: actionLabel });
+  };
+
+  const handleResetSession = async () => {
+    if (!sessionId) {
+      return;
+    }
+
+    try {
+      await axios.post(`${API_URL}/api/v1/assistant/sessions/${sessionId}/reset`);
+      await loadSession(sessionId);
+    } catch (error) {
+      console.error('Failed to reset session:', error);
     }
   };
 
-  // 侧边栏内容（复用于桌面和移动端）
   const SidebarContent = ({ onAction }: { onAction?: () => void }) => (
     <>
-      <div className="p-4 flex-shrink-0">
+      <div className="p-4">
         <button
-          onClick={() => { createNewChat(); onAction?.(); }}
-          className="w-full bg-blue-600 hover:bg-blue-700 text-white text-sm py-2.5 rounded-lg flex items-center justify-center gap-2 transition-colors"
+          onClick={() => {
+            createNewChat();
+            onAction?.();
+          }}
+          className="w-full rounded-2xl bg-sky-600 py-3 text-sm font-medium text-white transition-colors hover:bg-sky-700"
         >
-          <i className="fas fa-plus"></i>
+          <i className="fas fa-plus mr-2 text-xs"></i>
           新建对话
         </button>
       </div>
 
-      <div className="flex border-b border-gray-200 px-4">
+      <div className="border-b border-slate-200 px-4">
         <button
           onClick={() => setShowHistory(true)}
-          className={`flex-1 py-2 text-sm font-medium border-b-2 transition-colors ${
-            showHistory ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'
+          className={`mr-6 border-b-2 py-3 text-sm font-medium transition-colors ${
+            showHistory ? 'border-sky-600 text-sky-700' : 'border-transparent text-slate-500 hover:text-slate-700'
           }`}
         >
           历史对话
         </button>
         <button
           onClick={() => setShowHistory(false)}
-          className={`flex-1 py-2 text-sm font-medium border-b-2 transition-colors ${
-            !showHistory ? 'border-blue-600 text-blue-600' : 'border-transparent text-gray-500 hover:text-gray-700'
+          className={`border-b-2 py-3 text-sm font-medium transition-colors ${
+            !showHistory ? 'border-sky-600 text-sky-700' : 'border-transparent text-slate-500 hover:text-slate-700'
           }`}
         >
-          快捷操作
+          快捷入口
         </button>
       </div>
 
       <div className="flex-1 overflow-y-auto">
         {showHistory ? (
-          <div className="p-2">
+          <div className="space-y-2 p-3">
             {sessions.length === 0 ? (
-              <div className="text-center py-8 px-4">
-                <i className="fas fa-history text-gray-300 text-2xl mb-2"></i>
-                <p className="text-sm text-gray-500">暂无历史对话</p>
+              <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">
+                暂无历史对话
               </div>
             ) : (
-              <div className="space-y-1">
-                {sessions.map((session) => (
+              sessions.map((session) => {
+                const badge = getSessionBadge(session);
+                return (
                   <button
                     key={session.id}
-                    onClick={() => { loadSession(session.id); onAction?.(); }}
-                    className={`w-full text-left px-3 py-2.5 rounded-lg hover:bg-gray-50 transition-all group ${
-                      sessionId === session.id ? 'bg-blue-50' : ''
+                    onClick={() => {
+                      void loadSession(session.id);
+                      onAction?.();
+                    }}
+                    className={`w-full rounded-2xl border px-4 py-3 text-left transition-all ${
+                      sessionId === session.id
+                        ? 'border-sky-200 bg-sky-50 shadow-sm'
+                        : 'border-transparent bg-white hover:border-slate-200 hover:bg-slate-50'
                     }`}
                   >
-                    <div className="flex items-start gap-2">
-                      <i className="fas fa-comment-dots text-gray-400 text-xs mt-1 flex-shrink-0"></i>
-                      <div className="flex-1 min-w-0">
-                        <p className="text-sm font-medium text-gray-900 truncate">
+                    <div className="flex items-start justify-between gap-3">
+                      <div className="min-w-0">
+                        <div className="truncate text-sm font-semibold text-slate-900">
                           {session.title || '新对话'}
-                        </p>
-                        <p className="text-xs text-gray-500 truncate mt-0.5">
-                          {session.messageCount}条消息
-                        </p>
-                        <p className="text-xs text-gray-400 mt-1">
-                          {formatTime(session.timestamp)}
-                        </p>
+                        </div>
+                        <div className="mt-1 truncate text-xs text-slate-500">
+                          {session.processName || session.lastMessage || '暂无摘要'}
+                        </div>
                       </div>
+                      {badge ? (
+                        <span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${badge.className}`}>
+                          {badge.label}
+                        </span>
+                      ) : null}
+                    </div>
+                    <div className="mt-2 flex items-center justify-between text-xs text-slate-400">
+                      <span>{session.messageCount} 条消息</span>
+                      <span>{formatRelativeTime(session.timestamp)}</span>
                     </div>
                   </button>
-                ))}
-              </div>
+                );
+              })
             )}
           </div>
         ) : (
           <div className="p-4">
-            <div className="space-y-1.5">
+            <div className="mb-4 text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">
+              快捷办理
+            </div>
+            <div className="space-y-2">
               {QUICK_ACTIONS.map((action) => (
                 <button
                   key={action.label}
-                  onClick={() => { sendMessage(action.message); onAction?.(); }}
-                  className="w-full text-left px-3 py-2 rounded-lg text-sm text-gray-600 hover:text-gray-900 hover:bg-gray-50 transition-all flex items-center gap-2.5"
+                  onClick={() => {
+                    void sendMessage(action.message);
+                    onAction?.();
+                  }}
+                  className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left transition-colors hover:border-sky-200 hover:bg-sky-50"
                 >
-                  <div className={`w-6 h-6 rounded-md flex items-center justify-center ${action.color}`}>
-                    <i className={`fas ${action.icon} text-xs`}></i>
+                  <div className="flex items-center gap-3">
+                    <div className={`flex h-9 w-9 items-center justify-center rounded-2xl ${action.color}`}>
+                      <i className={`fas ${action.icon} text-sm`}></i>
+                    </div>
+                    <div className="text-sm font-medium text-slate-900">{action.label}</div>
                   </div>
-                  {action.label}
                 </button>
               ))}
             </div>
@@ -314,10 +604,13 @@ export default function ChatPage() {
         )}
       </div>
 
-      <div className="p-4 border-t border-gray-200 flex-shrink-0">
-        <div className="flex flex-wrap gap-1.5">
-          {['发起申请', '查进度', '撤回', '催办'].map((intent) => (
-            <span key={intent} className="inline-block px-2 py-0.5 bg-blue-50 text-blue-600 text-xs rounded-full">
+      <div className="border-t border-slate-200 px-4 py-4">
+        <div className="flex flex-wrap gap-2 text-xs">
+          {['发起申请', '继续办理', '查进度', '撤回', '催办'].map((intent) => (
+            <span
+              key={intent}
+              className="rounded-full bg-sky-50 px-2.5 py-1 font-medium text-sky-700"
+            >
               {intent}
             </span>
           ))}
@@ -326,250 +619,329 @@ export default function ChatPage() {
     </>
   );
 
+  if (!authReady) {
+    return (
+      <div className="flex h-full items-center justify-center bg-[linear-gradient(180deg,#f7fbff_0%,#f5f7fb_100%)] px-6 text-sm text-slate-500">
+        正在验证登录状态...
+      </div>
+    );
+  }
+
   return (
-    <div className="h-full flex">
-      {/* Mobile Drawer Overlay */}
-      {sidebarOpen && (
+    <div className="flex h-full bg-[linear-gradient(180deg,#f7fbff_0%,#f5f7fb_100%)]">
+      {sidebarOpen ? (
         <div
-          className="fixed inset-0 bg-black/40 z-40 lg:hidden transition-opacity"
+          className="fixed inset-0 z-40 bg-slate-950/35 lg:hidden"
           onClick={() => setSidebarOpen(false)}
         />
-      )}
+      ) : null}
 
-      {/* Mobile Drawer Panel */}
-      <div
-        className={`fixed inset-y-0 left-0 w-72 bg-white z-50 lg:hidden flex flex-col transition-transform duration-300 ${
+      <aside
+        className={`fixed inset-y-0 left-0 z-50 flex w-80 flex-col border-r border-slate-200 bg-white transition-transform duration-300 lg:static lg:translate-x-0 ${
           sidebarOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
       >
-        <div className="p-4 flex items-center justify-between border-b border-gray-200">
-          <h2 className="text-base font-semibold text-gray-900">菜单</h2>
+        <div className="flex items-center justify-between border-b border-slate-200 px-4 py-4 lg:hidden">
+          <div className="text-base font-semibold text-slate-900">工作台菜单</div>
           <button
             onClick={() => setSidebarOpen(false)}
-            className="w-8 h-8 rounded-lg hover:bg-gray-100 flex items-center justify-center transition-colors"
+            className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-500 transition-colors hover:bg-slate-100"
           >
-            <i className="fas fa-times text-gray-500"></i>
+            <i className="fas fa-times"></i>
           </button>
         </div>
         <SidebarContent onAction={() => setSidebarOpen(false)} />
-      </div>
+      </aside>
 
-      {/* Desktop Sidebar */}
-      <div className="w-64 bg-white border-r border-gray-200 flex-shrink-0 hidden lg:flex flex-col">
-        <SidebarContent />
-      </div>
-
-      {/* Main Chat Area */}
-      <div className="flex-1 flex flex-col min-w-0">
-        {/* Chat Header */}
-        <div className="border-b border-gray-200 px-4 py-3 flex-shrink-0 bg-white">
-          <div className="flex items-center justify-between">
-            <div className="flex items-center gap-3">
-              <button
-                onClick={() => setSidebarOpen(true)}
-                className="w-9 h-9 rounded-lg hover:bg-gray-100 flex items-center justify-center transition-colors lg:hidden"
-              >
-                <i className="fas fa-bars text-gray-600 text-sm"></i>
-              </button>
-              <div className="w-9 h-9 rounded-lg bg-blue-600 flex items-center justify-center">
-                <i className="fas fa-robot text-white text-sm"></i>
-              </div>
-              <div>
-                <h1 className="text-base font-semibold text-gray-900">智能助手</h1>
-                <p className="text-xs text-gray-500">告诉我您想办理什么，我来帮您完成</p>
-              </div>
-            </div>
-            {sessionId && (
-              <button
-                onClick={createNewChat}
-                className="text-sm text-gray-500 hover:text-gray-700 flex items-center gap-1.5"
-              >
-                <i className="fas fa-plus text-xs"></i>
-                新对话
-              </button>
-            )}
+      <main className="flex min-w-0 flex-1 flex-col">
+        <div className="px-4 pt-4 lg:hidden">
+          <div className="mx-auto flex max-w-5xl">
+            <button
+              onClick={() => setSidebarOpen(true)}
+              className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-600 shadow-sm transition-colors hover:border-sky-200 hover:bg-sky-50 hover:text-sky-700"
+            >
+              <i className="fas fa-bars text-xs"></i>
+              菜单
+            </button>
           </div>
         </div>
 
-        {/* Messages Area */}
-        <div className="flex-1 overflow-y-auto bg-gray-50">
-          <div className="max-w-3xl mx-auto px-4 py-4 space-y-3 min-h-full flex flex-col">
-            {messages.length === 0 && (
-              <div className="flex-1 flex flex-col items-center justify-center text-center">
-                <div className="w-14 h-14 rounded-2xl bg-blue-100 flex items-center justify-center mb-3">
-                  <i className="fas fa-comments text-blue-600 text-xl"></i>
+        {sessionState?.hasActiveProcess && sessionState.activeProcessCard ? (
+          <div className="border-b border-sky-200 bg-sky-50/90 px-4 py-3">
+            <div className="mx-auto flex max-w-5xl items-center justify-between gap-3">
+              <div className="min-w-0">
+                <div className="text-sm font-semibold text-sky-900">
+                  正在继续办理：{sessionState.processName}
                 </div>
-                <h2 className="text-lg font-bold text-gray-900 mb-1.5">您好，有什么可以帮您？</h2>
-                <p className="text-gray-500 text-sm mb-5">
-                  您可以用自然语言告诉我您想办理的事务，比如&ldquo;我要报销差旅费1000元&rdquo;
+                <div className="mt-1 text-xs text-sky-700">
+                  当前状态：{sessionState.activeProcessCard.statusText}
+                  {sessionState.processCategory ? ` · ${sessionState.processCategory}` : ''}
+                </div>
+                {sessionState.activeProcessCard.reworkReason ? (
+                  <div className="mt-1 text-xs text-sky-700/90">
+                    驳回原因：{sessionState.activeProcessCard.reworkReason}
+                  </div>
+                ) : null}
+              </div>
+              <div className="flex items-center gap-2">
+                <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-sky-700 shadow-sm">
+                  继续办理
+                </span>
+                <button
+                  onClick={() => void handleResetSession()}
+                  className="rounded-full border border-sky-200 bg-white px-3 py-1 text-xs font-medium text-sky-700 transition-colors hover:bg-sky-100"
+                >
+                  重置上下文
+                </button>
+              </div>
+            </div>
+          </div>
+        ) : null}
+
+        <div className="flex-1 overflow-y-auto">
+          <div className="mx-auto flex min-h-full max-w-5xl flex-col px-4 py-6">
+            {messages.length === 0 ? (
+              <div className="flex flex-1 flex-col items-center justify-center text-center">
+                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-[1.75rem] bg-sky-100 text-sky-700">
+                  <i className="fas fa-file-signature text-2xl"></i>
+                </div>
+                <h2 className="text-2xl font-semibold text-slate-900">开始一段新的 OA 办理对话</h2>
+                <p className="mt-3 max-w-xl text-sm leading-7 text-slate-500">
+                  直接告诉我您想办理什么，我会按正式单据的方式为您补全信息、确认表单并提交。
                 </p>
-                <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5 w-full max-w-md">
+
+                <div className="mt-8 grid w-full max-w-2xl grid-cols-1 gap-3 sm:grid-cols-2">
                   {QUICK_ACTIONS.map((action) => (
                     <button
                       key={action.label}
-                      onClick={() => sendMessage(action.message)}
-                      className="bg-white rounded-lg border border-gray-200 hover:border-blue-300 hover:shadow-sm transition-all text-left p-3"
+                      onClick={() => void sendMessage(action.message)}
+                      className="rounded-3xl border border-slate-200 bg-white px-5 py-5 text-left shadow-sm transition-all hover:-translate-y-0.5 hover:border-sky-200 hover:shadow-md"
                     >
-                      <div className={`w-8 h-8 rounded-lg flex items-center justify-center mb-1.5 ${action.color}`}>
-                        <i className={`fas ${action.icon} text-sm`}></i>
+                      <div className={`mb-3 flex h-11 w-11 items-center justify-center rounded-2xl ${action.color}`}>
+                        <i className={`fas ${action.icon} text-base`}></i>
                       </div>
-                      <span className="text-sm font-medium text-gray-900">{action.label}</span>
+                      <div className="text-base font-semibold text-slate-900">{action.label}</div>
+                      <div className="mt-1 text-sm text-slate-500">{action.message}</div>
                     </button>
                   ))}
                 </div>
               </div>
-            )}
+            ) : (
+              <div className="space-y-5">
+                {messages.map((message) => (
+                  <div key={message.id}>
+                    <div className={`flex ${message.role === 'user' ? 'justify-end' : 'justify-start'}`}>
+                      {message.role === 'assistant' ? (
+                        <div className="mr-3 mt-1 flex h-9 w-9 items-center justify-center rounded-2xl bg-sky-600 text-white shadow-sm">
+                          <i className="fas fa-robot text-xs"></i>
+                        </div>
+                      ) : null}
 
-            {messages.map((msg, idx) => (
-              <div key={idx}>
-                <div className={`flex ${msg.role === 'user' ? 'justify-end' : 'justify-start'}`}>
-                  {msg.role === 'assistant' && (
-                    <div className="w-7 h-7 rounded-lg bg-blue-600 flex items-center justify-center mr-2.5 flex-shrink-0 mt-0.5">
-                      <i className="fas fa-robot text-white text-xs"></i>
-                    </div>
-                  )}
-                  <div
-                    className={`max-w-[75%] rounded-2xl px-3.5 py-2.5 ${
-                      msg.role === 'user'
-                        ? 'bg-blue-600 text-white'
-                        : 'bg-white border border-gray-200 shadow-sm'
-                    }`}
-                  >
-                    <p className="whitespace-pre-wrap text-sm leading-relaxed">{msg.content}</p>
-                    {/* 用户消息中的附件 */}
-                    {msg.role === 'user' && msg.attachments && msg.attachments.length > 0 && (
-                      <div className="flex flex-wrap gap-1.5 mt-2 pt-2 border-t border-blue-500/30">
-                        {msg.attachments.map((att) => (
-                          <span key={att.fileId} className="inline-flex items-center gap-1 px-2 py-0.5 bg-blue-500/30 rounded text-xs">
-                            <i className="fas fa-paperclip text-[10px]"></i>
-                            <span className="max-w-[100px] truncate">{att.fileName}</span>
-                          </span>
-                        ))}
+                      <div className={`${message.role === 'user' ? 'max-w-[78%]' : 'max-w-[88%]'} min-w-0`}>
+                        <div
+                          className={`rounded-3xl px-4 py-3 text-sm leading-7 shadow-sm ${
+                            message.role === 'user'
+                              ? 'bg-sky-600 text-white'
+                              : 'border border-slate-200 bg-white text-slate-800'
+                          }`}
+                        >
+                          <p className="whitespace-pre-wrap break-words">{message.content}</p>
+
+                          {message.attachments && message.attachments.length > 0 ? (
+                            <div className={`mt-3 flex flex-wrap gap-2 border-t pt-3 ${
+                              message.role === 'user' ? 'border-white/20' : 'border-slate-200'
+                            }`}>
+                              {message.attachments.map((attachment) => (
+                                <div
+                                  key={attachment.fileId}
+                                  className={`inline-flex flex-wrap items-center gap-2 rounded-2xl px-3 py-2 text-xs ${
+                                    message.role === 'user'
+                                      ? 'bg-white/20 text-white'
+                                      : 'border border-slate-200 bg-slate-50 text-slate-700'
+                                  }`}
+                                >
+                                  <i className="fas fa-paperclip text-[10px]"></i>
+                                  <span className="max-w-[180px] truncate">{attachment.fileName}</span>
+                                  {attachment.previewUrl ? (
+                                    <a
+                                      href={attachment.previewUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className={`rounded-full px-2 py-1 ${
+                                        message.role === 'user'
+                                          ? 'bg-white/20 text-white'
+                                          : 'bg-white text-slate-700 hover:bg-sky-100 hover:text-sky-700'
+                                      }`}
+                                    >
+                                      预览
+                                    </a>
+                                  ) : null}
+                                  {attachment.downloadUrl ? (
+                                    <a
+                                      href={attachment.downloadUrl}
+                                      target="_blank"
+                                      rel="noreferrer"
+                                      className={`rounded-full px-2 py-1 ${
+                                        message.role === 'user'
+                                          ? 'bg-white/20 text-white'
+                                          : 'bg-white text-slate-700 hover:bg-slate-200'
+                                      }`}
+                                    >
+                                      下载
+                                    </a>
+                                  ) : null}
+                                </div>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+
+                        {message.role === 'assistant' && message.processCard ? (
+                          <div className="mt-3">
+                            <ProcessConversationCard
+                              card={message.processCard}
+                              actionButtons={message.actionButtons}
+                              onAction={(action) => handleActionButton(message.id, action)}
+                              disabled={loading}
+                            />
+                          </div>
+                        ) : null}
+
+                        {message.role === 'assistant' && message.needsAttachment && !message.processCard ? (
+                          <div className="mt-3">
+                            {message.missingFields?.filter((field) => field.type === 'file').length ? (
+                              <div className="flex flex-wrap gap-2">
+                                {message.missingFields
+                                  ?.filter((field) => field.type === 'file')
+                                  .map((field) => (
+                                    <button
+                                      key={field.key}
+                                      onClick={() => openFilePicker(field.key)}
+                                      disabled={loading || uploading}
+                                      className="rounded-2xl border border-sky-200 bg-sky-50 px-4 py-2.5 text-sm font-medium text-sky-700 transition-colors hover:bg-sky-100 disabled:opacity-50"
+                                    >
+                                      <i className={`fas ${uploading ? 'fa-spinner fa-spin' : 'fa-cloud-upload-alt'} mr-2`}></i>
+                                      上传{field.label}
+                                    </button>
+                                  ))}
+                              </div>
+                            ) : (
+                              <button
+                                onClick={() => openFilePicker()}
+                                disabled={loading || uploading}
+                                className="rounded-2xl border border-sky-200 bg-sky-50 px-4 py-2.5 text-sm font-medium text-sky-700 transition-colors hover:bg-sky-100 disabled:opacity-50"
+                              >
+                                <i className={`fas ${uploading ? 'fa-spinner fa-spin' : 'fa-cloud-upload-alt'} mr-2`}></i>
+                                上传附件
+                              </button>
+                            )}
+                          </div>
+                        ) : null}
                       </div>
-                    )}
-                  </div>
-                </div>
-
-                {/* 智能体提示上传文件 */}
-                {msg.role === 'assistant' && msg.needsAttachment && (
-                  <div className="flex justify-start ml-9 mt-2">
-                    <button
-                      onClick={() => fileInputRef.current?.click()}
-                      disabled={loading || uploading}
-                      className="px-4 py-2 rounded-lg text-sm font-medium text-blue-600 bg-blue-50 border border-blue-200 hover:bg-blue-100 transition-colors disabled:opacity-50 inline-flex items-center gap-2"
-                    >
-                      <i className={`fas ${uploading ? 'fa-spinner fa-spin' : 'fa-cloud-upload-alt'}`}></i>
-                      点击上传文件
-                    </button>
-                  </div>
-                )}
-
-                {/* 渲染操作按钮：只有最后一条带按钮的消息且未点击过才可操作 */}
-                {msg.role === 'assistant' && msg.actionButtons && msg.actionButtons.length > 0 ? (
-                  <div className="flex justify-start ml-9 mt-2">
-                    <div className="flex gap-2">
-                      {clickedActionIdx[idx] || idx !== messages.reduce((last, m, i) =>
-                        m.role === 'assistant' && m.actionButtons && m.actionButtons.length > 0 ? i : last, -1) ? (
-                        <span className="px-4 py-2 rounded-lg text-sm text-gray-400 bg-gray-100 border border-gray-200">
-                          <i className="fas fa-check mr-1.5 text-xs"></i>已操作
-                        </span>
-                      ) : (
-                        msg.actionButtons.map((btn) => (
-                          <button
-                            key={btn.action}
-                            onClick={() => handleActionButton(btn.action, idx)}
-                            disabled={loading}
-                            className={`px-4 py-2 rounded-lg text-sm font-medium transition-colors disabled:opacity-50 ${getButtonStyle(btn.type)}`}
-                          >
-                            {btn.label}
-                          </button>
-                        ))
-                      )}
                     </div>
                   </div>
-                ) : null}
-              </div>
-            ))}
-
-            {loading && (
-              <div className="flex justify-start">
-                <div className="w-7 h-7 rounded-lg bg-blue-600 flex items-center justify-center mr-2.5 flex-shrink-0">
-                  <i className="fas fa-robot text-white text-xs"></i>
-                </div>
-                <div className="bg-white border border-gray-200 shadow-sm rounded-2xl px-3.5 py-2.5">
-                  <div className="flex items-center gap-2">
-                    <div className="flex gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse"></span>
-                      <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" style={{ animationDelay: '0.2s' }}></span>
-                      <span className="w-1.5 h-1.5 rounded-full bg-blue-400 animate-pulse" style={{ animationDelay: '0.4s' }}></span>
-                    </div>
-                    <span className="text-sm text-gray-500">正在思考...</span>
-                  </div>
-                </div>
+                ))}
               </div>
             )}
+
+            {loading ? (
+              <div className="mt-5 flex items-center gap-3">
+                <div className="flex h-9 w-9 items-center justify-center rounded-2xl bg-sky-600 text-white">
+                  <i className="fas fa-robot text-xs"></i>
+                </div>
+                <div className="rounded-3xl border border-slate-200 bg-white px-4 py-3 text-sm text-slate-500 shadow-sm">
+                  <span className="mr-2 inline-flex gap-1 align-middle">
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-sky-400"></span>
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-sky-400" style={{ animationDelay: '0.15s' }}></span>
+                    <span className="h-2 w-2 animate-pulse rounded-full bg-sky-400" style={{ animationDelay: '0.3s' }}></span>
+                  </span>
+                  正在处理您的单据...
+                </div>
+              </div>
+            ) : null}
             <div ref={messagesEndRef} />
           </div>
         </div>
 
-        {/* Input Area */}
-        <div className="border-t border-gray-200 bg-white flex-shrink-0" style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
-          <div className="max-w-3xl mx-auto px-4 py-3">
-            {/* 待发送的附件预览 */}
-            {pendingFiles.length > 0 && (
-              <div className="flex flex-wrap gap-2 mb-2">
+        <div className="border-t border-slate-200 bg-white/95 px-4 py-4 backdrop-blur" style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
+          <div className="mx-auto max-w-5xl">
+            <input
+              ref={fileInputRef}
+              type="file"
+              className="hidden"
+              multiple
+              accept=".jpg,.jpeg,.png,.gif,.webp,.bmp,.svg,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.md,.csv,.json,.zip,.rar,.7z,.mp3,.wav,.ogg,.mp4,.webm"
+              onChange={handleFileUpload}
+            />
+
+            {uploadError ? (
+              <div className="mb-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+                {uploadError}
+              </div>
+            ) : null}
+
+            {pendingFiles.length > 0 ? (
+              <div className="mb-3 flex flex-wrap gap-2">
                 {pendingFiles.map((file) => (
-                  <div key={file.fileId} className="flex items-center gap-1.5 px-2.5 py-1.5 bg-blue-50 border border-blue-200 rounded-lg text-xs text-blue-700">
-                    <i className="fas fa-paperclip"></i>
-                    <span className="max-w-[120px] truncate">{file.fileName}</span>
+                  <div
+                    key={file.fileId}
+                    className="flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-3 py-1.5 text-xs text-sky-700"
+                  >
+                    <i className="fas fa-paperclip text-[10px]"></i>
+                    <span className="max-w-[180px] truncate">{file.fileName}</span>
+                    <span className="rounded-full bg-white/80 px-2 py-0.5 text-[10px] text-sky-700">
+                      {resolveFieldLabel(file.fieldKey)}
+                    </span>
                     <button
                       onClick={() => removePendingFile(file.fileId)}
-                      className="text-blue-400 hover:text-red-500 ml-0.5"
+                      className="text-sky-400 transition-colors hover:text-rose-500"
                     >
                       <i className="fas fa-times"></i>
                     </button>
                   </div>
                 ))}
               </div>
-            )}
-            <div className="flex gap-2">
-              <input
-                ref={fileInputRef}
-                type="file"
-                className="hidden"
-                multiple
-                accept=".jpg,.jpeg,.png,.gif,.pdf,.doc,.docx,.xls,.xlsx,.ppt,.pptx,.txt,.zip,.rar"
-                onChange={handleFileUpload}
-              />
+            ) : null}
+
+            <div className="flex items-end gap-3">
               <button
-                onClick={() => fileInputRef.current?.click()}
+                onClick={() => openFilePicker()}
                 disabled={loading || uploading}
-                className="px-3 py-3 border border-gray-300 rounded-lg text-gray-500 hover:text-blue-600 hover:border-blue-300 hover:bg-blue-50 transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                className="flex h-12 w-12 items-center justify-center rounded-2xl border border-slate-200 text-slate-500 transition-colors hover:border-sky-200 hover:bg-sky-50 hover:text-sky-700 disabled:opacity-50"
                 title="上传附件"
               >
                 <i className={`fas ${uploading ? 'fa-spinner fa-spin' : 'fa-paperclip'}`}></i>
               </button>
-              <input
-                type="text"
-                className="flex-1 px-3.5 py-3 border border-gray-300 rounded-lg text-sm focus:outline-none focus:ring-2 focus:ring-blue-500 focus:border-transparent bg-white"
-                placeholder="输入您的需求，例如：我要报销差旅费..."
-                value={input}
-                onChange={(e) => setInput(e.target.value)}
-                onKeyDown={(e) => e.key === 'Enter' && !e.shiftKey && sendMessage()}
-                disabled={loading}
-              />
+
+              <div className="flex-1 rounded-[1.75rem] border border-slate-200 bg-slate-50 px-4 py-3 shadow-inner">
+                <textarea
+                  rows={1}
+                  className="max-h-40 min-h-[24px] w-full resize-none border-0 bg-transparent text-sm leading-6 text-slate-900 outline-none placeholder:text-slate-400"
+                  placeholder="请输入您的办理需求，或继续补充当前单据信息..."
+                  value={input}
+                  onChange={(event) => setInput(event.target.value)}
+                  onKeyDown={(event) => {
+                    if (event.key === 'Enter' && !event.shiftKey) {
+                      event.preventDefault();
+                      void sendMessage();
+                    }
+                  }}
+                  disabled={loading}
+                />
+              </div>
+
               <button
-                onClick={() => sendMessage()}
+                onClick={() => void sendMessage()}
                 disabled={loading || (!input.trim() && pendingFiles.length === 0)}
-                className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-3 rounded-lg flex items-center gap-2 text-sm font-medium disabled:opacity-50 disabled:cursor-not-allowed transition-colors"
+                className="rounded-2xl bg-sky-600 px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                <i className="fas fa-paper-plane text-xs"></i>
+                <i className="fas fa-paper-plane mr-2 text-xs"></i>
                 发送
               </button>
             </div>
           </div>
         </div>
-      </div>
+      </main>
     </div>
   );
 }

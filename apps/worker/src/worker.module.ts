@@ -5,6 +5,8 @@ import { PrismaService } from './services/prisma.service';
 import { BootstrapProcessor } from './processors/bootstrap.processor';
 import { SyncProcessor } from './processors/sync.processor';
 import { WebhookProcessor } from './processors/webhook.processor';
+import { BootstrapWatchdogService } from './services/bootstrap-watchdog.service';
+import { WorkerHeartbeatService } from './services/worker-heartbeat.service';
 
 @Global()
 @Module({
@@ -31,6 +33,8 @@ import { WebhookProcessor } from './processors/webhook.processor';
     BootstrapProcessor,
     SyncProcessor,
     WebhookProcessor,
+    BootstrapWatchdogService,
+    WorkerHeartbeatService,
   ],
   exports: [PrismaService],
 })

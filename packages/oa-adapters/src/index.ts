@@ -185,16 +185,10 @@ export { OAuth2RefreshAdapter, type OAuth2RefreshConfig };
 export { SoapXmlAdapter, type SoapXmlConfig };
 export { MockOAAdapter };
 
-// Backward compatibility aliases
-export { TokenHeaderAdapter as O2OAAdapter };
-export type { TokenHeaderConfig as O2OAConfig };
-export { CookieSessionAdapter as SchoolOAAdapter };
-export type { CookieSessionConfig as SchoolOAConfig };
-
 // Registry & descriptors
 export { AdapterRegistry, hasLifecycle };
-export { TokenHeaderDescriptor, TokenHeaderDescriptor as O2OADescriptor };
-export { CookieSessionDescriptor, CookieSessionDescriptor as SchoolOADescriptor };
+export { TokenHeaderDescriptor };
+export { CookieSessionDescriptor };
 export { OAuth2RefreshDescriptor };
 export { SoapXmlDescriptor };
 export { MockDescriptor };

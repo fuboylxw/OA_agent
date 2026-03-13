@@ -31,7 +31,7 @@ interface SyncDomainScheduleConfig {
   scope?: Record<string, any>;
 }
 
-interface SyncScheduleConfig {
+export interface SyncScheduleConfig {
   enabled?: boolean;
   domains?: Partial<Record<SyncDomain, SyncDomainScheduleConfig>>;
   updatedAt?: string;

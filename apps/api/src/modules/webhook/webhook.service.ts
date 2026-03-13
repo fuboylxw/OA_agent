@@ -9,6 +9,7 @@ import { Queue } from 'bull';
 import { createHash, createHmac, timingSafeEqual } from 'crypto';
 import { Prisma } from '@prisma/client';
 import { PrismaService } from '../common/prisma.service';
+import { ChatSessionProcessService } from '../common/chat-session-process.service';
 import { AuditService } from '../audit/audit.service';
 import { AdapterRuntimeService } from '../adapter-runtime/adapter-runtime.service';
 import { mapExternalStatusToSubmissionStatus } from '../common/submission-status.util';
@@ -17,6 +18,7 @@ import { mapExternalStatusToSubmissionStatus } from '../common/submission-status
 export class WebhookService {
   constructor(
     private readonly prisma: PrismaService,
+    private readonly chatSessionProcessService: ChatSessionProcessService,
     private readonly auditService: AuditService,
     private readonly adapterRuntimeService: AdapterRuntimeService,
     @InjectQueue('webhook') private readonly webhookQueue: Queue,
@@ -29,7 +31,7 @@ export class WebhookService {
     rawBody?: string,
   ) {
     const connector = await this.adapterRuntimeService.getConnectorWithSecrets(connectorId);
-    const resolvedAuthConfig = this.adapterRuntimeService.resolveAuthConfig(connector);
+    const resolvedAuthConfig = await this.adapterRuntimeService.resolveAuthConfig(connector);
     const webhookConfig = this.getWebhookConfig(connector);
 
     this.verifySignatureIfConfigured(headers, payload, rawBody, resolvedAuthConfig, webhookConfig);
@@ -137,7 +139,8 @@ export class WebhookService {
       return this.markInboxFailed(inbox.id, `Submission not found for external id ${externalSubmissionId}`);
     }
 
-    const nextSubmissionStatus = mapExternalStatusToSubmissionStatus(eventStatus, submission.status);
+    const previousStatus = submission.status;
+    const nextSubmissionStatus = mapExternalStatusToSubmissionStatus(eventStatus, previousStatus);
 
     const eventCreated = await this.createSubmissionEvent({
       tenantId: submission.tenantId,
@@ -166,6 +169,16 @@ export class WebhookService {
         status: nextSubmissionStatus,
       },
     });
+
+    if (eventCreated || nextSubmissionStatus !== previousStatus) {
+      await this.chatSessionProcessService.syncSubmissionStatusToSession({
+        submissionId: submission.id,
+        previousSubmissionStatus: previousStatus,
+        externalStatus: eventStatus,
+        payload,
+        createStatusMessage: eventCreated,
+      });
+    }
 
     const updated = await this.prisma.webhookInbox.update({
       where: { id: inbox.id },
