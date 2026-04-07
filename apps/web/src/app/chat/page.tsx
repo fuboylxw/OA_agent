@@ -2,13 +2,13 @@
 
 import { useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
-import axios from 'axios';
 import ProcessConversationCard, {
   ActionButton,
   ProcessCard,
 } from '../components/ProcessConversationCard';
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+import { apiClient } from '../lib/api-client';
+import { getClientSessionToken, hasClientSession } from '../lib/client-auth';
+import { withBrowserApiBase } from '../lib/browser-api-base-url';
 
 const QUICK_ACTIONS = [
   { label: '报销差旅费', icon: 'fa-money-bill-wave', color: 'text-sky-700 bg-sky-100', message: '我要报销差旅费' },
@@ -45,6 +45,14 @@ interface SessionState {
   activeProcessCard?: ProcessCard | null;
 }
 
+interface AuthChallenge {
+  connectorId: string;
+  connectorName?: string;
+  provider: string;
+  startUrl: string;
+  statusUrl: string;
+}
+
 interface ChatMessage {
   id: string;
   role: 'user' | 'assistant' | 'system';
@@ -56,6 +64,7 @@ interface ChatMessage {
   processStatus?: string;
   needsAttachment?: boolean;
   attachments?: ChatAttachment[];
+  authChallenge?: AuthChallenge;
   missingFields?: Array<{ key: string; label: string; question: string; type?: string }>;
   processCard?: ProcessCard;
 }
@@ -72,37 +81,6 @@ interface ChatSession {
   processStatus?: string | null;
   processStage?: ProcessCard['stage'] | null;
   reworkHint?: ProcessCard['reworkHint'] | null;
-}
-
-function readCookieValue(name: string) {
-  if (typeof document === 'undefined') {
-    return '';
-  }
-
-  const target = `${name}=`;
-  const record = document.cookie
-    .split('; ')
-    .find((item) => item.startsWith(target));
-
-  if (!record) {
-    return '';
-  }
-
-  return decodeURIComponent(record.slice(target.length));
-}
-
-function getUserInfo() {
-  if (typeof window === 'undefined') {
-    return {
-      userId: '',
-      tenantId: '',
-    };
-  }
-
-  return {
-    userId: localStorage.getItem('userId') || readCookieValue('userId'),
-    tenantId: localStorage.getItem('tenantId') || readCookieValue('tenantId'),
-  };
 }
 
 function formatRelativeTime(date: string) {
@@ -130,6 +108,9 @@ function getSessionBadge(session: ChatSession) {
   }
 
   if (session.hasActiveProcess) {
+    if (session.processStatus === 'auth_required') {
+      return { label: '待授权', className: 'bg-amber-100 text-amber-800' };
+    }
     if (session.processStage === 'confirming') {
       return { label: '待确认', className: 'bg-amber-100 text-amber-800' };
     }
@@ -184,6 +165,7 @@ export default function ChatPage() {
   const [uploading, setUploading] = useState(false);
   const [uploadError, setUploadError] = useState('');
   const [uploadTargetFieldKey, setUploadTargetFieldKey] = useState<string | null>(null);
+  const [authorizingMessageId, setAuthorizingMessageId] = useState<string | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -194,8 +176,7 @@ export default function ChatPage() {
   }, [messages, loading]);
 
   useEffect(() => {
-    const { userId, tenantId } = getUserInfo();
-    if (!userId || !tenantId) {
+    if (!hasClientSession()) {
       router.replace('/login');
       return;
     }
@@ -229,27 +210,22 @@ export default function ChatPage() {
     void bootstrapFlow(flowCode);
   }, [authReady, flowCode, loading, messages.length, sessionId]);
 
-  const ensureUserInfo = () => {
-    const auth = getUserInfo();
-    if (auth.userId && auth.tenantId) {
-      return auth;
+  const ensureSession = () => {
+    if (hasClientSession()) {
+      return true;
     }
 
     router.replace('/login');
-    return null;
+    return false;
   };
 
   const loadSessions = async () => {
     try {
-      const auth = ensureUserInfo();
-      if (!auth) {
+      if (!ensureSession()) {
         return;
       }
 
-      const { userId, tenantId } = auth;
-      const response = await axios.get(`${API_URL}/api/v1/assistant/sessions`, {
-        params: { tenantId, userId },
-      });
+      const response = await apiClient.get('/assistant/sessions');
       setSessions(response.data || []);
     } catch (error) {
       console.error('Failed to load sessions:', error);
@@ -258,7 +234,7 @@ export default function ChatPage() {
 
   const loadSession = async (id: string) => {
     try {
-      const response = await axios.get(`${API_URL}/api/v1/assistant/sessions/${id}/messages`);
+      const response = await apiClient.get(`/assistant/sessions/${id}/messages`);
       const data = response.data || {};
       setMessages(Array.isArray(data.messages) ? data.messages : []);
       setSessionId(id);
@@ -266,6 +242,7 @@ export default function ChatPage() {
       setSidebarOpen(false);
       setShowHistory(true);
       setUploadError('');
+      setAuthorizingMessageId(null);
     } catch (error) {
       console.error('Failed to load session:', error);
     }
@@ -279,6 +256,7 @@ export default function ChatPage() {
     setPendingFiles([]);
     setUploadError('');
     setUploadTargetFieldKey(null);
+    setAuthorizingMessageId(null);
     setShowHistory(false);
     if (flowCode) {
       flowBootstrappedRef.current = flowCode;
@@ -287,15 +265,10 @@ export default function ChatPage() {
 
   const bootstrapFlow = async (code: string) => {
     try {
-      const auth = ensureUserInfo();
-      if (!auth) {
+      if (!ensureSession()) {
         return;
       }
-
-      const { tenantId } = auth;
-      const response = await axios.get(`${API_URL}/api/v1/process-library/${encodeURIComponent(code)}`, {
-        params: { tenantId },
-      });
+      const response = await apiClient.get(`/process-library/${encodeURIComponent(code)}`);
       const processName = response.data?.processName || code;
       setShowHistory(false);
       await sendMessage(`我要办理${processName}`);
@@ -307,14 +280,15 @@ export default function ChatPage() {
 
   const sendMessage = async (
     text?: string,
-    options?: { displayText?: string },
+    options?: { displayText?: string; silent?: boolean },
   ) => {
     const messageText = text || input.trim();
     if (!messageText && pendingFiles.length === 0) {
       return;
     }
 
-    const createdAt = new Date().toISOString();
+    if (!options?.silent) {
+      const createdAt = new Date().toISOString();
     const userMessage: ChatMessage = {
       id: `user-${Date.now()}`,
       role: 'user',
@@ -323,7 +297,8 @@ export default function ChatPage() {
       attachments: pendingFiles.length > 0 ? pendingFiles : undefined,
     };
 
-    setMessages((prev) => [...prev, userMessage]);
+      setMessages((prev) => [...prev, userMessage]);
+    }
     setInput('');
     setUploadError('');
     const filesToSend = [...pendingFiles];
@@ -331,16 +306,11 @@ export default function ChatPage() {
     setLoading(true);
 
     try {
-      const auth = ensureUserInfo();
-      if (!auth) {
+      if (!ensureSession()) {
         setLoading(false);
         return;
       }
-
-      const { userId, tenantId } = auth;
-      const response = await axios.post(`${API_URL}/api/v1/assistant/chat`, {
-        tenantId,
-        userId,
+      const response = await apiClient.post('/assistant/chat', {
         sessionId,
         message: messageText || '已上传文件',
         attachments: filesToSend.length > 0 ? filesToSend : undefined,
@@ -353,13 +323,14 @@ export default function ChatPage() {
       const assistantMessage: ChatMessage = {
         id: `assistant-${Date.now()}`,
         role: 'assistant',
-        content: data.message,
+        content: typeof data.message === 'string' ? data.message : '',
         createdAt: new Date().toISOString(),
         messageKind: data.processCard ? 'process_card' : 'text',
         actionButtons: data.actionButtons,
         formData: data.formData,
         processStatus: data.processStatus,
         needsAttachment: data.needsAttachment,
+        authChallenge: data.authChallenge,
         missingFields: data.missingFields,
         processCard: data.processCard,
       };
@@ -392,21 +363,15 @@ export default function ChatPage() {
     setUploadError('');
 
     try {
-      const auth = ensureUserInfo();
-      if (!auth) {
+      if (!ensureSession()) {
         setUploading(false);
         return;
       }
-
-      const { userId, tenantId } = auth;
       const formData = new FormData();
       for (let index = 0; index < files.length; index += 1) {
         formData.append('files', files[index]);
       }
-      const query = new URLSearchParams({
-        tenantId,
-        userId,
-      });
+      const query = new URLSearchParams();
       if (sessionId) {
         query.set('sessionId', sessionId);
       }
@@ -416,10 +381,10 @@ export default function ChatPage() {
       } else {
         query.set('bindScope', 'general');
       }
-      const response = await axios.post(`${API_URL}/api/v1/attachments/upload?${query.toString()}`, formData, {
+      const response = await apiClient.post(`/attachments/upload?${query.toString()}`, formData, {
         headers: { 'Content-Type': 'multipart/form-data' },
       });
-      setPendingFiles((prev) => [...prev, ...(response.data || [])]);
+      setPendingFiles((prev) => [...prev, ...(Array.isArray(response.data) ? response.data : [])]);
     } catch (error: any) {
       const message = error.response?.data?.message || error.message || '文件上传失败';
       setUploadError(typeof message === 'string' ? message : JSON.stringify(message));
@@ -457,9 +422,116 @@ export default function ChatPage() {
     return fieldKey;
   };
 
+  const handleAuthorize = (messageId: string, challenge?: AuthChallenge) => {
+    if (!challenge) {
+      return;
+    }
+
+    const sessionToken = getClientSessionToken();
+    if (!sessionToken) {
+      router.replace('/login');
+      return;
+    }
+
+    const popupUrl = new URL(withBrowserApiBase(challenge.startUrl));
+    popupUrl.searchParams.set('token', sessionToken);
+
+    setUploadError('');
+    setAuthorizingMessageId(messageId);
+
+    const popup = window.open(
+      popupUrl.toString(),
+      `delegated-auth-${challenge.connectorId}`,
+      'popup=yes,width=640,height=760',
+    );
+    if (!popup) {
+      setAuthorizingMessageId(null);
+      setUploadError('授权窗口被浏览器拦截，请允许弹窗后重试。');
+      return;
+    }
+
+    let settled = false;
+    let pollTimer: number | undefined;
+
+    const cleanup = () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      if (pollTimer) {
+        window.clearInterval(pollTimer);
+      }
+      window.removeEventListener('message', onMessage);
+      setAuthorizingMessageId((current) => (current === messageId ? null : current));
+    };
+
+    const finishAuthorized = () => {
+      cleanup();
+      void sendMessage('__ACTION_AUTHORIZED__', { silent: true });
+    };
+
+    const finishWithError = (message: string) => {
+      cleanup();
+      setUploadError(message);
+    };
+
+    const pollStatus = async () => {
+      try {
+        const statusUrl = /^https?:\/\//i.test(challenge.statusUrl)
+          ? challenge.statusUrl
+          : challenge.statusUrl.replace(/^\/api\/v1/, '');
+        const response = await apiClient.get(statusUrl);
+        const status = response.data?.status;
+        if (status === 'bound') {
+          finishAuthorized();
+          return;
+        }
+        if (status === 'failed' || status === 'expired') {
+          finishWithError(response.data?.errorMessage || '授权未完成，请重试。');
+          return;
+        }
+        if (popup.closed) {
+          cleanup();
+        }
+      } catch (error) {
+        if (popup.closed) {
+          cleanup();
+        }
+      }
+    };
+
+    const onMessage = (event: MessageEvent) => {
+      const data = (event.data && typeof event.data === 'object')
+        ? event.data as Record<string, any>
+        : null;
+      if (!data || data.type !== 'delegated-auth-result') {
+        return;
+      }
+      if (data.connectorId !== challenge.connectorId) {
+        return;
+      }
+      if (data.success) {
+        void pollStatus();
+        return;
+      }
+      finishWithError(typeof data.message === 'string' ? data.message : '授权失败，请重试。');
+    };
+
+    window.addEventListener('message', onMessage);
+    pollTimer = window.setInterval(() => {
+      void pollStatus();
+    }, 1500);
+  };
+
   const handleActionButton = (messageId: string, action: string) => {
     const sourceMessage = messages.find((message) => message.id === messageId);
     const actionLabel = sourceMessage?.actionButtons?.find((button) => button.action === action)?.label || action;
+
+    if (action === 'authorize') {
+      handleAuthorize(messageId, sourceMessage?.authChallenge);
+      return;
+    }
+
     setMessages((prev) =>
       prev.map((message) => {
         if (message.id !== messageId) {
@@ -488,7 +560,7 @@ export default function ChatPage() {
     }
 
     try {
-      await axios.post(`${API_URL}/api/v1/assistant/sessions/${sessionId}/reset`);
+      await apiClient.post(`/assistant/sessions/${sessionId}/reset`);
       await loadSession(sessionId);
     } catch (error) {
       console.error('Failed to reset session:', error);
@@ -802,7 +874,7 @@ export default function ChatPage() {
                               card={message.processCard}
                               actionButtons={message.actionButtons}
                               onAction={(action) => handleActionButton(message.id, action)}
-                              disabled={loading}
+                              disabled={loading || authorizingMessageId === message.id}
                             />
                           </div>
                         ) : null}

@@ -5,6 +5,7 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 
 async function main() {
+  const defaultTenantId = (process.env.DEFAULT_TENANT_ID || '').trim();
   console.log('🌱 Seeding database...');
 
   // Create default tenant
@@ -12,6 +13,7 @@ async function main() {
     where: { code: 'default' },
     update: {},
     create: {
+      ...(defaultTenantId ? { id: defaultTenantId } : {}),
       code: 'default',
       name: 'Default Tenant',
       status: 'active',

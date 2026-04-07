@@ -1,4 +1,4 @@
-import { detectCapabilities } from '../capability-detector';
+import { detectCapabilities, type HarEntry } from './capability-detector';
 
 describe('Capability Detector', () => {
   it('should detect API capabilities from OpenAPI spec', () => {
@@ -45,7 +45,7 @@ describe('Capability Detector', () => {
   });
 
   it('should detect capabilities from HAR entries', () => {
-    const mockHar = [
+    const mockHar: HarEntry[] = [
       {
         url: 'http://example.com/api/auth/token',
         method: 'POST',

@@ -6,6 +6,7 @@ import { SubmissionController } from '../src/modules/submission/submission.contr
 import { SubmissionService } from '../src/modules/submission/submission.service';
 import { StatusController } from '../src/modules/status/status.controller';
 import { StatusService } from '../src/modules/status/status.service';
+import { RequestAuthService } from '../src/modules/common/request-auth.service';
 
 @Module({
   controllers: [SubmissionController, StatusController],
@@ -30,6 +31,17 @@ import { StatusService } from '../src/modules/status/status.service';
         getTimeline: jest.fn(),
       },
     },
+    {
+      provide: RequestAuthService,
+      useValue: {
+        resolveUser: jest.fn().mockResolvedValue({
+          tenantId: 'tenant-default',
+          userId: 'user-1',
+          roles: ['user'],
+          source: 'request',
+        }),
+      },
+    },
   ],
 })
 class SubmissionStatusHttpTestModule {}
@@ -39,6 +51,7 @@ describe('Submission/Status HTTP E2E', () => {
   let httpApp: any;
   let submissionService: jest.Mocked<SubmissionService>;
   let statusService: jest.Mocked<StatusService>;
+  let requestAuth: { resolveUser: jest.Mock };
 
   beforeAll(async () => {
     process.env.DEFAULT_TENANT_ID = 'tenant-default';
@@ -55,6 +68,7 @@ describe('Submission/Status HTTP E2E', () => {
     httpApp = app.getHttpAdapter().getInstance();
     submissionService = moduleFixture.get(SubmissionService);
     statusService = moduleFixture.get(StatusService);
+    requestAuth = moduleFixture.get(RequestAuthService);
   });
 
   afterAll(async () => {
@@ -63,6 +77,12 @@ describe('Submission/Status HTTP E2E', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    requestAuth.resolveUser.mockResolvedValue({
+      tenantId: 'tenant-default',
+      userId: 'user-1',
+      roles: ['user'],
+      source: 'request',
+    });
   });
 
   it('validates submit payload and routes submission actions with expected arguments', async () => {
@@ -101,7 +121,7 @@ describe('Submission/Status HTTP E2E', () => {
 
     expect(submissionService.submit).toHaveBeenCalledWith({
       tenantId: 'tenant-default',
-      userId: 'default-user',
+      userId: 'user-1',
       draftId: 'draft-1',
       idempotencyKey: 'idem-1',
       traceId: expect.stringMatching(/^submit-/),
@@ -145,12 +165,14 @@ describe('Submission/Status HTTP E2E', () => {
 
     expect(submissionService.supplement).toHaveBeenCalledWith(
       'submission-1',
+      'tenant-default',
       'user-1',
       { invoiceNo: 'INV-001' },
       expect.stringMatching(/^supplement-/),
     );
     expect(submissionService.delegate).toHaveBeenCalledWith(
       'submission-1',
+      'tenant-default',
       'user-1',
       'user-2',
       'backup approver',
@@ -158,11 +180,13 @@ describe('Submission/Status HTTP E2E', () => {
     );
     expect(submissionService.cancel).toHaveBeenCalledWith(
       'submission-1',
+      'tenant-default',
       'user-1',
       expect.stringMatching(/^cancel-/),
     );
     expect(submissionService.urge).toHaveBeenCalledWith(
       'submission-1',
+      'tenant-default',
       'user-1',
       expect.stringMatching(/^urge-/),
     );
@@ -215,9 +239,11 @@ describe('Submission/Status HTTP E2E', () => {
 
     expect(statusService.queryStatus).toHaveBeenCalledWith(
       'submission-1',
+      'tenant-default',
       expect.stringMatching(/^status-/),
+      'user-1',
     );
     expect(statusService.listMySubmissions).toHaveBeenCalledWith('tenant-default', 'user-1');
-    expect(statusService.getTimeline).toHaveBeenCalledWith('submission-1');
+    expect(statusService.getTimeline).toHaveBeenCalledWith('submission-1', 'tenant-default', 'user-1');
   });
 });

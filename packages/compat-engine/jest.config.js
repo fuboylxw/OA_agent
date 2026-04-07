@@ -4,7 +4,7 @@ module.exports = {
   roots: ['<rootDir>/src'],
   testMatch: ['**/*.spec.ts'],
   transform: {
-    '^.+\\.ts$': 'ts-jest',
+    '^.+\\.ts$': ['ts-jest', { tsconfig: { types: ['jest', 'node'] } }],
   },
   collectCoverageFrom: [
     'src/**/*.ts',
@@ -12,6 +12,6 @@ module.exports = {
     '!src/**/*.spec.ts',
   ],
   moduleNameMapper: {
-    '^@uniflow/shared-types$': '<rootDir>/../../shared-types/src',
+    '^@uniflow/shared-types$': '<rootDir>/../shared-types/src',
   },
 };

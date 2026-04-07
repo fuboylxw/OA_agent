@@ -6,6 +6,7 @@ import { WebhookService } from './webhook.service';
 import { PrismaService } from '../common/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AdapterRuntimeService } from '../adapter-runtime/adapter-runtime.service';
+import { ChatSessionProcessService } from '../common/chat-session-process.service';
 
 describe('WebhookService Integration', () => {
   let service: WebhookService;
@@ -44,6 +45,10 @@ describe('WebhookService Integration', () => {
     resolveAuthConfig: jest.fn(),
   };
 
+  const mockChatSessionProcessService = {
+    syncSubmissionStatusToSession: jest.fn(),
+  };
+
   beforeEach(async () => {
     jest.clearAllMocks();
 
@@ -51,6 +56,7 @@ describe('WebhookService Integration', () => {
       providers: [
         WebhookService,
         { provide: PrismaService, useValue: mockPrisma },
+        { provide: ChatSessionProcessService, useValue: mockChatSessionProcessService },
         { provide: AuditService, useValue: mockAuditService },
         { provide: AdapterRuntimeService, useValue: mockAdapterRuntimeService },
         { provide: getQueueToken('webhook'), useValue: mockQueue },

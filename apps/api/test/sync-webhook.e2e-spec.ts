@@ -7,6 +7,7 @@ import { SyncController } from '../src/modules/sync/sync.controller';
 import { SyncService } from '../src/modules/sync/sync.service';
 import { WebhookController } from '../src/modules/webhook/webhook.controller';
 import { WebhookService } from '../src/modules/webhook/webhook.service';
+import { RequestAuthService } from '../src/modules/common/request-auth.service';
 
 @Module({
   controllers: [SyncController, WebhookController],
@@ -39,6 +40,17 @@ import { WebhookService } from '../src/modules/webhook/webhook.service';
         updateConfig: jest.fn(),
       },
     },
+    {
+      provide: RequestAuthService,
+      useValue: {
+        resolveUser: jest.fn().mockResolvedValue({
+          tenantId: 'tenant-1',
+          userId: 'user-1',
+          roles: ['admin'],
+          source: 'session',
+        }),
+      },
+    },
   ],
 })
 class TestHttpModule {}
@@ -48,6 +60,7 @@ describe('Sync/Webhook HTTP E2E', () => {
   let httpApp: any;
   let syncService: jest.Mocked<SyncService>;
   let webhookService: jest.Mocked<WebhookService>;
+  let requestAuth: { resolveUser: jest.Mock };
 
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -70,6 +83,7 @@ describe('Sync/Webhook HTTP E2E', () => {
     httpApp = app.getHttpAdapter().getInstance();
     syncService = moduleFixture.get(SyncService);
     webhookService = moduleFixture.get(WebhookService);
+    requestAuth = moduleFixture.get(RequestAuthService);
   });
 
   afterAll(async () => {
@@ -78,6 +92,12 @@ describe('Sync/Webhook HTTP E2E', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    requestAuth.resolveUser.mockResolvedValue({
+      tenantId: 'tenant-1',
+      userId: 'user-1',
+      roles: ['admin'],
+      source: 'session',
+    });
   });
 
   it('routes sync config and run-due endpoints with expected parameters', async () => {
@@ -150,8 +170,8 @@ describe('Sync/Webhook HTTP E2E', () => {
         expect(body.id).toBe('sync-job-1');
       });
 
-    expect(syncService.getConfig).toHaveBeenCalledWith('connector-1');
-    expect(syncService.updateConfig).toHaveBeenCalledWith('connector-1', {
+    expect(syncService.getConfig).toHaveBeenCalledWith('connector-1', 'tenant-1');
+    expect(syncService.updateConfig).toHaveBeenCalledWith('connector-1', 'tenant-1', {
       updatedBy: 'admin',
       domains: {
         status: { enabled: true, intervalMinutes: 5 },
@@ -159,10 +179,11 @@ describe('Sync/Webhook HTTP E2E', () => {
     });
     expect(syncService.dispatchDueSchedules).toHaveBeenCalledWith('connector-1');
     expect(syncService.enqueue).toHaveBeenCalledWith({
+      tenantId: 'tenant-1',
       connectorId: 'connector-1',
       syncDomain: 'schema',
       triggerType: 'manual',
-      requestedBy: 'tester',
+      requestedBy: 'user-1',
       scope: { mode: 'full' },
     });
   });
@@ -177,6 +198,11 @@ describe('Sync/Webhook HTTP E2E', () => {
     webhookService.updateConfig.mockResolvedValue({
       signatureHeader: 'x-custom-signature',
       signaturePayloadMode: 'raw',
+    } as any);
+    webhookService.processInbox.mockResolvedValue({
+      id: 'inbox-1',
+      tenantId: 'tenant-1',
+      processStatus: 'processed',
     } as any);
 
     const rawBody = '{"event":{"id":"evt-1","type":"approved"},"submission":{"id":"oa-100"}}';
@@ -202,6 +228,13 @@ describe('Sync/Webhook HTTP E2E', () => {
         expect(body.signaturePayloadMode).toBe('raw');
       });
 
+    await request(httpApp)
+      .post('/api/v1/webhooks/inbox/inbox-1/process')
+      .expect(201)
+      .expect(({ body }) => {
+        expect(body.processStatus).toBe('processed');
+      });
+
     expect(webhookService.receive).toHaveBeenCalledWith(
       'connector-1',
       expect.objectContaining({
@@ -218,9 +251,10 @@ describe('Sync/Webhook HTTP E2E', () => {
       },
       rawBody,
     );
-    expect(webhookService.updateConfig).toHaveBeenCalledWith('connector-1', {
+    expect(webhookService.updateConfig).toHaveBeenCalledWith('connector-1', 'tenant-1', {
       signatureHeader: 'x-custom-signature',
       signaturePayloadMode: 'raw',
     });
+    expect(webhookService.processInbox).toHaveBeenCalledWith('inbox-1', 'tenant-1');
   });
 });

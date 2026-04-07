@@ -5,6 +5,7 @@ import {
   buildFlowChangeSummary,
   createDeterministicHash,
   mergeDiscoveredFlowUiHints,
+  normalizeProcessName,
   type FlowDiscoverySnapshot,
 } from '@uniflow/shared-types';
 
@@ -23,6 +24,13 @@ export class SchemaSyncService {
     const syncedAt = new Date();
     const adapter = await this.adapterRuntimeService.createAdapterForConnector(syncJob.connectorId, []);
     const discovery = await adapter.discover();
+    const discoveredFlows = discovery.discoveredFlows.map((flow) => ({
+      ...flow,
+      flowName: normalizeProcessName({
+        processName: flow.flowName,
+        processCode: flow.flowCode,
+      }),
+    }));
     const [templates, remoteProcesses] = await Promise.all([
       this.prisma.processTemplate.findMany({
         where: {
@@ -50,7 +58,7 @@ export class SchemaSyncService {
       remoteProcesses.map((remoteProcess) => [remoteProcess.remoteProcessId, remoteProcess]),
     );
 
-    for (const flow of discovery.discoveredFlows) {
+    for (const flow of discoveredFlows) {
       const latestTemplate = templatesByProcessCode.get(flow.flowCode)?.[0];
       const existingRemoteProcess = remoteProcessMap.get(flow.flowCode);
       const sourceHash = this.computeSourceHash(flow);
@@ -174,7 +182,7 @@ export class SchemaSyncService {
     return {
       syncJobId: syncJob.id,
       syncDomain: 'schema',
-      discoveredFlows: discovery.discoveredFlows.length,
+      discoveredFlows: discoveredFlows.length,
       processedTemplates: processed,
       remoteProcessesUpserted: processed,
       driftedTemplates: versionedTemplates,

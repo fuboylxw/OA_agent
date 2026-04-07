@@ -1,16 +1,17 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
+import axios from 'axios';
 import { PrismaService } from '../common/prisma.service';
 import { DocNormalizerService } from './doc-normalizer.service';
 import { WorkflowIdentifierAgent } from './workflow-identifier.agent';
 import { EndpointValidatorService } from './endpoint-validator.service';
 import { MCPGeneratorService } from './mcp-generator.service';
 import {
+  GenerateResult,
+  IdentifyResult,
+  NormalizeResult,
   ParseAndGenerateInput,
   ParseAndGenerateOutput,
-  NormalizeResult,
-  IdentifyResult,
   ValidationReport,
-  GenerateResult,
 } from './types';
 
 @Injectable()
@@ -25,13 +26,10 @@ export class ApiParseService {
     private readonly mcpGenerator: MCPGeneratorService,
   ) {}
 
-  /**
-   * 完整流水线：文档标准化 → 流程识别 → 端点验证 → MCP 生成
-   */
   async parseAndGenerate(input: ParseAndGenerateInput): Promise<ParseAndGenerateOutput> {
     const warnings: string[] = [];
+    const connector = await this.getConnector(input.connectorId, input.tenantId);
 
-    // ── Stage 1: 文档标准化 ──────────────────────────────────
     const docContent = await this.resolveDocContent(input);
     if (!docContent) {
       return this.emptyOutput('No document content provided', warnings);
@@ -45,18 +43,23 @@ export class ApiParseService {
       return this.emptyOutput('No endpoints extracted', warnings);
     }
 
-    this.logger.log(`Stage 1 complete: ${normalizeResult.endpoints.length} endpoints, format=${normalizeResult.format}`);
+    this.logger.log(
+      `Stage 1 complete: ${normalizeResult.endpoints.length} endpoints, format=${normalizeResult.format}`,
+    );
 
-    // 更新 connector baseUrl（如果文档中检测到且用户未指定）
-    if (normalizeResult.baseUrl && !input.baseUrl) {
-      await this.prisma.connector.update({
-        where: { id: input.connectorId },
+    if (normalizeResult.baseUrl && !input.baseUrl && normalizeResult.baseUrl !== connector.baseUrl) {
+      await this.prisma.connector.updateMany({
+        where: {
+          id: connector.id,
+          tenantId: input.tenantId,
+        },
         data: { baseUrl: normalizeResult.baseUrl },
       });
     }
 
-    // ── Stage 2: 业务流程识别 ────────────────────────────────
-    this.logger.log(`Stage 2: Identifying workflows from ${normalizeResult.endpoints.length} endpoints`);
+    this.logger.log(
+      `Stage 2: Identifying workflows from ${normalizeResult.endpoints.length} endpoints`,
+    );
     const identifyResult = await this.workflowIdentifier.identify(normalizeResult.endpoints);
 
     if (identifyResult.workflows.length === 0) {
@@ -69,63 +72,75 @@ export class ApiParseService {
 
     this.logger.log(`Stage 2 complete: ${identifyResult.workflows.length} workflows identified`);
 
-    // ── Stage 3: 端点验证（可选，默认跳过因为 bootstrap 已经做过深度验证） ────────────────────────────
     let validation: ValidationReport | undefined;
     if (input.autoValidate === true) {
       this.logger.log(`Stage 3: Validating endpoints for connector ${input.connectorId}`);
       try {
-        validation = await this.endpointValidator.validate(input.connectorId, false); // skipProbe=false 强制重新探测
+        validation = await this.endpointValidator.validate(
+          input.connectorId,
+          input.tenantId,
+          false,
+        );
         if (validation.overall === 'failed') {
-          warnings.push(`Endpoint validation failed: connectivity=${validation.connectivity}, auth=${validation.authValid}`);
+          warnings.push(
+            `Endpoint validation failed: connectivity=${validation.connectivity}, auth=${validation.authValid}`,
+          );
         } else if (validation.overall === 'partial') {
-          warnings.push(`${validation.summary.unreachable} of ${validation.summary.total} endpoints unreachable`);
+          warnings.push(
+            `${validation.summary.unreachable} of ${validation.summary.total} endpoints unreachable`,
+          );
         }
-        this.logger.log(`Stage 3 complete: ${validation.overall} (${validation.summary.reachable}/${validation.summary.total} reachable)`);
+        this.logger.log(
+          `Stage 3 complete: ${validation.overall} (${validation.summary.reachable}/${validation.summary.total} reachable)`,
+        );
       } catch (error: any) {
         warnings.push(`Endpoint validation skipped: ${error.message}`);
         this.logger.warn(`Stage 3 skipped: ${error.message}`);
       }
     }
 
-    // ── Stage 4: MCP 生成 ────────────────────────────────────
-    this.logger.log(`Stage 4: Generating MCP tools for ${identifyResult.workflows.length} workflows`);
+    this.logger.log(
+      `Stage 4: Generating MCP tools for ${identifyResult.workflows.length} workflows`,
+    );
     const generateResult = await this.mcpGenerator.generate(
       input.tenantId,
       input.connectorId,
       identifyResult.workflows,
       identifyResult.syncCapabilities,
+      input.baseUrl || normalizeResult.baseUrl || connector.baseUrl,
     );
 
-    this.logger.log(`Stage 4 complete: ${generateResult.tools.length} tools, ${generateResult.processTemplates.length} templates`);
+    this.logger.log(
+      `Stage 4 complete: ${generateResult.tools.length} tools, ${generateResult.processTemplates.length} templates`,
+    );
 
-    // ── 组装输出 ─────────────────────────────────────────────
-    return this.buildOutput(normalizeResult, identifyResult, generateResult, validation, warnings);
+    return this.buildOutput(
+      normalizeResult,
+      identifyResult,
+      generateResult,
+      validation,
+      warnings,
+    );
   }
 
-  /**
-   * 仅执行 Stage 1: 文档标准化（预览用）
-   */
   async previewNormalize(content: string, formatHint?: string): Promise<NormalizeResult> {
     return this.docNormalizer.normalize(content, formatHint);
   }
 
-  /**
-   * 仅执行 Stage 3: 端点验证（手动触发）
-   */
-  async validateConnector(connectorId: string): Promise<ValidationReport> {
-    return this.endpointValidator.validate(connectorId, false); // skipProbe=false 强制探测
+  async validateConnector(connectorId: string, tenantId: string): Promise<ValidationReport> {
+    await this.getConnector(connectorId, tenantId);
+    return this.endpointValidator.validate(connectorId, tenantId, false);
   }
 
-  // ── 辅助方法 ──────────────────────────────────────────────
-
   private async resolveDocContent(input: ParseAndGenerateInput): Promise<string | null> {
-    if (input.docContent) return input.docContent;
+    if (input.docContent) {
+      return input.docContent;
+    }
 
     if (input.docUrl) {
       try {
-        const response = await fetch(input.docUrl);
-        if (!response.ok) return null;
-        return response.text();
+        const response = await axios.get(input.docUrl, { timeout: 30000 });
+        return typeof response.data === 'string' ? response.data : JSON.stringify(response.data);
       } catch (error: any) {
         this.logger.error(`Failed to fetch doc from ${input.docUrl}: ${error.message}`);
         return null;
@@ -142,19 +157,19 @@ export class ApiParseService {
     validation: ValidationReport | undefined,
     warnings: string[],
   ): ParseAndGenerateOutput {
-    // 将 workflow 和 tool 信息关联
-    const workflows = identify.workflows.map(w => ({
-      processCode: w.processCode,
-      processName: w.processName,
-      category: w.category,
-      confidence: w.confidence,
+    const workflows = identify.workflows.map((workflow) => ({
+      processCode: workflow.processCode,
+      processName: workflow.processName,
+      category: workflow.category,
+      confidence: workflow.confidence,
       tools: generate.tools
-        .filter(t => t.flowCode === w.processCode)
-        .map(t => ({
-          toolName: t.toolName,
-          category: t.category,
+        .filter((tool) => tool.flowCode === workflow.processCode)
+        .map((tool) => ({
+          toolName: tool.toolName,
+          category: tool.category,
           validated: validation?.endpoints.find(
-            e => e.path === t.apiEndpoint && e.method === t.httpMethod,
+            (endpoint) =>
+              endpoint.path === tool.apiEndpoint && endpoint.method === tool.httpMethod,
           )?.status,
         })),
     }));
@@ -182,5 +197,24 @@ export class ApiParseService {
       syncStrategy: { primary: 'manual', fallback: null, pollingIntervalMs: 0 },
       warnings,
     };
+  }
+
+  private async getConnector(connectorId: string, tenantId: string) {
+    const connector = await this.prisma.connector.findFirst({
+      where: {
+        id: connectorId,
+        tenantId,
+      },
+      select: {
+        id: true,
+        baseUrl: true,
+      },
+    });
+
+    if (!connector) {
+      throw new NotFoundException('Connector not found');
+    }
+
+    return connector;
   }
 }

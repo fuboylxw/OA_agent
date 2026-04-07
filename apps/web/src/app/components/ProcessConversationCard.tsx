@@ -18,6 +18,7 @@ export interface ProcessCard {
   actionState: 'available' | 'readonly';
   canContinue: boolean;
   statusText: string;
+  summary?: string;
   formData?: Record<string, any>;
   fields: OaFormField[];
   missingFields?: Array<{ key: string; label: string; question: string; type?: string }>;
@@ -85,6 +86,13 @@ export default function ProcessConversationCard({
 
   const footer = (
     <div className="space-y-4">
+      {card.summary ? (
+        <div className="rounded-2xl border border-slate-200 bg-slate-50 px-4 py-4">
+          <div className="mb-2 text-sm font-semibold text-slate-900">核对提示</div>
+          <div className="text-sm leading-6 text-slate-700">{card.summary}</div>
+        </div>
+      ) : null}
+
       {card.reworkReason ? (
         <div className="rounded-2xl border border-amber-200 bg-amber-50 px-4 py-4">
           <div className="mb-2 text-sm font-semibold text-amber-900">OA 驳回原因</div>

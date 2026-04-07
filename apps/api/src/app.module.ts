@@ -1,6 +1,9 @@
 import { Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { BullModule } from '@nestjs/bull';
+import { APP_GUARD } from '@nestjs/core';
+import { ThrottlerModule, ThrottlerGuard } from '@nestjs/throttler';
+import { resolve } from 'path';
 import { BootstrapModule } from './modules/bootstrap/bootstrap.module';
 import { DiscoveryModule } from './modules/discovery/discovery.module';
 import { IrNormalizerModule } from './modules/ir-normalizer/ir-normalizer.module';
@@ -24,25 +27,39 @@ import { WebhookModule } from './modules/webhook/webhook.module';
 import { ApiParseModule } from './modules/api-parse/api-parse.module';
 import { AttachmentModule } from './modules/attachment/attachment.module';
 import { HealthController } from './health.controller';
+import { GlobalAuthGuard } from './modules/common/auth.guard';
 
 @Module({
   imports: [
     ConfigModule.forRoot({
       isGlobal: true,
+      envFilePath: [
+        resolve(process.cwd(), '.env'),
+        resolve(process.cwd(), '../../.env'),
+      ],
     }),
+    // Rate limiting
+    ThrottlerModule.forRoot([
+      {
+        name: 'default',
+        ttl: 60000,
+        limit: 60,
+      },
+    ]),
     BullModule.forRoot({
       redis: {
         host: process.env.REDIS_HOST || 'localhost',
         port: parseInt(process.env.REDIS_PORT || '6379', 10),
+        password: process.env.REDIS_PASSWORD || undefined,
       },
     }),
     BullModule.registerQueue(
-      { name: 'bootstrap' },
-      { name: 'parse' },
-      { name: 'submit' },
-      { name: 'status' },
-      { name: 'sync' },
-      { name: 'webhook' },
+      { name: 'bootstrap', defaultJobOptions: { attempts: 2, backoff: { type: 'exponential', delay: 10000 }, removeOnComplete: 100, removeOnFail: 200 } },
+      { name: 'parse', defaultJobOptions: { attempts: 2, backoff: { type: 'exponential', delay: 5000 }, removeOnComplete: 100, removeOnFail: 200 } },
+      { name: 'submit', defaultJobOptions: { attempts: 3, backoff: { type: 'exponential', delay: 3000 }, removeOnComplete: 200, removeOnFail: 500 } },
+      { name: 'status', defaultJobOptions: { attempts: 3, backoff: { type: 'exponential', delay: 2000 }, removeOnComplete: 500, removeOnFail: 500 } },
+      { name: 'sync', defaultJobOptions: { attempts: 3, backoff: { type: 'exponential', delay: 5000 }, removeOnComplete: 200, removeOnFail: 500 } },
+      { name: 'webhook', defaultJobOptions: { attempts: 3, backoff: { type: 'exponential', delay: 2000 }, removeOnComplete: 500, removeOnFail: 500 } },
     ),
     CommonModule,
     BootstrapModule,
@@ -68,5 +85,17 @@ import { HealthController } from './health.controller';
     ApiParseModule,
   ],
   controllers: [HealthController],
+  providers: [
+    // Global auth guard — all routes require auth unless marked @Public()
+    {
+      provide: APP_GUARD,
+      useClass: GlobalAuthGuard,
+    },
+    // Global rate limiting guard
+    {
+      provide: APP_GUARD,
+      useClass: ThrottlerGuard,
+    },
+  ],
 })
 export class AppModule {}

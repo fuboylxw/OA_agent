@@ -9,6 +9,10 @@ export interface OaFormField {
   displayValue: any;
   type: string;
   required?: boolean;
+  origin?: 'user' | 'derived' | 'prefill';
+  tagLabel?: string;
+  tagTone?: 'sky' | 'amber' | 'slate';
+  hint?: string;
 }
 
 const TONE_CLASS_MAP: Record<
@@ -111,6 +115,17 @@ function renderFieldValue(field: OaFormField) {
   return <span className="whitespace-pre-wrap break-words text-slate-900">{String(displayValue)}</span>;
 }
 
+function getFieldTagClass(tone?: OaFormField['tagTone']) {
+  switch (tone) {
+    case 'amber':
+      return 'bg-amber-50 text-amber-700';
+    case 'slate':
+      return 'bg-slate-100 text-slate-600';
+    default:
+      return 'bg-sky-50 text-sky-700';
+  }
+}
+
 export default function OaFormPreview({
   title,
   subtitle,
@@ -171,8 +186,16 @@ export default function OaFormPreview({
                       必填
                     </span>
                   )}
+                  {field.tagLabel && (
+                    <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${getFieldTagClass(field.tagTone)}`}>
+                      {field.tagLabel}
+                    </span>
+                  )}
                 </div>
                 <div className="text-sm leading-6">{renderFieldValue(field)}</div>
+                {field.hint ? (
+                  <div className="mt-2 text-xs leading-5 text-slate-500">{field.hint}</div>
+                ) : null}
               </div>
             ))}
           </div>

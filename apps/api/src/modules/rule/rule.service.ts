@@ -198,15 +198,14 @@ export class RuleService {
       case '>=': return value >= expected;
       case '<': return value < expected;
       case '<=': return value <= expected;
-      case '==': return value == expected;
-      case '!=': return value != expected;
+      case '==': return value === expected;
+      case '!=': return value !== expected;
       default: return false;
     }
   }
 
   private calculateExpression(expression: string, formData: Record<string, any>): number {
-    // Simple calculator for expressions like "quantity * unitPrice"
-    // Replace field names with values
+    // Safe arithmetic evaluator — only allows numbers and basic operators (+, -, *, /, parentheses)
     let expr = expression;
     for (const [key, value] of Object.entries(formData)) {
       if (typeof value === 'number') {
@@ -214,11 +213,65 @@ export class RuleService {
       }
     }
 
-    // Evaluate (unsafe in production, should use a proper expression parser)
+    // Strip whitespace and validate: only digits, dots, operators, parens allowed
+    const sanitized = expr.replace(/\s+/g, '');
+    if (!/^[\d.+\-*/()]+$/.test(sanitized)) {
+      return 0;
+    }
+
     try {
-      return eval(expr);
+      // Use indirect eval-free arithmetic: parse tokens and compute
+      return this.safeEvalArithmetic(sanitized);
     } catch {
       return 0;
     }
+  }
+
+  private safeEvalArithmetic(expr: string): number {
+    let pos = 0;
+
+    const parseNumber = (): number => {
+      let numStr = '';
+      if (expr[pos] === '-') { numStr += expr[pos++]; }
+      while (pos < expr.length && (expr[pos] >= '0' && expr[pos] <= '9' || expr[pos] === '.')) {
+        numStr += expr[pos++];
+      }
+      if (!numStr || numStr === '-') throw new Error('Expected number');
+      return parseFloat(numStr);
+    };
+
+    const parseFactor = (): number => {
+      if (expr[pos] === '(') {
+        pos++; // skip '('
+        const result = parseExpr();
+        if (expr[pos] === ')') pos++; // skip ')'
+        return result;
+      }
+      return parseNumber();
+    };
+
+    const parseTerm = (): number => {
+      let result = parseFactor();
+      while (pos < expr.length && (expr[pos] === '*' || expr[pos] === '/')) {
+        const op = expr[pos++];
+        const right = parseFactor();
+        result = op === '*' ? result * right : result / right;
+      }
+      return result;
+    };
+
+    const parseExpr = (): number => {
+      let result = parseTerm();
+      while (pos < expr.length && (expr[pos] === '+' || expr[pos] === '-')) {
+        const op = expr[pos++];
+        const right = parseTerm();
+        result = op === '+' ? result + right : result - right;
+      }
+      return result;
+    };
+
+    const result = parseExpr();
+    if (!isFinite(result)) return 0;
+    return result;
   }
 }

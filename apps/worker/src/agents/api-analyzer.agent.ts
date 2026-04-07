@@ -1,5 +1,6 @@
 import { Logger } from '@nestjs/common';
 import { BaseAgent, AgentContext, AgentConfig, LLMClientFactory, BaseLLMClient } from '@uniflow/agent-kernel';
+import { deriveLocalizedProcessName } from '@uniflow/shared-types';
 import { z } from 'zod';
 
 // ============================================================
@@ -13,6 +14,11 @@ export const ParameterSchema = z.object({
   description: z.string(),
   in: z.enum(['path', 'query', 'body']).default('body'),
   defaultValue: z.any().optional(),
+  format: z.string().optional(),
+  minimum: z.number().optional(),
+  minItems: z.number().optional(),
+  enumValues: z.array(z.any()).optional(),
+  schema: z.any().optional(),
 });
 
 export const EndpointSchema = z.object({
@@ -81,6 +87,117 @@ interface OperationSummary {
   requestBodySchema?: any;
   responseMapping: Record<string, string>;
 }
+
+interface HeuristicProcessIdentity {
+  processCode: string;
+  processName: string;
+  category: string;
+}
+
+const IGNORED_PATH_PREFIXES = new Set([
+  'api',
+  'rest',
+  'jaxrs',
+  'service',
+  'services',
+  'v1',
+  'v2',
+  'v3',
+]);
+
+const NON_BUSINESS_PATH_SEGMENTS = new Set([
+  'health',
+  'auth',
+  'login',
+  'logout',
+  'token',
+  'oauth',
+  'me',
+  'dashboard',
+  'summary',
+  'metrics',
+  'metric',
+  'stats',
+  'monitor',
+  'config',
+  'settings',
+  'setting',
+  'system',
+  'systems',
+  'admin',
+  'admins',
+  'role',
+  'roles',
+  'permission',
+  'permissions',
+  'user',
+  'users',
+  'profile',
+  'cache',
+  'log',
+  'logs',
+  'webhook',
+  'webhooks',
+]);
+
+const RESOURCE_MARKER_SEGMENTS = new Set([
+  'application',
+  'applications',
+  'request',
+  'requests',
+  'submission',
+  'submissions',
+  'workflow',
+  'workflows',
+  'process',
+  'processes',
+  'form',
+  'forms',
+  'ticket',
+  'tickets',
+]);
+
+const ACTION_PATH_SEGMENTS = new Set([
+  'submit',
+  'create',
+  'new',
+  'apply',
+  'start',
+  'launch',
+  'save',
+  'cancel',
+  'withdraw',
+  'recall',
+  'revoke',
+  'approve',
+  'approval',
+  'reject',
+  'review',
+  'audit',
+  'pass',
+  'status',
+  'detail',
+  'details',
+  'info',
+  'list',
+  'query',
+  'search',
+]);
+
+const HEURISTIC_PROCESS_TITLES: Array<{
+  pattern: RegExp;
+  processName: string;
+  category: string;
+}> = [
+  { pattern: /(leave|vacation|absence)/, processName: '请假申请', category: 'hr' },
+  { pattern: /(expense|reimburse|invoice|payment|finance)/, processName: '费用报销', category: 'finance' },
+  { pattern: /(purchase|procurement|contract)/, processName: '采购申请', category: 'finance' },
+  { pattern: /(travel|trip)/, processName: '差旅申请', category: 'administration' },
+  { pattern: /(vehicle|car)/, processName: '用车申请', category: 'administration' },
+  { pattern: /(meeting|conference|room)/, processName: '会议预约', category: 'collaboration' },
+  { pattern: /(overtime|attendance)/, processName: '考勤申请', category: 'hr' },
+  { pattern: /(seal|stamp)/, processName: '用印申请', category: 'administration' },
+];
 
 // ============================================================
 // LLM Prompt
@@ -326,7 +443,8 @@ ${truncated}
   }
 
   private async analyzeOpenAPI(doc: any, baseUrl?: string, enrichmentText?: string): Promise<BusinessProcess[]> {
-    const pathSummary = this.collectOperationSummaries(doc).map((operation) => ({
+    const operations = this.collectOperationSummaries(doc);
+    const pathSummary = operations.map((operation) => ({
       path: operation.path,
       method: operation.method,
       summary: operation.summary,
@@ -376,7 +494,289 @@ ${enrichmentPrompt}
       }
     }
 
+    if (allProcesses.length === 0) {
+      const fallbackProcesses = this.buildProcessesHeuristically(operations);
+      if (fallbackProcesses.length > 0) {
+        this.logger.warn(
+          `LLM returned no business processes, fallback heuristics identified ${fallbackProcesses.length} processes`,
+        );
+        return fallbackProcesses;
+      }
+    }
+
     return allProcesses;
+  }
+
+  private buildProcessesHeuristically(operations: OperationSummary[]): BusinessProcess[] {
+    const grouped = new Map<string, BusinessProcess>();
+
+    for (const operation of operations) {
+      const endpointCategory = this.inferHeuristicEndpointCategory(operation);
+      if (!endpointCategory) {
+        continue;
+      }
+
+      const identity = this.inferHeuristicProcessIdentity(operation);
+      if (!identity) {
+        continue;
+      }
+
+      const endpoint: Endpoint = {
+        name: this.buildHeuristicEndpointName(identity.processName, endpointCategory),
+        method: operation.method,
+        path: operation.path,
+        description: operation.summary || this.buildHeuristicEndpointName(identity.processName, endpointCategory),
+        category: endpointCategory,
+        parameters: operation.parameters,
+        responseMapping: operation.responseMapping,
+        ...(endpointCategory === 'submit'
+          ? { bodyTemplate: this.buildHeuristicBodyTemplate(operation) }
+          : {}),
+      };
+
+      const current = grouped.get(identity.processCode) || {
+        processName: identity.processName,
+        processCode: identity.processCode,
+        category: identity.category,
+        description: `${identity.processName}流程（根据 OpenAPI 结构推断）`,
+        endpoints: [],
+      };
+
+      this.mergeHeuristicEndpoint(current.endpoints, endpoint);
+      grouped.set(identity.processCode, current);
+    }
+
+    const endpointOrder: Record<Endpoint['category'], number> = {
+      submit: 0,
+      query: 1,
+      list: 2,
+      status_query: 3,
+      cancel: 4,
+      approve: 5,
+      reference_data: 6,
+      get: 7,
+      urge: 8,
+      other: 9,
+    };
+
+    return Array.from(grouped.values())
+      .map((process) => ({
+        ...process,
+        endpoints: [...process.endpoints].sort(
+          (left, right) => (endpointOrder[left.category] ?? 99) - (endpointOrder[right.category] ?? 99),
+        ),
+      }))
+      .filter((process) => process.endpoints.some((endpoint) => endpoint.category === 'submit'));
+  }
+
+  private inferHeuristicEndpointCategory(operation: OperationSummary): Endpoint['category'] | null {
+    const segments = this.normalizePathSegments(operation.path);
+    if (segments.length === 0 || this.shouldSkipHeuristicPath(segments)) {
+      return null;
+    }
+
+    const signature = `${operation.method} ${operation.path} ${operation.summary}`.toLowerCase();
+    const hasPathParam = /\/\{[^/]+\}/.test(operation.path);
+    const hasBodyParams = operation.parameters.some((parameter) => parameter.in === 'body');
+
+    if (
+      /(cancel|withdraw|recall|revoke)/.test(signature)
+      && ['POST', 'DELETE'].includes(operation.method)
+    ) {
+      return 'cancel';
+    }
+
+    if (
+      /(approve|approval|reject|review|audit|pass)/.test(signature)
+      && ['POST', 'PUT', 'PATCH'].includes(operation.method)
+    ) {
+      return 'approve';
+    }
+
+    if (/(status|timeline|history|progress|track)/.test(signature) && operation.method === 'GET') {
+      return 'status_query';
+    }
+
+    if (
+      /(lookup|dictionary|option|reference)/.test(signature)
+      && operation.method === 'GET'
+    ) {
+      return 'reference_data';
+    }
+
+    if (operation.method === 'GET') {
+      return hasPathParam ? 'query' : 'list';
+    }
+
+    if (
+      ['POST', 'PUT', 'PATCH'].includes(operation.method)
+      && (!hasPathParam || hasBodyParams || /(create|apply|submit|start|launch)/.test(signature))
+    ) {
+      return 'submit';
+    }
+
+    return null;
+  }
+
+  private inferHeuristicProcessIdentity(operation: OperationSummary): HeuristicProcessIdentity | null {
+    const segments = this.normalizePathSegments(operation.path);
+    if (segments.length === 0 || this.shouldSkipHeuristicPath(segments)) {
+      return null;
+    }
+
+    let resourceToken = '';
+    const resourceMarkerIndex = segments.findIndex((segment) => RESOURCE_MARKER_SEGMENTS.has(segment));
+
+    if (resourceMarkerIndex > 0) {
+      for (let index = resourceMarkerIndex - 1; index >= 0; index -= 1) {
+        const candidate = this.normalizeResourceToken(segments[index]);
+        if (candidate && !RESOURCE_MARKER_SEGMENTS.has(candidate) && !ACTION_PATH_SEGMENTS.has(candidate)) {
+          resourceToken = candidate;
+          break;
+        }
+      }
+    }
+
+    if (!resourceToken) {
+      const candidates = segments
+        .filter((segment) => !ACTION_PATH_SEGMENTS.has(segment))
+        .map((segment) => this.normalizeResourceToken(segment))
+        .filter(Boolean);
+      resourceToken = candidates[candidates.length - 1] || '';
+    }
+
+    if (!resourceToken || NON_BUSINESS_PATH_SEGMENTS.has(resourceToken)) {
+      return null;
+    }
+
+    const title = this.resolveHeuristicProcessTitle(resourceToken);
+
+    return {
+      processCode: this.toSnakeCase(resourceToken),
+      processName: title.processName,
+      category: title.category,
+    };
+  }
+
+  private normalizePathSegments(path: string): string[] {
+    return path
+      .split('?')[0]
+      .split('/')
+      .map((segment) => segment.trim().toLowerCase())
+      .filter(Boolean)
+      .filter((segment) => !segment.startsWith('{'))
+      .filter((segment) => !IGNORED_PATH_PREFIXES.has(segment));
+  }
+
+  private shouldSkipHeuristicPath(segments: string[]): boolean {
+    return segments.some((segment) => NON_BUSINESS_PATH_SEGMENTS.has(this.normalizeResourceToken(segment)));
+  }
+
+  private normalizeResourceToken(value: string): string {
+    let normalized = value
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+
+    if (normalized.endsWith('ies') && normalized.length > 3) {
+      normalized = `${normalized.slice(0, -3)}y`;
+    } else if (normalized.endsWith('s') && normalized.length > 3 && !normalized.endsWith('ss')) {
+      normalized = normalized.slice(0, -1);
+    }
+
+    return normalized;
+  }
+
+  private resolveHeuristicProcessTitle(resourceToken: string): {
+    processName: string;
+    category: string;
+  } {
+    for (const candidate of HEURISTIC_PROCESS_TITLES) {
+      if (candidate.pattern.test(resourceToken)) {
+        return {
+          processName: candidate.processName,
+          category: candidate.category,
+        };
+      }
+    }
+
+    const localizedProcessName = deriveLocalizedProcessName(resourceToken);
+    return {
+      processName: localizedProcessName || '通用流程',
+      category: 'general',
+    };
+  }
+
+  private toTitleCase(value: string): string {
+    return value
+      .split(/\s+/)
+      .filter(Boolean)
+      .map((segment) => segment.charAt(0).toUpperCase() + segment.slice(1))
+      .join(' ');
+  }
+
+  private buildHeuristicEndpointName(processName: string, category: Endpoint['category']): string {
+    const names: Partial<Record<Endpoint['category'], string>> = {
+      submit: `提交${processName}`,
+      query: `查询${processName}`,
+      list: `获取${processName}列表`,
+      status_query: `查询${processName}状态`,
+      cancel: `撤回${processName}`,
+      approve: `审批${processName}`,
+      reference_data: `获取${processName}参考数据`,
+    };
+
+    return names[category] || `${processName}${category}`;
+  }
+
+  private buildHeuristicBodyTemplate(operation: OperationSummary): Record<string, string> | undefined {
+    const bodyParams = operation.parameters.filter((parameter) => parameter.in === 'body');
+    if (bodyParams.length === 0) {
+      return undefined;
+    }
+
+    return Object.fromEntries(
+      bodyParams.map((parameter) => [parameter.name, `{{${parameter.name}}}`]),
+    );
+  }
+
+  private mergeHeuristicEndpoint(endpoints: Endpoint[], candidate: Endpoint) {
+    const existingPathIndex = endpoints.findIndex(
+      (endpoint) => endpoint.method === candidate.method && endpoint.path === candidate.path,
+    );
+    if (existingPathIndex >= 0) {
+      endpoints[existingPathIndex] = candidate;
+      return;
+    }
+
+    if (candidate.category === 'submit') {
+      const submitIndex = endpoints.findIndex((endpoint) => endpoint.category === 'submit');
+      if (submitIndex >= 0) {
+        const existingSubmit = endpoints[submitIndex];
+        if (this.scoreHeuristicSubmitEndpoint(candidate) > this.scoreHeuristicSubmitEndpoint(existingSubmit)) {
+          endpoints[submitIndex] = candidate;
+        }
+        return;
+      }
+    }
+
+    endpoints.push(candidate);
+  }
+
+  private scoreHeuristicSubmitEndpoint(endpoint: Pick<Endpoint, 'path' | 'method' | 'parameters'>): number {
+    let score = 0;
+    const hasPathParam = /\/\{[^/]+\}/.test(endpoint.path);
+    const hasBodyParams = (endpoint.parameters || []).some((parameter) => parameter.in === 'body');
+    const signature = `${endpoint.method} ${endpoint.path}`.toLowerCase();
+
+    if (endpoint.method === 'POST') score += 2;
+    if (!hasPathParam) score += 3;
+    if (hasBodyParams) score += 3;
+    if (/(create|apply|new)/.test(signature)) score += 2;
+    if (/(submit|start|launch)/.test(signature)) score += 1;
+    if (hasPathParam) score -= 2;
+
+    return score;
   }
 
   private buildProcessesFromEnrichedForms(doc: any, enrichmentText: string): BusinessProcess[] {
@@ -561,31 +961,46 @@ ${enrichmentPrompt}
         if (!['get', 'post', 'put', 'patch', 'delete'].includes(method)) continue;
         const op = operation as any;
 
-        const parameters: EndpointParameter[] = (op.parameters || []).map((parameter: any) => ({
-          name: parameter.name,
-          in: parameter.in || 'query',
-          type: parameter.schema?.type || parameter.type || 'string',
-          required: parameter.required || false,
-          description: parameter.description || '',
-        }));
+        const parameters: EndpointParameter[] = (op.parameters || []).map((parameter: any) => {
+          const schema = this.resolveSchemaDeep(parameter.schema, doc) as any;
+          return {
+            name: parameter.name,
+            in: parameter.in || 'query',
+            type: this.getSchemaPrimaryType(schema) || parameter.type || 'string',
+            required: parameter.required || false,
+            description: parameter.description || '',
+            defaultValue: schema?.default,
+            format: schema?.format,
+            minimum: typeof schema?.minimum === 'number' ? schema.minimum : undefined,
+            minItems: typeof schema?.minItems === 'number' ? schema.minItems : undefined,
+            enumValues: Array.isArray(schema?.enum) ? schema.enum : undefined,
+            schema,
+          };
+        });
 
         let requestBodySchema = op.requestBody?.content?.['application/json']?.schema;
         if (!requestBodySchema && op.requestBody?.content?.['application/json']) {
           requestBodySchema = op.requestBody.content['application/json'];
         }
-        requestBodySchema = this.resolveRef(requestBodySchema, doc);
+        requestBodySchema = this.resolveSchemaDeep(requestBodySchema, doc);
 
         const bodyProps = requestBodySchema?.properties;
         const bodyRequired = requestBodySchema?.required || [];
         if (bodyProps) {
           for (const [name, prop] of Object.entries(bodyProps)) {
-            const resolved = this.resolveRef(prop, doc) as any;
+            const resolved = this.resolveSchemaDeep(prop, doc) as any;
             parameters.push({
               name,
               in: 'body',
-              type: resolved?.type || 'string',
+              type: this.getSchemaPrimaryType(resolved) || 'string',
               required: bodyRequired.includes(name),
               description: resolved?.description || '',
+              defaultValue: resolved?.default,
+              format: resolved?.format,
+              minimum: typeof resolved?.minimum === 'number' ? resolved.minimum : undefined,
+              minItems: typeof resolved?.minItems === 'number' ? resolved.minItems : undefined,
+              enumValues: Array.isArray(resolved?.enum) ? resolved.enum : undefined,
+              schema: resolved,
             });
           }
         }
@@ -691,10 +1106,19 @@ ${enrichmentPrompt}
     responseSchema: any,
     category?: Endpoint['category'],
   ): Record<string, string> {
+    if (!responseSchema) {
+      return {};
+    }
+
+    const schemaType = this.getSchemaPrimaryType(responseSchema);
+    if (schemaType === 'array') {
+      return {};
+    }
+
     const properties = responseSchema?.properties || {};
     const propertyKeys = Object.keys(properties);
     if (propertyKeys.length === 0) {
-      return { success: 'success', data: 'data', message: 'message' };
+      return {};
     }
 
     const successKey = ['success', 'ok', 'status', 'code', 'message']
@@ -709,9 +1133,40 @@ ${enrichmentPrompt}
     if (propertyKeys.includes('message')) mapping.message = 'message';
     if (category === 'submit' && dataKey) mapping.id = `${dataKey}.id`;
 
-    return Object.keys(mapping).length > 0
-      ? mapping
-      : { success: 'success', data: 'data', message: 'message' };
+    return mapping;
+  }
+
+  private getSchemaPrimaryType(schema: any): string | undefined {
+    if (!schema || typeof schema !== 'object') {
+      return undefined;
+    }
+
+    if (typeof schema.type === 'string') {
+      return schema.type;
+    }
+
+    if (Array.isArray(schema.type)) {
+      const candidate = schema.type.find((value: unknown) => typeof value === 'string' && value !== 'null');
+      if (typeof candidate === 'string') {
+        return candidate;
+      }
+    }
+
+    for (const key of ['anyOf', 'oneOf', 'allOf'] as const) {
+      const variants = schema[key];
+      if (!Array.isArray(variants)) {
+        continue;
+      }
+
+      for (const variant of variants) {
+        const candidate = this.getSchemaPrimaryType(this.resolveRef(variant, schema));
+        if (candidate) {
+          return candidate;
+        }
+      }
+    }
+
+    return undefined;
   }
 
   private isGenericFormSubmit(operation: OperationSummary): boolean {
@@ -839,6 +1294,48 @@ ${enrichmentPrompt}
       if (resolved === undefined) return schema;
     }
     return resolved;
+  }
+
+  private resolveSchemaDeep(schema: any, doc: any, seen = new Set<string>()): any {
+    if (!schema || typeof schema !== 'object') {
+      return schema;
+    }
+
+    const resolved = this.resolveRef(schema, doc);
+    if (!resolved || typeof resolved !== 'object') {
+      return resolved;
+    }
+
+    const refKey = typeof schema?.$ref === 'string' ? schema.$ref : undefined;
+    if (refKey) {
+      if (seen.has(refKey)) {
+        return resolved;
+      }
+      seen.add(refKey);
+    }
+
+    if (Array.isArray(resolved)) {
+      return resolved.map((item) => this.resolveSchemaDeep(item, doc, new Set(seen)));
+    }
+
+    const clone: Record<string, any> = { ...resolved };
+    if (clone.properties && typeof clone.properties === 'object') {
+      clone.properties = Object.fromEntries(
+        Object.entries(clone.properties).map(([key, value]) => [key, this.resolveSchemaDeep(value, doc, new Set(seen))]),
+      );
+    }
+
+    if (clone.items) {
+      clone.items = this.resolveSchemaDeep(clone.items, doc, new Set(seen));
+    }
+
+    for (const key of ['anyOf', 'oneOf', 'allOf'] as const) {
+      if (Array.isArray(clone[key])) {
+        clone[key] = clone[key].map((item: any) => this.resolveSchemaDeep(item, doc, new Set(seen)));
+      }
+    }
+
+    return clone;
   }
 
   /**

@@ -1,7 +1,8 @@
 'use client';
 
 import { useState, useEffect, useRef } from 'react';
-import { useRouter } from 'next/navigation';
+import { usePathname, useRouter } from 'next/navigation';
+import { clearClientAuth, hasClientSession } from '../lib/client-auth';
 
 export default function UserHeader() {
   const [displayName, setDisplayName] = useState('');
@@ -10,25 +11,29 @@ export default function UserHeader() {
   const [showMenu, setShowMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
+  const pathname = usePathname();
 
   useEffect(() => {
+    if (pathname === '/login') return;
+
     const name = localStorage.getItem('displayName') || '';
     const rolesStr = localStorage.getItem('roles');
     const userId = localStorage.getItem('userId');
 
-    if (!userId) {
-      router.push('/login');
+    if (!hasClientSession()) {
+      router.replace('/login');
       return;
     }
 
-    setDisplayName(name || userId);
-    setInitial((name || userId).charAt(0).toUpperCase());
+    const fallbackName = userId || 'User';
+    setDisplayName(name || fallbackName);
+    setInitial((name || fallbackName).charAt(0).toUpperCase());
     try {
       setRoles(rolesStr ? JSON.parse(rolesStr) : ['user']);
     } catch {
       setRoles(['user']);
     }
-  }, [router]);
+  }, [router, pathname]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -40,16 +45,12 @@ export default function UserHeader() {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
+  if (pathname === '/login') {
+    return null;
+  }
+
   const handleLogout = () => {
-    localStorage.removeItem('userId');
-    localStorage.removeItem('username');
-    localStorage.removeItem('displayName');
-    localStorage.removeItem('roles');
-    localStorage.removeItem('tenantId');
-    document.cookie = 'roles=;path=/;max-age=0';
-    document.cookie = 'userId=;path=/;max-age=0';
-    document.cookie = 'tenantId=;path=/;max-age=0';
-    document.cookie = 'displayName=;path=/;max-age=0';
+    clearClientAuth();
     window.location.href = '/login';
   };
 

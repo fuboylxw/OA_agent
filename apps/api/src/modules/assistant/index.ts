@@ -7,6 +7,9 @@
 export * from './agents/intent.agent';
 export * from './agents/flow.agent';
 export * from './agents/form.agent';
+export * from './agents/task-plan.agent';
+export * from './delivery-capability.router';
+export * from './context/context.manager';
 
 // 服务和控制器
 export * from './assistant.service';

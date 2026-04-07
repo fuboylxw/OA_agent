@@ -26,17 +26,26 @@ RUN pnpm build
 # Production stage
 FROM node:20-alpine AS production
 
-RUN npm install -g pnpm@8.15.0
+RUN apk add --no-cache dumb-init
 
 WORKDIR /app
 
-# Copy built files
-COPY --from=base /app/node_modules ./node_modules
-COPY --from=base /app/apps/api/dist ./apps/api/dist
-COPY --from=base /app/apps/api/node_modules ./apps/api/node_modules
-COPY --from=base /app/packages ./packages
-COPY --from=base /app/prisma ./prisma
-COPY --from=base /app/apps/api/package.json ./apps/api/
+# Create non-root user
+RUN addgroup -g 1001 -S appgroup && \
+    adduser -S appuser -u 1001 -G appgroup
 
-# Run migrations on startup
-CMD cd apps/api && pnpm prisma migrate deploy && node dist/main.js
+# Copy built files
+COPY --from=base --chown=appuser:appgroup /app/node_modules ./node_modules
+COPY --from=base --chown=appuser:appgroup /app/apps/api/dist ./apps/api/dist
+COPY --from=base --chown=appuser:appgroup /app/apps/api/node_modules ./apps/api/node_modules
+COPY --from=base --chown=appuser:appgroup /app/packages ./packages
+COPY --from=base --chown=appuser:appgroup /app/prisma ./prisma
+COPY --from=base --chown=appuser:appgroup /app/apps/api/package.json ./apps/api/
+
+USER appuser
+
+EXPOSE 3001
+
+# Use dumb-init for proper signal handling (graceful shutdown)
+ENTRYPOINT ["dumb-init", "--"]
+CMD ["sh", "-c", "cd apps/api && npx prisma migrate deploy && node dist/main.js"]

@@ -1,6 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { PrismaService } from '../common/prisma.service';
 import { createHash } from 'crypto';
+import {
+  normalizeProcessName,
+  resolveAssistantFieldPresentation,
+} from '@uniflow/shared-types';
 import {
   IdentifiedWorkflow,
   DetectedSyncCapabilities,
@@ -35,18 +39,36 @@ export class MCPGeneratorService {
     // 获取 connector baseUrl（如果调用方未传入）
     let resolvedBaseUrl = baseUrl;
     if (!resolvedBaseUrl) {
-      const connector = await this.prisma.connector.findUnique({
-        where: { id: connectorId },
-        select: { baseUrl: true },
+      const connector = await this.prisma.connector.findFirst({
+        where: {
+          id: connectorId,
+          tenantId,
+        },
+        select: {
+          baseUrl: true,
+        },
       });
-      resolvedBaseUrl = connector?.baseUrl || '';
+
+      if (!connector) {
+        throw new NotFoundException('Connector not found');
+      }
+
+      resolvedBaseUrl = connector.baseUrl;
     }
 
     // 1. 为每个 workflow 的每个 endpoint 生成 MCPTool
     for (const workflow of workflows) {
-      for (const wep of workflow.endpoints) {
+      const normalizedWorkflow: IdentifiedWorkflow = {
+        ...workflow,
+        processName: normalizeProcessName({
+          processName: workflow.processName,
+          processCode: workflow.processCode,
+        }),
+      };
+
+      for (const wep of normalizedWorkflow.endpoints) {
         const toolName = this.uniqueToolName(
-          `${workflow.processCode}_${wep.role}`,
+          `${normalizedWorkflow.processCode}_${wep.role}`,
           usedToolNames,
         );
 
@@ -54,7 +76,7 @@ export class MCPGeneratorService {
           tenantId,
           connectorId,
           toolName,
-          workflow,
+          normalizedWorkflow,
           wep,
           resolvedBaseUrl,
         );
@@ -73,12 +95,12 @@ export class MCPGeneratorService {
       const template = await this.createProcessTemplate(
         tenantId,
         connectorId,
-        workflow,
+        normalizedWorkflow,
       );
       processTemplates.push({
-        processCode: workflow.processCode,
-        processName: workflow.processName,
-        category: workflow.category,
+        processCode: normalizedWorkflow.processCode,
+        processName: normalizedWorkflow.processName,
+        category: normalizedWorkflow.category,
         templateId: template.id,
       });
     }
@@ -97,8 +119,11 @@ export class MCPGeneratorService {
     const syncStrategy = this.determineSyncStrategy(generatedTools);
 
     // 4. 更新 connector 的 syncStrategy
-    await this.prisma.connector.update({
-      where: { id: connectorId },
+    await this.prisma.connector.updateMany({
+      where: {
+        id: connectorId,
+        tenantId,
+      },
       data: { syncStrategy: syncStrategy as any },
     });
 
@@ -143,7 +168,7 @@ export class MCPGeneratorService {
         tenantId,
         connectorId,
         toolName,
-        toolDescription: `${workflow.processName} — ${ep.summary}`,
+        toolDescription: `${workflow.processName} - ${ep.summary}`,
         toolSchema,
         apiEndpoint: fullUrl,
         httpMethod: ep.method,
@@ -162,7 +187,7 @@ export class MCPGeneratorService {
         testOutput: null,
       },
       update: {
-        toolDescription: `${workflow.processName} — ${ep.summary}`,
+        toolDescription: `${workflow.processName} - ${ep.summary}`,
         toolSchema,
         apiEndpoint: fullUrl,
         httpMethod: ep.method,
@@ -609,10 +634,16 @@ export class MCPGeneratorService {
       for (const p of this.extractAllParams(wep.endpoint)) {
         if (seen.has(p.name)) continue;
         seen.add(p.name);
-        fields.push({
+        const presentation = resolveAssistantFieldPresentation({
           key: p.name,
           label: p.description || p.name,
           type: this.mapFieldType(p.type),
+          processCode: workflow.processCode,
+        });
+        fields.push({
+          key: p.name,
+          label: presentation.label,
+          type: presentation.type,
           required: p.required,
         });
       }

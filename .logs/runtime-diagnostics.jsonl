@@ -1,1 +1,0 @@
-{"id":"e0b9497e-1437-4d51-8dd5-e4cb00c4667b","timestamp":"2026-03-13T09:56:12.466Z","source":"manual-test","category":"system","eventType":"runtime_error","level":"error","scope":"manual.logger.test","message":"logger smoke test","data":{"ok":true},"pid":98015,"hostname":"liuxingweideMacBook-Pro.local"}

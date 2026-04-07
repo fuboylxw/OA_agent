@@ -1,5 +1,6 @@
 export enum ChatProcessStatus {
   INITIALIZED = 'initialized',
+  AUTH_REQUIRED = 'auth_required',
   PARAMETER_COLLECTION = 'parameter_collection',
   PENDING_CONFIRMATION = 'pending_confirmation',
   EXECUTING = 'executing',
@@ -14,6 +15,7 @@ export type ReworkHint = 'supplement' | 'modify' | 'unknown';
 
 export function requiresUserAction(status?: ChatProcessStatus | null) {
   return [
+    ChatProcessStatus.AUTH_REQUIRED,
     ChatProcessStatus.PARAMETER_COLLECTION,
     ChatProcessStatus.PENDING_CONFIRMATION,
     ChatProcessStatus.REWORK_REQUIRED,

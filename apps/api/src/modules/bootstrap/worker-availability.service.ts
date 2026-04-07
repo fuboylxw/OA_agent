@@ -12,6 +12,7 @@ import {
 } from '@uniflow/shared-types';
 
 type QueueJobCounts = Awaited<ReturnType<Queue['getJobCounts']>>;
+const DEFAULT_HEALTH_TIMEOUT_MS = 2000;
 
 type BootstrapWorkerStatus = {
   available: boolean;
@@ -25,6 +26,7 @@ type BootstrapWorkerStatus = {
 @Injectable()
 export class WorkerAvailabilityService {
   private readonly logger = new Logger(WorkerAvailabilityService.name);
+  private readonly healthTimeoutMs = this.resolveHealthTimeoutMs();
 
   constructor(
     @InjectQueue('bootstrap') private readonly bootstrapQueue: Queue,
@@ -43,10 +45,19 @@ export class WorkerAvailabilityService {
 
   async getBootstrapWorkerStatus(): Promise<BootstrapWorkerStatus> {
     try {
-      await this.bootstrapQueue.isReady();
+      await this.withTimeout(
+        this.bootstrapQueue.isReady(),
+        'bootstrap queue readiness',
+      );
       const [rawHeartbeat, queueCounts] = await Promise.all([
-        this.bootstrapQueue.client.get(BOOTSTRAP_WORKER_HEARTBEAT_KEY),
-        this.bootstrapQueue.getJobCounts(),
+        this.withTimeout(
+          this.bootstrapQueue.client.get(BOOTSTRAP_WORKER_HEARTBEAT_KEY),
+          'bootstrap worker heartbeat',
+        ),
+        this.withTimeout(
+          this.bootstrapQueue.getJobCounts(),
+          'bootstrap queue counts',
+        ),
       ]);
 
       if (!rawHeartbeat) {
@@ -99,6 +110,37 @@ export class WorkerAvailabilityService {
         queue: null,
         reason: 'queue_unreachable',
       };
+    }
+  }
+
+  private resolveHealthTimeoutMs() {
+    const rawValue = Number(process.env.BOOTSTRAP_QUEUE_HEALTH_TIMEOUT_MS);
+    if (Number.isFinite(rawValue) && rawValue > 0) {
+      return rawValue;
+    }
+
+    return DEFAULT_HEALTH_TIMEOUT_MS;
+  }
+
+  private async withTimeout<T>(promise: Promise<T>, operation: string): Promise<T> {
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_resolve, reject) => {
+          timeoutHandle = setTimeout(() => {
+            reject(
+              new Error(
+                `${operation} timed out after ${this.healthTimeoutMs}ms`,
+              ),
+            );
+          }, this.healthTimeoutMs);
+        }),
+      ]);
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
     }
   }
 }

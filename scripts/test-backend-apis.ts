@@ -2,10 +2,11 @@ import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
 import { PrismaClient } from '@prisma/client';
+import { readEnv, resolveApiBaseUrl } from './lib/api-config';
 
-const API_BASE_URL = 'http://localhost:3001/api/v1';
-const TEST_TENANT_CODE = 'test-tenant';
-const TEST_CONNECTOR_NAME = 'test-connector';
+const API_BASE_URL = resolveApiBaseUrl();
+const TEST_TENANT_CODE = readEnv('TEST_TENANT_CODE') || 'test-tenant';
+const TEST_CONNECTOR_NAME = readEnv('TEST_CONNECTOR_NAME') || 'test-connector';
 
 const prisma = new PrismaClient();
 let testTenantId = '';

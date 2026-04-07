@@ -1,4 +1,4 @@
-import { calculateOCL } from '../ocl-calculator';
+import { calculateOCL } from './ocl-calculator';
 import { OCLLevel } from '@uniflow/shared-types';
 
 describe('OCL Calculator', () => {

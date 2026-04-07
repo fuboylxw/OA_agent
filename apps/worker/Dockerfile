@@ -16,14 +16,22 @@ RUN pnpm build
 
 FROM node:20-alpine AS production
 
-RUN npm install -g pnpm@8.15.0
+RUN apk add --no-cache dumb-init
 
 WORKDIR /app
 
-COPY --from=base /app/node_modules ./node_modules
-COPY --from=base /app/apps/worker/dist ./apps/worker/dist
-COPY --from=base /app/apps/worker/node_modules ./apps/worker/node_modules
-COPY --from=base /app/packages ./packages
-COPY --from=base /app/apps/worker/package.json ./apps/worker/
+# Create non-root user
+RUN addgroup -g 1001 -S appgroup && \
+    adduser -S appuser -u 1001 -G appgroup
 
+COPY --from=base --chown=appuser:appgroup /app/node_modules ./node_modules
+COPY --from=base --chown=appuser:appgroup /app/apps/worker/dist ./apps/worker/dist
+COPY --from=base --chown=appuser:appgroup /app/apps/worker/node_modules ./apps/worker/node_modules
+COPY --from=base --chown=appuser:appgroup /app/packages ./packages
+COPY --from=base --chown=appuser:appgroup /app/apps/worker/package.json ./apps/worker/
+
+USER appuser
+
+# Use dumb-init for proper signal handling (graceful shutdown)
+ENTRYPOINT ["dumb-init", "--"]
 CMD ["node", "apps/worker/dist/main.js"]

@@ -4,12 +4,14 @@ import { StatusService } from './status.service';
 import { PrismaService } from '../common/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { AdapterRuntimeService } from '../adapter-runtime/adapter-runtime.service';
+import { ChatSessionProcessService } from '../common/chat-session-process.service';
 
 describe('StatusService Integration', () => {
   let service: StatusService;
 
   const mockPrisma = {
     submission: {
+      findFirst: jest.fn(),
       findUnique: jest.fn(),
       update: jest.fn(),
       findMany: jest.fn(),
@@ -33,6 +35,10 @@ describe('StatusService Integration', () => {
     createAdapterForConnector: jest.fn(),
   };
 
+  const mockChatSessionProcessService = {
+    syncSubmissionStatusToSession: jest.fn(),
+  };
+
   beforeEach(async () => {
     jest.clearAllMocks();
 
@@ -40,6 +46,7 @@ describe('StatusService Integration', () => {
       providers: [
         StatusService,
         { provide: PrismaService, useValue: mockPrisma },
+        { provide: ChatSessionProcessService, useValue: mockChatSessionProcessService },
         { provide: AuditService, useValue: mockAuditService },
         { provide: AdapterRuntimeService, useValue: mockAdapterRuntimeService },
       ],
@@ -49,7 +56,7 @@ describe('StatusService Integration', () => {
   });
 
   it('polls OA status, persists status/event records, and returns timeline with the latest polled state', async () => {
-    mockPrisma.submission.findUnique.mockResolvedValue({
+    mockPrisma.submission.findFirst.mockResolvedValue({
       id: 'submission-1',
       tenantId: 'tenant-1',
       userId: 'user-1',
@@ -72,7 +79,7 @@ describe('StatusService Integration', () => {
       }),
     });
 
-    const result = await service.queryStatus('submission-1', 'trace-1');
+    const result = await service.queryStatus('submission-1', 'tenant-1', 'trace-1');
 
     expect(mockPrisma.submissionStatus.create).toHaveBeenCalledWith({
       data: {
@@ -139,7 +146,7 @@ describe('StatusService Integration', () => {
   });
 
   it('swallows duplicate polled events and skips persisting duplicate status records', async () => {
-    mockPrisma.submission.findUnique.mockResolvedValue({
+    mockPrisma.submission.findFirst.mockResolvedValue({
       id: 'submission-1',
       tenantId: 'tenant-1',
       userId: 'user-1',
@@ -168,7 +175,7 @@ describe('StatusService Integration', () => {
       }),
     );
 
-    const result = await service.queryStatus('submission-1', 'trace-1');
+    const result = await service.queryStatus('submission-1', 'tenant-1', 'trace-1');
 
     expect(mockPrisma.submissionStatus.create).not.toHaveBeenCalled();
     expect(mockPrisma.submission.update).toHaveBeenCalledWith({

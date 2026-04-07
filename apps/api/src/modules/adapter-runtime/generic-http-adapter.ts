@@ -15,7 +15,11 @@ import type {
   SupplementResult,
 } from '@uniflow/oa-adapters';
 import type { AdapterLifecycle } from '@uniflow/oa-adapters';
-import { classifyProbeStatus, type ProbeStatus } from '@uniflow/shared-types';
+import {
+  classifyProbeStatus,
+  resolveAssistantFieldPresentation,
+  type ProbeStatus,
+} from '@uniflow/shared-types';
 
 // ============================================================
 // MCPTool 端点定义（从数据库读取后的运行时结构）
@@ -38,6 +42,7 @@ export interface GenericHttpAdapterConfig {
   baseUrl: string;
   authType: string;
   authConfig: Record<string, any>;
+  flows?: Array<{ flowCode: string; flowName: string }>;
   oaVendor?: string;
   oaVersion?: string;
   oaType: 'openapi' | 'form-page' | 'hybrid';
@@ -74,6 +79,8 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
   private endpointsByCategory: Map<string, EndpointDef[]> = new Map();
   private endpointsByFlowAndCategory: Map<string, EndpointDef> = new Map();
   private cookieSession?: string;
+  private readonly requestedFlowCodes: Set<string>;
+  private readonly preferredFlowCode?: string;
 
   constructor(
     private readonly config: GenericHttpAdapterConfig,
@@ -84,12 +91,19 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
       timeout: 30000,
       headers: { 'Content-Type': 'application/json' },
     });
+    this.requestedFlowCodes = new Set((config.flows || []).map((flow) => flow.flowCode).filter(Boolean));
+    this.preferredFlowCode = config.flows?.length === 1 ? config.flows[0].flowCode : undefined;
   }
 
   // ── Lifecycle ─────────────────────────────────────────────
 
   async init(): Promise<void> {
-    this.endpoints = await this.endpointLoader.loadEndpoints(this.config.connectorId);
+    const loadedEndpoints = await this.endpointLoader.loadEndpoints(this.config.connectorId);
+    this.endpoints = this.requestedFlowCodes.size === 0
+      ? loadedEndpoints
+      : loadedEndpoints.filter((endpoint) =>
+          !endpoint.flowCode || this.requestedFlowCodes.has(endpoint.flowCode),
+        );
     this.indexEndpoints();
 
     // Pre-authenticate for cookie-based auth
@@ -109,6 +123,15 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
     if (this.config.authType === 'cookie') {
       this.cookieSession = undefined;
       await this.authenticateCookie();
+      return;
+    }
+
+    if (
+      (this.config.authType === 'bearer' || this.config.authType === 'oauth2')
+      && this.config.authConfig.username
+      && this.config.authConfig.password
+    ) {
+      await this.authenticateToken();
     }
   }
 
@@ -176,13 +199,18 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
         ...request.formData,
         attachments: this.serializeAttachments(request.attachments),
       }, endpoint.paramMapping);
-      const response = await this.executeEndpoint(endpoint, mappedParams);
+      const response = await this.executeEndpoint(endpoint, this.normalizeMappedParams(mappedParams));
       const mapped = this.applyResponseMapping(response, endpoint.responseMapping);
 
       return {
         success: mapped.success !== false,
-        submissionId: mapped.id || mapped.submissionId || mapped.data?.id,
-        metadata: mapped,
+        submissionId: this.normalizeSubmissionId(mapped.id || mapped.submissionId || mapped.data?.id),
+        metadata: {
+          ...mapped,
+          deliveryPath: 'api',
+          flowCode: request.flowCode,
+          connectorId: this.config.connectorId,
+        },
       };
     } catch (error: any) {
       return { success: false, errorMessage: error.message };
@@ -190,21 +218,21 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
   }
 
   async queryStatus(submissionId: string): Promise<StatusResult> {
-    const endpoint = this.findFirstByCategory('query');
+    const endpoint = (this.preferredFlowCode
+      ? this.findEndpoint(this.preferredFlowCode, 'query')
+      : undefined)
+      || this.findFirstByCategory('query');
 
     if (!endpoint) {
       return { status: 'error', statusDetail: { error: 'No query endpoint configured' } };
     }
 
     try {
-      const params = { submissionId, id: submissionId };
-      const apiPath = this.interpolatePath(endpoint.apiEndpoint, params);
-      const mappedParams = this.applyParamMapping(params, endpoint.paramMapping);
+      const params = this.buildSubmissionIdentifierParams(submissionId);
+      const mappedParams = this.normalizeMappedParams(this.applyParamMapping(params, endpoint.paramMapping));
+      const apiPath = this.interpolatePath(endpoint.apiEndpoint, mappedParams);
 
-      const response = await this.executeEndpoint(
-        { ...endpoint, apiEndpoint: apiPath },
-        mappedParams,
-      );
+      const response = await this.executeEndpoint({ ...endpoint, apiEndpoint: apiPath }, mappedParams);
       const mapped = this.applyResponseMapping(response, endpoint.responseMapping);
 
       return {
@@ -253,9 +281,10 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
     }
 
     try {
-      const params = { submissionId, id: submissionId };
-      const apiPath = this.interpolatePath(endpoint.apiEndpoint, params);
-      await this.executeEndpoint({ ...endpoint, apiEndpoint: apiPath }, params);
+      const params = this.buildSubmissionIdentifierParams(submissionId);
+      const mappedParams = this.normalizeMappedParams(this.applyParamMapping(params, endpoint.paramMapping));
+      const apiPath = this.interpolatePath(endpoint.apiEndpoint, mappedParams);
+      await this.executeEndpoint({ ...endpoint, apiEndpoint: apiPath }, mappedParams);
       return { success: true, message: 'Cancelled successfully' };
     } catch (error: any) {
       return { success: false, message: error.message };
@@ -269,9 +298,10 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
     }
 
     try {
-      const params = { submissionId, id: submissionId };
-      const apiPath = this.interpolatePath(endpoint.apiEndpoint, params);
-      await this.executeEndpoint({ ...endpoint, apiEndpoint: apiPath }, params);
+      const params = this.buildSubmissionIdentifierParams(submissionId);
+      const mappedParams = this.normalizeMappedParams(this.applyParamMapping(params, endpoint.paramMapping));
+      const apiPath = this.interpolatePath(endpoint.apiEndpoint, mappedParams);
+      await this.executeEndpoint({ ...endpoint, apiEndpoint: apiPath }, mappedParams);
       return { success: true, message: 'Urge sent successfully' };
     } catch (error: any) {
       return { success: false, message: error.message };
@@ -290,12 +320,13 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
 
     try {
       const params = this.applyParamMapping({
-        submissionId: request.submissionId,
-        id: request.submissionId,
+        ...this.buildSubmissionIdentifierParams(request.submissionId),
         ...request.supplementData,
         attachments: this.serializeAttachments(request.attachments),
       }, endpoint.paramMapping);
-      await this.executeEndpoint(endpoint, params);
+      const normalizedParams = this.normalizeMappedParams(params);
+      const apiPath = this.interpolatePath(endpoint.apiEndpoint, normalizedParams);
+      await this.executeEndpoint({ ...endpoint, apiEndpoint: apiPath }, normalizedParams);
       return { success: true, message: 'Supplement submitted successfully' };
     } catch (error: any) {
       return { success: false, message: error.message };
@@ -330,11 +361,15 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
       const response = await this.client.request(config);
       return response.data;
     } catch (error: any) {
-      // Retry on 401 for cookie auth
-      if (error.response?.status === 401 && this.config.authType === 'cookie') {
+      // Retry once when auth can be refreshed locally.
+      if (
+        [401, 403].includes(Number(error.response?.status))
+        && ['cookie', 'bearer', 'oauth2'].includes(this.config.authType)
+      ) {
         await this.refreshAuth();
-        if (this.cookieSession) {
-          config.headers = { ...config.headers, Cookie: this.cookieSession };
+        config.headers = { ...this.buildAuthHeaders(), ...(endpoint.headers || {}) };
+        if (this.cookieSession && config.headers) {
+          (config.headers as Record<string, string>)['Cookie'] = this.cookieSession;
         }
         const retryResponse = await this.client.request(config);
         return retryResponse.data;
@@ -360,13 +395,21 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
         }
         break;
       case 'basic':
-        headers['Authorization'] = `Basic ${Buffer.from(`${auth.username}:${auth.password}`).toString('base64')}`;
-        break;
-      case 'oauth2':
-        if (auth.accessToken) {
-          headers['Authorization'] = `Bearer ${auth.accessToken}`;
+        if (auth.username != null && auth.password != null) {
+          headers['Authorization'] = `Basic ${Buffer.from(`${auth.username}:${auth.password}`).toString('base64')}`;
         }
         break;
+      case 'oauth2':
+      case 'bearer': {
+        const token = auth.accessToken || auth.token;
+        if (token) {
+          const headerName = auth.headerName || 'Authorization';
+          const defaultPrefix = headerName.toLowerCase() === 'authorization' ? 'Bearer ' : '';
+          const headerPrefix = auth.headerPrefix ?? defaultPrefix;
+          headers[headerName] = `${headerPrefix}${token}`;
+        }
+        break;
+      }
       // cookie auth handled via cookieSession
     }
 
@@ -389,6 +432,55 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
     if (setCookies && setCookies.length > 0) {
       this.cookieSession = setCookies.map((c: string) => c.split(';')[0]).join('; ');
     }
+  }
+
+  private async authenticateToken(): Promise<void> {
+    const auth = this.config.authConfig;
+    const loginPath = auth.loginPath || '/api/auth/login';
+
+    const response = await this.client.post(loginPath, {
+      username: auth.username,
+      password: auth.password,
+    }, {
+      headers: { 'Content-Type': 'application/json' },
+      validateStatus: () => true,
+    });
+
+    if (response.status >= 400) {
+      throw new Error(`Token auth login failed with status ${response.status}`);
+    }
+
+    const token = this.extractAuthToken(response.data);
+    if (!token) {
+      throw new Error('Token auth login succeeded but no token was returned');
+    }
+
+    this.config.authConfig.token = token;
+    this.config.authConfig.accessToken = token;
+  }
+
+  private extractAuthToken(body: any): string | undefined {
+    if (!body || typeof body !== 'object') {
+      return undefined;
+    }
+
+    const directFields = ['token', 'access_token', 'accessToken', 'sessionId', 'session_id', 'jwt'];
+    for (const field of directFields) {
+      if (typeof body[field] === 'string' && body[field].length > 0) {
+        return body[field];
+      }
+    }
+
+    const nested = body.data || body.result || body.response;
+    if (nested && typeof nested === 'object') {
+      for (const field of directFields) {
+        if (typeof nested[field] === 'string' && nested[field].length > 0) {
+          return nested[field];
+        }
+      }
+    }
+
+    return undefined;
   }
 
   // ── Private: mapping ──────────────────────────────────────
@@ -421,6 +513,30 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
       }
     }
     return result;
+  }
+
+  private normalizeMappedParams(params: Record<string, any>): Record<string, any> {
+    return Object.fromEntries(
+      Object.entries(params).map(([key, value]) => [key, this.normalizeParamValue(key, value)]),
+    );
+  }
+
+  private normalizeParamValue(key: string, value: any): any {
+    const semantic = resolveAssistantFieldPresentation({ key, label: key }).semanticKind;
+
+    if (semantic === 'attachment' && Array.isArray(value) && value.length === 0) {
+      return undefined;
+    }
+
+    if (
+      (semantic === 'start_time' || semantic === 'end_time')
+      && typeof value === 'string'
+      && /^\d{4}-\d{2}-\d{2}$/.test(value)
+    ) {
+      return `${value}${semantic === 'end_time' ? 'T18:00:00Z' : 'T09:00:00Z'}`;
+    }
+
+    return value;
   }
 
   private getNestedValue(obj: any, path: string): any {
@@ -466,7 +582,11 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
   }
 
   private serializeAttachments(attachments?: SubmitRequest['attachments']) {
-    return (attachments || []).map((item) => ({
+    if (!attachments || attachments.length === 0) {
+      return undefined;
+    }
+
+    return attachments.map((item) => ({
       fileName: item.filename,
       filename: item.filename,
       mimeType: 'application/octet-stream',
@@ -506,6 +626,15 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
       const value = params[key];
       return value !== undefined ? encodeURIComponent(String(value)) : `{${key}}`;
     });
+  }
+
+  private buildSubmissionIdentifierParams(submissionId: string): Record<string, string> {
+    return {
+      submissionId,
+      id: submissionId,
+      application_id: submissionId,
+      applicationId: submissionId,
+    };
   }
 
   // ── Public: endpoint probing (for validation) ───────────────
@@ -585,5 +714,22 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
    */
   getLoadedEndpoints(): EndpointDef[] {
     return [...this.endpoints];
+  }
+
+  private normalizeSubmissionId(value: unknown): string | undefined {
+    if (value === null || value === undefined) {
+      return undefined;
+    }
+
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      return trimmed || undefined;
+    }
+
+    if (typeof value === 'number' || typeof value === 'bigint') {
+      return String(value);
+    }
+
+    return undefined;
   }
 }

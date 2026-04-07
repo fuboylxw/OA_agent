@@ -37,7 +37,7 @@ if [ -f .env ]; then
 
             echo "OpenAI Model: $MODEL"
             echo "OpenAI Base URL: $BASE_URL"
-            echo "OpenAI API Key: ${API_KEY:0:10}...${API_KEY: -4}"
+            echo "OpenAI API Key: [configured]"
             echo ""
 
             # Test OpenAI API
@@ -79,7 +79,7 @@ if [ -f .env ]; then
             API_KEY=$(grep ANTHROPIC_API_KEY .env | cut -d'=' -f2)
 
             echo "Anthropic Model: $MODEL"
-            echo "Anthropic API Key: ${API_KEY:0:10}...${API_KEY: -4}"
+            echo "Anthropic API Key: [configured]"
             echo ""
 
             # Test Anthropic API

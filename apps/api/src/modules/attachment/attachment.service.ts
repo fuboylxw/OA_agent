@@ -52,7 +52,7 @@ export class AttachmentService {
           id: assetId,
           tenantId: input.tenantId,
           uploaderId: input.userId,
-          storageType: 'local',
+          storageType: this.storageService.getStorageType(),
           storageKey: persisted.storageKey,
           originalName: file.originalname,
           extension: persisted.extension,
@@ -150,7 +150,7 @@ export class AttachmentService {
     const asset = await this.getAccessibleAsset(attachmentId, tenantId, userId);
     return {
       asset,
-      stream: this.storageService.createStream(asset.storageKey),
+      stream: await this.storageService.createStream(asset.storageKey),
     };
   }
 
@@ -169,7 +169,7 @@ export class AttachmentService {
     return {
       asset,
       storageKey,
-      stream: this.storageService.createStream(storageKey),
+      stream: await this.storageService.createStream(storageKey),
     };
   }
 
@@ -302,7 +302,6 @@ export class AttachmentService {
       return configured.replace(/\/+$/, '');
     }
 
-    const port = process.env.API_PORT || '3001';
-    return `http://localhost:${port}`;
+    return '';
   }
 }

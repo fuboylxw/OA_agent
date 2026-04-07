@@ -10,6 +10,7 @@ import {
   buildStatusEventRemoteId,
   createDeterministicHash,
   mergeDiscoveredFlowUiHints,
+  normalizeProcessName,
   type FlowDiscoverySnapshot,
 } from '@uniflow/shared-types';
 import { PrismaService } from '../services/prisma.service';
@@ -154,6 +155,13 @@ export class SyncProcessor {
     const syncedAt = new Date();
     const adapter = await this.createAdapterForConnector(syncJob.connectorId);
     const discovery = await adapter.discover();
+    const discoveredFlows = discovery.discoveredFlows.map((flow) => ({
+      ...flow,
+      flowName: normalizeProcessName({
+        processName: flow.flowName,
+        processCode: flow.flowCode,
+      }),
+    }));
     const [templates, remoteProcesses] = await Promise.all([
       this.prisma.processTemplate.findMany({
         where: {
@@ -181,7 +189,7 @@ export class SyncProcessor {
       remoteProcesses.map((remoteProcess) => [remoteProcess.remoteProcessId, remoteProcess]),
     );
 
-    for (const flow of discovery.discoveredFlows) {
+    for (const flow of discoveredFlows) {
       const template = templatesByProcessCode.get(flow.flowCode)?.[0];
       const existingRemoteProcess = remoteProcessMap.get(flow.flowCode);
       const sourceHash = this.computeSourceHash(flow);
@@ -305,7 +313,7 @@ export class SyncProcessor {
     return {
       syncJobId: syncJob.id,
       syncDomain: 'schema',
-      discoveredFlows: discovery.discoveredFlows.length,
+      discoveredFlows: discoveredFlows.length,
       processedTemplates,
       remoteProcessesUpserted: processedTemplates,
       driftedTemplates: versionedTemplates,
@@ -608,15 +616,31 @@ export class SyncProcessor {
         'accessToken',
         'refreshToken',
         'secret',
+        'serviceToken',
+        'ticketHeaderValue',
       ]);
-      return {
-        ...(authConfig || {}),
-        ...Object.fromEntries(
-          Object.entries(fallbackAuthConfig as Record<string, any>).filter(([key, value]) =>
-            sensitiveKeys.has(key) && value !== undefined && value !== null && value !== ''
-          ),
+      const authSecrets = Object.fromEntries(
+        Object.entries(fallbackAuthConfig as Record<string, any>).filter(([key, value]) =>
+          sensitiveKeys.has(key) && value !== undefined && value !== null && value !== ''
         ),
-      };
+      );
+      const fallbackPlatformConfig = (fallbackAuthConfig as Record<string, any>).platformConfig;
+      const platformSecrets = fallbackPlatformConfig
+        && typeof fallbackPlatformConfig === 'object'
+        && !Array.isArray(fallbackPlatformConfig)
+        ? Object.fromEntries(
+            Object.entries(fallbackPlatformConfig as Record<string, any>).filter(([key, value]) =>
+              sensitiveKeys.has(key) && value !== undefined && value !== null && value !== ''
+            ),
+          )
+        : null;
+
+      return this.mergeAuthConfig(authConfig || {}, {
+        ...authSecrets,
+        ...(platformSecrets && Object.keys(platformSecrets).length > 0
+          ? { platformConfig: platformSecrets }
+          : {}),
+      });
     }
 
     return authConfig || {};
@@ -630,10 +654,7 @@ export class SyncProcessor {
     try {
       const parsed = JSON.parse(raw);
       if (parsed && typeof parsed === 'object') {
-        return {
-          ...(authConfig || {}),
-          ...parsed,
-        };
+        return this.mergeAuthConfig(authConfig || {}, parsed as Record<string, any>);
       }
     } catch {
       // Fall back to auth type mapping below.
@@ -659,6 +680,30 @@ export class SyncProcessor {
     }
 
     return authConfig || {};
+  }
+
+  private mergeAuthConfig(
+    baseConfig: Record<string, any>,
+    resolvedSecret: Record<string, any>,
+  ) {
+    const merged = {
+      ...baseConfig,
+      ...resolvedSecret,
+    };
+
+    const basePlatformConfig = baseConfig.platformConfig;
+    const secretPlatformConfig = resolvedSecret.platformConfig;
+    if (
+      (basePlatformConfig && typeof basePlatformConfig === 'object' && !Array.isArray(basePlatformConfig))
+      || (secretPlatformConfig && typeof secretPlatformConfig === 'object' && !Array.isArray(secretPlatformConfig))
+    ) {
+      merged.platformConfig = {
+        ...((basePlatformConfig as Record<string, any> | undefined) || {}),
+        ...((secretPlatformConfig as Record<string, any> | undefined) || {}),
+      };
+    }
+
+    return merged;
   }
 
   private buildReferenceItemId(datasetId: string, remoteItemId?: string, itemKey?: string) {
@@ -687,7 +732,7 @@ export class SyncProcessor {
     if (['cancelled', 'canceled', 'revoked'].includes(normalized)) return 'cancelled';
     if (normalized.includes('reject')) return 'failed';
     if (normalized.includes('approve') || normalized.includes('finish') || normalized.includes('complete')) {
-      return 'submitted';
+      return 'approved';
     }
     if (normalized.includes('pending') || normalized.includes('review') || normalized.includes('process')) {
       return 'submitted';

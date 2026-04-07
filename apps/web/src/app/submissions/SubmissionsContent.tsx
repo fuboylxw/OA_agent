@@ -1,9 +1,11 @@
 'use client';
 
 import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import OaFormPreview from '../components/OaFormPreview';
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+import { authFetch } from '../lib/api-client';
+import { withBrowserApiBase } from '../lib/browser-api-base-url';
+import { getClientSessionToken } from '../lib/client-auth';
 
 const STATUS_MAP: Record<string, { label: string; bgClass: string; textClass: string }> = {
   pending: { label: '待处理', bgClass: 'bg-orange-100', textClass: 'text-orange-600' },
@@ -40,12 +42,8 @@ interface Submission {
 
 export default function SubmissionsContent({
   initialSubmissions,
-  tenantId,
-  userId,
 }: {
   initialSubmissions: Submission[];
-  tenantId: string;
-  userId: string;
 }) {
   const [submissions, setSubmissions] = useState<Submission[]>(initialSubmissions);
   const [expandedId, setExpandedId] = useState<string | null>(null);
@@ -70,16 +68,13 @@ export default function SubmissionsContent({
   };
 
   useEffect(() => {
-    if (!tenantId || !userId) return undefined;
-
     let cancelled = false;
 
     const refreshSubmissions = async () => {
       try {
-        const response = await fetch(
-          `${API_URL}/api/v1/submissions?tenantId=${encodeURIComponent(tenantId)}&userId=${encodeURIComponent(userId)}`,
-          { cache: 'no-store' },
-        );
+        const response = await authFetch(withBrowserApiBase('/api/v1/submissions'), {
+          cache: 'no-store',
+        });
         if (!response.ok) return;
         const latest = await response.json();
         if (!cancelled) {
@@ -96,21 +91,55 @@ export default function SubmissionsContent({
       }
     };
 
+    // Fallback polling every 60s (SSE handles real-time updates)
     const intervalId = window.setInterval(() => {
       void refreshSubmissions();
-    }, 15000);
+    }, 60000);
 
     void refreshSubmissions();
     window.addEventListener('focus', handleVisibleRefresh);
     document.addEventListener('visibilitychange', handleVisibleRefresh);
+
+    // SSE: subscribe to real-time status updates
+    const token = getClientSessionToken();
+    let es: EventSource | null = null;
+    if (token) {
+      const sseUrl = withBrowserApiBase(`/api/v1/submissions/events?token=${encodeURIComponent(token)}`);
+      es = new EventSource(sseUrl);
+      es.onmessage = (event) => {
+        try {
+          const data = JSON.parse(event.data) as {
+            submissionId: string;
+            status: string;
+            statusText: string;
+          };
+          if (!cancelled) {
+            setSubmissions((prev) =>
+              prev.map((s) =>
+                s.id === data.submissionId
+                  ? { ...s, status: data.status, statusText: data.statusText }
+                  : s,
+              ),
+            );
+          }
+        } catch {
+          // ignore malformed events
+        }
+      };
+      es.onerror = () => {
+        // Let the browser auto-reconnect by not calling close()
+        // EventSource will automatically attempt to reconnect
+      };
+    }
 
     return () => {
       cancelled = true;
       window.clearInterval(intervalId);
       window.removeEventListener('focus', handleVisibleRefresh);
       document.removeEventListener('visibilitychange', handleVisibleRefresh);
+      es?.close();
     };
-  }, [tenantId, userId]);
+  }, []);
 
   return (
     <main className="h-full overflow-y-auto">
@@ -121,10 +150,10 @@ export default function SubmissionsContent({
             <h1 className="text-2xl font-bold text-gray-900 mb-2">我的申请</h1>
             <p className="text-gray-600">查看和管理您提交的所有申请</p>
           </div>
-          <a href="/chat" className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg text-sm font-medium inline-flex items-center gap-2 transition-colors">
+          <Link href="/chat" className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg text-sm font-medium inline-flex items-center gap-2 transition-colors">
             <i className="fas fa-plus"></i>
             发起新申请
-          </a>
+          </Link>
         </div>
       </div>
 
@@ -279,10 +308,10 @@ export default function SubmissionsContent({
               <i className="fas fa-file-alt text-gray-400 text-2xl"></i>
             </div>
             <p className="text-gray-500 mb-4">暂无申请记录</p>
-            <a href="/chat" className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg text-sm font-medium inline-flex items-center gap-2 transition-colors">
+            <Link href="/chat" className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg text-sm font-medium inline-flex items-center gap-2 transition-colors">
               <i className="fas fa-plus"></i>
               发起新申请
-            </a>
+            </Link>
           </div>
         )}
       </div>

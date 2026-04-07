@@ -1,5 +1,14 @@
 import { FlowAgent } from './flow.agent';
 
+jest.mock('@uniflow/agent-kernel', () => ({
+  LLMClientFactory: {
+    createFromEnv: () => ({
+      chat: jest.fn().mockRejectedValue(new Error('LLM unavailable in test')),
+    }),
+  },
+  LLMMessage: {},
+}));
+
 describe('FlowAgent', () => {
   let agent: FlowAgent;
 

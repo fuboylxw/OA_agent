@@ -1,12 +1,14 @@
-import { Controller, Post, Body, Get, Param, Query, Delete, HttpException, HttpStatus, Logger, UseInterceptors, UploadedFiles } from '@nestjs/common';
+import { Controller, Post, Body, Get, Param, Query, Delete, HttpException, HttpStatus, Logger, UseInterceptors, UploadedFiles, Req } from '@nestjs/common';
 import { ApiTags, ApiOperation, ApiResponse, ApiConsumes } from '@nestjs/swagger';
+import { Throttle } from '@nestjs/throttler';
 import { FilesInterceptor } from '@nestjs/platform-express';
+import type { Request } from 'express';
 import { AssistantService } from './assistant.service';
 import { IsString, IsOptional, IsArray } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
 import { AttachmentService } from '../attachment/attachment.service';
 import { attachmentUploadInterceptorOptions } from '../attachment/attachment-upload.config';
-import { TenantUserResolverService } from '../common/tenant-user-resolver.service';
+import { RequestAuthService } from '../common/request-auth.service';
 
 class ChatAttachment {
   @ApiProperty({ description: '附件ID' })
@@ -86,6 +88,18 @@ class ProcessCardFieldDto {
 
   @ApiProperty({ required: false, description: '是否必填' })
   required?: boolean;
+
+  @ApiProperty({ required: false, description: '字段来源', enum: ['user', 'derived', 'prefill'] })
+  origin?: 'user' | 'derived' | 'prefill';
+
+  @ApiProperty({ required: false, description: '来源标签' })
+  tagLabel?: string;
+
+  @ApiProperty({ required: false, description: '来源标签色调', enum: ['sky', 'amber', 'slate'] })
+  tagTone?: 'sky' | 'amber' | 'slate';
+
+  @ApiProperty({ required: false, description: '字段补充说明' })
+  hint?: string;
 }
 
 class ProcessCardDto {
@@ -118,6 +132,9 @@ class ProcessCardDto {
 
   @ApiProperty({ description: '状态文案' })
   statusText: string;
+
+  @ApiProperty({ required: false, description: '确认摘要' })
+  summary?: string;
 
   @ApiProperty({ required: false, description: '表单原始数据' })
   formData?: Record<string, any>;
@@ -267,9 +284,10 @@ export class AssistantController {
   constructor(
     private readonly assistantService: AssistantService,
     private readonly attachmentService: AttachmentService,
-    private readonly tenantUserResolver: TenantUserResolverService,
+    private readonly requestAuth: RequestAuthService,
   ) {}
 
+  @Throttle({ default: { ttl: 60000, limit: 20 } })
   @Post('chat')
   @ApiOperation({
     summary: '对话工作台 - 发送消息给智能助手',
@@ -288,18 +306,25 @@ export class AssistantController {
     status: 500,
     description: '服务器内部错误'
   })
-  async chat(@Body() dto: ChatDto) {
+  async chat(@Req() req: Request, @Body() dto: ChatDto) {
     try {
-      const tenantId = dto.tenantId || process.env.DEFAULT_TENANT_ID || 'default-tenant';
+      const auth = await this.requestAuth.resolveUser(req, {
+        tenantId: dto.tenantId,
+        userId: dto.userId,
+        allowUserFallback: true,
+      });
 
       return await this.assistantService.chat({
-        tenantId,
-        userId: dto.userId?.trim(),
+        tenantId: auth.tenantId,
+        userId: auth.userId || dto.userId?.trim() || '',
         sessionId: dto.sessionId,
         message: dto.message,
         attachments: dto.attachments,
       });
     } catch (error: any) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
       this.logger.error(`Chat error: ${error.message}`);
 
       // Handle specific errors
@@ -334,19 +359,22 @@ export class AssistantController {
     description: '成功返回会话列表'
   })
   async listSessions(
+    @Req() req: Request,
     @Query('tenantId') tenantId?: string,
     @Query('userId') userId?: string,
   ) {
     try {
-      const resolvedTenantId = tenantId || process.env.DEFAULT_TENANT_ID || 'default-tenant';
-      const resolvedUser = await this.tenantUserResolver.resolve({
-        tenantId: resolvedTenantId,
+      const auth = await this.requestAuth.resolveUser(req, {
+        tenantId,
         userId,
-        allowFallback: true,
+        requireUser: true,
       });
 
-      return await this.assistantService.listSessions(resolvedTenantId, resolvedUser.id);
+      return await this.assistantService.listSessions(auth.tenantId, auth.userId!);
     } catch (error: any) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
       this.logger.error(`listSessions error: ${error.message}`);
       throw new HttpException(
         error.message || 'Failed to list sessions',
@@ -364,10 +392,17 @@ export class AssistantController {
     status: 200,
     description: '成功返回消息列表'
   })
-  async getMessages(@Param('sessionId') sessionId: string) {
+  async getMessages(
+    @Req() req: Request,
+    @Param('sessionId') sessionId: string,
+  ) {
     try {
-      return await this.assistantService.getMessages(sessionId);
+      const auth = await this.requestAuth.resolveUser(req, { requireUser: true });
+      return await this.assistantService.getMessages(sessionId, auth.tenantId, auth.userId!);
     } catch (error: any) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
       this.logger.error(`getMessages error: ${error.message}`);
       throw new HttpException(
         error.message || 'Failed to get messages',
@@ -385,9 +420,13 @@ export class AssistantController {
     status: 200,
     description: '成功删除会话'
   })
-  async deleteSession(@Param('sessionId') sessionId: string) {
+  async deleteSession(
+    @Req() req: Request,
+    @Param('sessionId') sessionId: string,
+  ) {
     try {
-      await this.assistantService.deleteSession(sessionId);
+      const auth = await this.requestAuth.resolveUser(req, { requireUser: true });
+      await this.assistantService.deleteSession(sessionId, auth.tenantId, auth.userId!);
       return { success: true, message: '会话已删除' };
     } catch (error: any) {
       if (error instanceof HttpException) {
@@ -410,11 +449,18 @@ export class AssistantController {
     status: 200,
     description: '成功重置会话'
   })
-  async resetSession(@Param('sessionId') sessionId: string) {
+  async resetSession(
+    @Req() req: Request,
+    @Param('sessionId') sessionId: string,
+  ) {
     try {
-      await this.assistantService.resetSession(sessionId);
+      const auth = await this.requestAuth.resolveUser(req, { requireUser: true });
+      await this.assistantService.resetSession(sessionId, auth.tenantId, auth.userId!);
       return { success: true, message: '会话上下文已重置' };
     } catch (error: any) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
       this.logger.error(`resetSession error: ${error.message}`);
       throw new HttpException(
         error.message || 'Failed to reset session',
@@ -431,6 +477,7 @@ export class AssistantController {
   @ApiConsumes('multipart/form-data')
   @UseInterceptors(FilesInterceptor('files', 10, attachmentUploadInterceptorOptions))
   async uploadFiles(
+    @Req() req: Request,
     @Query('tenantId') tenantId: string,
     @Query('userId') userId: string,
     @Query('sessionId') sessionId: string | undefined,
@@ -438,15 +485,15 @@ export class AssistantController {
     @Query('bindScope') bindScope: 'field' | 'general' | undefined,
     @UploadedFiles() files: Express.Multer.File[],
   ) {
-    const resolvedUser = await this.tenantUserResolver.resolve({
+    const auth = await this.requestAuth.resolveUser(req, {
       tenantId,
       userId,
-      allowFallback: false,
+      requireUser: true,
     });
 
     return this.attachmentService.upload({
-      tenantId,
-      userId: resolvedUser.id,
+      tenantId: auth.tenantId,
+      userId: auth.userId!,
       sessionId,
       fieldKey,
       bindScope,

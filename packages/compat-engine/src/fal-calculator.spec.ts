@@ -1,4 +1,4 @@
-import { calculateFAL } from '../fal-calculator';
+import { calculateFAL } from './fal-calculator';
 import { FALLevel } from '@uniflow/shared-types';
 
 describe('FAL Calculator', () => {

@@ -3,8 +3,12 @@ import { Prisma } from '@prisma/client';
 import { PrismaService } from '../common/prisma.service';
 import { ChatSessionProcessService } from '../common/chat-session-process.service';
 import { AuditService } from '../audit/audit.service';
-import { AdapterRuntimeService } from '../adapter-runtime/adapter-runtime.service';
-import { buildStatusEventRemoteId } from '@uniflow/shared-types';
+import {
+  buildStatusEventRemoteId,
+  isDeliveryPath,
+  type DeliveryPath,
+} from '@uniflow/shared-types';
+import { DeliveryOrchestratorService } from '../delivery-runtime/delivery-orchestrator.service';
 import { mapExternalStatusToSubmissionStatus } from '../common/submission-status.util';
 
 @Injectable()
@@ -13,12 +17,16 @@ export class StatusService {
     private readonly prisma: PrismaService,
     private readonly chatSessionProcessService: ChatSessionProcessService,
     private readonly auditService: AuditService,
-    private readonly adapterRuntimeService: AdapterRuntimeService,
+    private readonly deliveryOrchestrator: DeliveryOrchestratorService,
   ) {}
 
-  async queryStatus(submissionId: string, traceId: string) {
-    const submission = await this.prisma.submission.findUnique({
-      where: { id: submissionId },
+  async queryStatus(submissionId: string, tenantId: string, traceId: string, userId?: string) {
+    const submission = await this.prisma.submission.findFirst({
+      where: {
+        id: submissionId,
+        tenantId,
+        ...(userId ? { userId } : {}),
+      },
       include: {
         events: {
           orderBy: { eventTime: 'desc' },
@@ -45,13 +53,23 @@ export class StatusService {
       const template = await this.prisma.processTemplate.findUnique({
         where: { id: submission.templateId },
       });
-      const adapter = template
-        ? await this.adapterRuntimeService.createAdapterForConnector(template.connectorId, [])
-        : null;
-      if (!adapter) {
+      if (!template) {
         throw new NotFoundException('Connector not found for submission');
       }
-      const result = await adapter.queryStatus(submission.oaSubmissionId);
+      const submitMetadata = ((submission.submitResult as Record<string, any> | null)?.metadata || {}) as Record<string, any>;
+      const selectedPath = this.toDeliveryPath(submitMetadata.deliveryPath);
+      const execution = await this.deliveryOrchestrator.queryStatus({
+        connectorId: template.connectorId,
+        processCode: template.processCode,
+        processName: template.processName || template.processCode,
+        tenantId: submission.tenantId,
+        userId: submission.userId,
+        submissionId: submission.oaSubmissionId,
+        selectedPath,
+        fallbackPolicy: selectedPath ? [selectedPath] : [],
+        traceId,
+      });
+      const result = execution.statusResult;
       oaStatus = result;
       const queriedAt = new Date();
       const mappedStatus = mapExternalStatusToSubmissionStatus(result.status, submission.status);
@@ -164,9 +182,13 @@ export class StatusService {
     }));
   }
 
-  async getTimeline(submissionId: string) {
-    const submission = await this.prisma.submission.findUnique({
-      where: { id: submissionId },
+  async getTimeline(submissionId: string, tenantId: string, userId?: string) {
+    const submission = await this.prisma.submission.findFirst({
+      where: {
+        id: submissionId,
+        tenantId,
+        ...(userId ? { userId } : {}),
+      },
       include: {
         events: {
           orderBy: { eventTime: 'asc' },
@@ -249,5 +271,11 @@ export class StatusService {
 
   private isDuplicateSubmissionEventError(error: unknown) {
     return error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002';
+  }
+
+  private toDeliveryPath(value: unknown): DeliveryPath | null {
+    return isDeliveryPath(value)
+      ? value
+      : null;
   }
 }

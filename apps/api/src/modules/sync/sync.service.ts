@@ -17,6 +17,7 @@ export const SYNC_TRIGGER_TYPES = ['manual', 'schedule', 'repair', 'webhook'] as
 export type SyncTriggerType = typeof SYNC_TRIGGER_TYPES[number];
 
 interface EnqueueSyncInput {
+  tenantId?: string;
   connectorId: string;
   syncDomain: SyncDomain;
   triggerType?: SyncTriggerType;
@@ -61,8 +62,11 @@ export class SyncService {
   async enqueue(input: EnqueueSyncInput) {
     this.assertSyncDomain(input.syncDomain);
 
-    const connector = await this.prisma.connector.findUnique({
-      where: { id: input.connectorId },
+    const connector = await this.prisma.connector.findFirst({
+      where: {
+        id: input.connectorId,
+        ...(input.tenantId ? { tenantId: input.tenantId } : {}),
+      },
     });
 
     if (!connector) {
@@ -260,9 +264,9 @@ export class SyncService {
     });
   }
 
-  async getJob(id: string) {
-    const syncJob = await this.prisma.syncJob.findUnique({
-      where: { id },
+  async getJob(id: string, tenantId: string) {
+    const syncJob = await this.prisma.syncJob.findFirst({
+      where: { id, tenantId },
       include: {
         connector: {
           select: {
@@ -283,9 +287,9 @@ export class SyncService {
     return syncJob;
   }
 
-  async getConfig(connectorId: string) {
-    const capability = await this.prisma.connectorCapability.findUnique({
-      where: { connectorId },
+  async getConfig(connectorId: string, tenantId: string) {
+    const capability = await this.prisma.connectorCapability.findFirst({
+      where: { connectorId, tenantId },
       include: {
         connector: {
           select: {
@@ -307,9 +311,9 @@ export class SyncService {
     };
   }
 
-  async updateConfig(connectorId: string, config: Record<string, any>) {
-    const connector = await this.prisma.connector.findUnique({
-      where: { id: connectorId },
+  async updateConfig(connectorId: string, tenantId: string, config: Record<string, any>) {
+    const connector = await this.prisma.connector.findFirst({
+      where: { id: connectorId, tenantId },
       include: {
         capability: true,
       },
@@ -374,12 +378,13 @@ export class SyncService {
     return nextPolicy;
   }
 
-  async dispatchDueSchedules(connectorId?: string) {
+  async dispatchDueSchedules(connectorId?: string, tenantId?: string) {
     const capabilities = await this.prisma.connectorCapability.findMany({
       where: {
         ...(connectorId && { connectorId }),
         connector: {
           status: 'active',
+          ...(tenantId && { tenantId }),
         },
       },
       include: {
@@ -522,9 +527,9 @@ export class SyncService {
     });
   }
 
-  async getRemoteProcess(id: string) {
-    const remoteProcess = await this.prisma.remoteProcess.findUnique({
-      where: { id },
+  async getRemoteProcess(id: string, tenantId: string) {
+    const remoteProcess = await this.prisma.remoteProcess.findFirst({
+      where: { id, tenantId },
       include: {
         connector: {
           select: {
@@ -577,9 +582,9 @@ export class SyncService {
     });
   }
 
-  async getReferenceDataset(id: string) {
-    const dataset = await this.prisma.referenceDataset.findUnique({
-      where: { id },
+  async getReferenceDataset(id: string, tenantId: string) {
+    const dataset = await this.prisma.referenceDataset.findFirst({
+      where: { id, tenantId },
       include: {
         connector: {
           select: {
@@ -602,10 +607,13 @@ export class SyncService {
     return dataset;
   }
 
-  async listReferenceItems(datasetId: string, keyword?: string, limit = 100) {
+  async listReferenceItems(datasetId: string, tenantId: string, keyword?: string, limit = 100) {
     return this.prisma.referenceItem.findMany({
       where: {
         datasetId,
+        dataset: {
+          tenantId,
+        },
         ...(keyword
           ? {
               OR: [

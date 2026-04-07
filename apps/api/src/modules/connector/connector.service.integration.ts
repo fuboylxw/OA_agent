@@ -43,6 +43,7 @@ describe('ConnectorService Integration', () => {
   const mockPrisma = {
     $transaction: jest.fn(),
     connector: {
+      findFirst: jest.fn(),
       findUnique: jest.fn(),
       findMany: jest.fn(),
       update: jest.fn(),
@@ -93,7 +94,7 @@ describe('ConnectorService Integration', () => {
       healthCheckUrl: 'https://oa.example.com/health',
       oclLevel: 'OCL4',
       falLevel: 'F2',
-    });
+    }, 'tenant-default');
 
     expect(tx.connector.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
@@ -145,7 +146,7 @@ describe('ConnectorService Integration', () => {
   });
 
   it('updates oaType, removes inline secret refs when needed, and preserves enterprise metadata', async () => {
-    mockPrisma.connector.findUnique.mockResolvedValue({
+    mockPrisma.connector.findFirst.mockResolvedValue({
       id: 'connector-1',
       tenantId: 'tenant-default',
       oaType: 'openapi',
@@ -196,7 +197,7 @@ describe('ConnectorService Integration', () => {
       status: 'active',
     });
 
-    await service.update('connector-1', {
+    await service.update('connector-1', 'tenant-default', {
       name: 'Connector Updated',
       oaType: 'hybrid',
       oaVersion: 'v9',

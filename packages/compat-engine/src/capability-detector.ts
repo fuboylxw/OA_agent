@@ -162,15 +162,15 @@ function analyzeEndpoint(path: string, method: string, spec: Record<string, any>
   } else if (lowerPath.includes('/user') && method === 'get') {
     purpose = 'list_users';
     confidence = 0.8;
+  } else if (lowerPath.includes('/status') || lowerPath.includes('/progress')) {
+    purpose = 'query_status';
+    confidence = 0.8;
   } else if ((lowerPath.includes('/flow') || lowerPath.includes('/process')) && method === 'get') {
     purpose = 'list_flows';
     confidence = 0.8;
   } else if (lowerPath.includes('/submit') || (lowerPath.includes('/application') && method === 'post')) {
     purpose = 'submit';
     confidence = 0.85;
-  } else if (lowerPath.includes('/status') || lowerPath.includes('/progress')) {
-    purpose = 'query_status';
-    confidence = 0.8;
   } else if (lowerPath.includes('/cancel') || lowerPath.includes('/revoke')) {
     purpose = 'cancel';
     confidence = 0.8;

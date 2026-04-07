@@ -6,6 +6,7 @@
 import { Module } from '@nestjs/common';
 import { BullModule } from '@nestjs/bull';
 import { ConfigModule } from '@nestjs/config';
+import { resolve } from 'path';
 import { BootstrapProcessor } from './processors/bootstrap.processor';
 import { CommonModule } from './modules/common/common.module';
 import { DiscoveryModule } from './modules/discovery/discovery.module';
@@ -18,7 +19,13 @@ import { WebhookModule } from './modules/webhook/webhook.module';
 
 @Module({
   imports: [
-    ConfigModule.forRoot({ isGlobal: true }),
+    ConfigModule.forRoot({
+      isGlobal: true,
+      envFilePath: [
+        resolve(process.cwd(), '.env'),
+        resolve(process.cwd(), '../../.env'),
+      ],
+    }),
     BullModule.forRoot({
       redis: {
         host: process.env.REDIS_HOST || 'localhost',

@@ -9,8 +9,16 @@ import {
   type AdapterCapabilities,
 } from '@uniflow/oa-adapters';
 import { PrismaService } from '../common/prisma.service';
+import { DelegatedCredentialService } from '../delegated-credential/delegated-credential.service';
+import { AuthBindingService } from '../auth-binding/auth-binding.service';
 import { GenericHttpAdapter } from './generic-http-adapter';
 import { PrismaEndpointLoader } from './prisma-endpoint-loader';
+import { PrismaRpaFlowLoader } from './prisma-rpa-flow-loader';
+import { PlatformTicketBroker } from './platform-ticket-broker';
+import { RpaAdapter } from './rpa-adapter';
+import { CapabilityRoutedAdapter } from './capability-routed-adapter';
+import { LocalRpaExecutor } from './local-rpa-executor';
+import { BrowserRpaExecutor } from './browser-rpa-executor';
 
 const SENSITIVE_AUTH_KEYS = new Set([
   'password',
@@ -19,50 +27,66 @@ const SENSITIVE_AUTH_KEYS = new Set([
   'accessToken',
   'refreshToken',
   'secret',
+  'serviceToken',
+  'ticketHeaderValue',
 ]);
+
+export interface ExecutionAuthScope {
+  tenantId?: string;
+  userId?: string;
+}
 
 @Injectable()
 export class AdapterRuntimeService {
   private readonly logger = new Logger(AdapterRuntimeService.name);
   private readonly endpointLoader: PrismaEndpointLoader;
+  private readonly rpaFlowLoader: PrismaRpaFlowLoader;
+  private readonly platformTicketBroker: PlatformTicketBroker;
+  private readonly localRpaExecutor: LocalRpaExecutor;
+  private readonly browserRpaExecutor: BrowserRpaExecutor;
 
-  constructor(private readonly prisma: PrismaService) {
+  constructor(
+    private readonly prisma: PrismaService,
+    private readonly delegatedCredentialService: DelegatedCredentialService,
+    private readonly authBindingService: AuthBindingService,
+  ) {
     this.endpointLoader = new PrismaEndpointLoader(prisma);
+    this.rpaFlowLoader = new PrismaRpaFlowLoader(prisma);
+    this.platformTicketBroker = new PlatformTicketBroker();
+    this.localRpaExecutor = new LocalRpaExecutor();
+    this.browserRpaExecutor = new BrowserRpaExecutor();
   }
 
-  /**
-   * Get the adapter registry for custom adapter registration.
-   */
   getRegistry(): AdapterRegistry {
     return AdapterFactory.getRegistry();
   }
 
-  /**
-   * Register a custom adapter descriptor at runtime.
-   */
   registerAdapter(descriptor: AdapterDescriptor): void {
     this.logger.log(`Registering adapter: ${descriptor.id} (${descriptor.name})`);
     this.getRegistry().register(descriptor);
   }
 
-  /**
-   * List all registered adapter descriptors.
-   */
   listRegisteredAdapters(): Array<{ id: string; name: string; vendor: string; capabilities: AdapterCapabilities }> {
-    return this.getRegistry().listAll().map(d => ({
-      id: d.id,
-      name: d.name,
-      vendor: d.vendor,
-      capabilities: d.capabilities,
+    return this.getRegistry().listAll().map((descriptor) => ({
+      id: descriptor.id,
+      name: descriptor.name,
+      vendor: descriptor.vendor,
+      capabilities: descriptor.capabilities,
     }));
   }
 
   async createAdapterForConnector(
     connectorId: string,
     flows?: Array<{ flowCode: string; flowName: string }>,
+    authScope?: ExecutionAuthScope,
   ): Promise<OAAdapter> {
     const connector = await this.getConnectorWithSecrets(connectorId);
-    const authConfig = await this.resolveAuthConfig(connector);
+    const authConfig = await this.resolveAuthConfigForExecution(connector, authScope);
+    const loadedRpaFlows = await this.rpaFlowLoader.loadFlows(connectorId);
+    const requestedFlowCodes = new Set((flows || []).map((flow) => flow.flowCode));
+    const rpaFlows = requestedFlowCodes.size > 0
+      ? loadedRpaFlows.filter((flow) => requestedFlowCodes.has(flow.processCode))
+      : loadedRpaFlows;
 
     const config = {
       oaVendor: connector.oaVendor || undefined,
@@ -73,34 +97,49 @@ export class AdapterRuntimeService {
       flows,
     };
 
-    // 1. Try registry for vendor-specific adapters (if registered)
+    let apiAdapter: OAAdapter | null = null;
     const registry = this.getRegistry();
     const descriptor = registry.resolve(config);
 
-    // 2. If resolved to a real adapter (not Mock fallback), use it
     if (descriptor && descriptor.id !== 'mock') {
-      this.logger.log(
-        `Resolved specific adapter "${descriptor.id}" for connector ${connectorId}`,
-      );
-      const adapter = descriptor.create(config);
-      if (hasLifecycle(adapter) && adapter.init) {
-        await adapter.init();
+      this.logger.log(`Resolved specific adapter "${descriptor.id}" for connector ${connectorId}`);
+      apiAdapter = descriptor.create(config);
+      if (hasLifecycle(apiAdapter) && apiAdapter.init) {
+        await apiAdapter.init();
       }
-      return adapter;
     }
 
-    // 3. Check if this connector has MCPTool endpoints configured
-    //    If yes → use GenericHttpAdapter (config-driven, zero code)
-    //    If no  → fall back to MockOAAdapter
     const toolCount = await this.prisma.mCPTool.count({
       where: { connectorId, enabled: true },
     });
 
-    if (toolCount > 0) {
+    if (!apiAdapter && toolCount > 0) {
       this.logger.log(
         `Using GenericHttpAdapter for connector ${connectorId} (${toolCount} MCPTool endpoints)`,
       );
-      const adapter = new GenericHttpAdapter(
+      apiAdapter = new GenericHttpAdapter(
+        {
+          connectorId,
+          baseUrl: connector.baseUrl,
+          authType: connector.authType,
+          authConfig,
+          flows,
+          oaVendor: connector.oaVendor || undefined,
+          oaVersion: connector.oaVersion || undefined,
+          oaType: connector.oaType as 'openapi' | 'form-page' | 'hybrid',
+          healthCheckUrl: connector.healthCheckUrl || undefined,
+        },
+        this.endpointLoader,
+      );
+      if (hasLifecycle(apiAdapter) && apiAdapter.init) {
+        await apiAdapter.init();
+      }
+    }
+
+    let rpaAdapter: OAAdapter | null = null;
+    if (rpaFlows.length > 0) {
+      this.logger.log(`Using RpaAdapter for connector ${connectorId} (${rpaFlows.length} RPA flows)`);
+      rpaAdapter = new RpaAdapter(
         {
           connectorId,
           baseUrl: connector.baseUrl,
@@ -109,17 +148,31 @@ export class AdapterRuntimeService {
           oaVendor: connector.oaVendor || undefined,
           oaVersion: connector.oaVersion || undefined,
           oaType: connector.oaType as 'openapi' | 'form-page' | 'hybrid',
-          healthCheckUrl: connector.healthCheckUrl || undefined,
         },
-        this.endpointLoader,
+        rpaFlows,
+        this.platformTicketBroker,
+        this.localRpaExecutor,
+        this.browserRpaExecutor,
       );
-      await adapter.init();
-      return adapter;
+      if (hasLifecycle(rpaAdapter) && rpaAdapter.init) {
+        await rpaAdapter.init();
+      }
     }
 
-    // 4. No specific adapter, no MCPTool endpoints → Mock fallback
+    if (apiAdapter && rpaAdapter) {
+      return new CapabilityRoutedAdapter(apiAdapter, rpaAdapter, rpaFlows);
+    }
+
+    if (apiAdapter) {
+      return apiAdapter;
+    }
+
+    if (rpaAdapter) {
+      return rpaAdapter;
+    }
+
     this.logger.warn(
-      `No specific adapter or MCPTool endpoints for connector ${connectorId}, using MockOAAdapter`,
+      `No specific adapter, MCPTool endpoints, or RPA flows for connector ${connectorId}, using MockOAAdapter`,
     );
     return new MockOAAdapter({
       oaType: config.oaType,
@@ -128,9 +181,108 @@ export class AdapterRuntimeService {
     });
   }
 
-  /**
-   * Destroy an adapter, calling lifecycle destroy() if available.
-   */
+  async createApiAdapterForConnector(
+    connectorId: string,
+    flows?: Array<{ flowCode: string; flowName: string }>,
+    authScope?: ExecutionAuthScope,
+  ): Promise<OAAdapter | null> {
+    const connector = await this.getConnectorWithSecrets(connectorId);
+    const authConfig = await this.resolveAuthConfigForExecution(connector, authScope);
+    const config = {
+      oaVendor: connector.oaVendor || undefined,
+      oaType: connector.oaType as 'openapi' | 'form-page' | 'hybrid',
+      baseUrl: connector.baseUrl,
+      authType: connector.authType,
+      authConfig,
+      flows,
+    };
+
+    let apiAdapter: OAAdapter | null = null;
+    const registry = this.getRegistry();
+    const descriptor = registry.resolve(config);
+
+    if (descriptor && descriptor.id !== 'mock') {
+      this.logger.log(`Resolved specific API adapter "${descriptor.id}" for connector ${connectorId}`);
+      apiAdapter = descriptor.create(config);
+      if (hasLifecycle(apiAdapter) && apiAdapter.init) {
+        await apiAdapter.init();
+      }
+      return apiAdapter;
+    }
+
+    const toolCount = await this.prisma.mCPTool.count({
+      where: { connectorId, enabled: true },
+    });
+
+    if (toolCount > 0) {
+      this.logger.log(
+        `Using GenericHttpAdapter for connector ${connectorId} (${toolCount} MCPTool endpoints)`,
+      );
+      apiAdapter = new GenericHttpAdapter(
+        {
+          connectorId,
+          baseUrl: connector.baseUrl,
+          authType: connector.authType,
+          authConfig,
+          flows,
+          oaVendor: connector.oaVendor || undefined,
+          oaVersion: connector.oaVersion || undefined,
+          oaType: connector.oaType as 'openapi' | 'form-page' | 'hybrid',
+          healthCheckUrl: connector.healthCheckUrl || undefined,
+        },
+        this.endpointLoader,
+      );
+      if (hasLifecycle(apiAdapter) && apiAdapter.init) {
+        await apiAdapter.init();
+      }
+    }
+
+    return apiAdapter;
+  }
+
+  async createRpaAdapterForConnector(
+    connectorId: string,
+    flows?: Array<{ flowCode: string; flowName: string }>,
+    authScope?: ExecutionAuthScope,
+  ): Promise<RpaAdapter | null> {
+    const connector = await this.getConnectorWithSecrets(connectorId);
+    const authConfig = await this.resolveAuthConfigForExecution(connector, authScope);
+    const rpaFlows = await this.loadRpaFlowsForConnector(connectorId, flows);
+    if (rpaFlows.length === 0) {
+      return null;
+    }
+
+    this.logger.log(`Using RpaAdapter for connector ${connectorId} (${rpaFlows.length} RPA flows)`);
+    const rpaAdapter = new RpaAdapter(
+      {
+        connectorId,
+        baseUrl: connector.baseUrl,
+        authType: connector.authType,
+        authConfig,
+        oaVendor: connector.oaVendor || undefined,
+        oaVersion: connector.oaVersion || undefined,
+        oaType: connector.oaType as 'openapi' | 'form-page' | 'hybrid',
+      },
+      rpaFlows,
+      this.platformTicketBroker,
+      this.localRpaExecutor,
+      this.browserRpaExecutor,
+    );
+    await rpaAdapter.init();
+    return rpaAdapter;
+  }
+
+  async loadRpaFlowsForConnector(
+    connectorId: string,
+    flows?: Array<{ flowCode: string; flowName: string }>,
+  ) {
+    const loadedRpaFlows = await this.rpaFlowLoader.loadFlows(connectorId);
+    const requestedFlowCodes = new Set((flows || []).map((flow) => flow.flowCode));
+    return requestedFlowCodes.size > 0
+      ? loadedRpaFlows.filter((flow) => requestedFlowCodes.has(flow.processCode))
+      : loadedRpaFlows;
+  }
+
   async destroyAdapter(adapter: OAAdapter): Promise<void> {
     if (hasLifecycle(adapter) && adapter.destroy) {
       await adapter.destroy();
@@ -163,7 +315,7 @@ export class AdapterRuntimeService {
       secretVersion?: string | null;
     } | null;
   }) {
-    const baseConfig = { ...(connector.authConfig as Record<string, any> || {}) };
+    const baseConfig = { ...((connector.authConfig as Record<string, any>) || {}) };
     const secretRef = connector.secretRef;
 
     if (!secretRef) {
@@ -175,10 +327,50 @@ export class AdapterRuntimeService {
       secretRef,
       connector.authType,
     );
-    return {
-      ...baseConfig,
-      ...resolvedSecret,
-    };
+    return this.mergeAuthConfig(baseConfig, resolvedSecret);
+  }
+
+  async resolveAuthConfigForExecution(
+    connector: {
+      id?: string;
+      authType: string;
+      authConfig: any;
+      secretRef?: {
+        secretProvider: string;
+        secretPath: string;
+        secretVersion?: string | null;
+      } | null;
+    },
+    authScope?: ExecutionAuthScope,
+  ) {
+    const baseConfig = await this.resolveAuthConfig(connector);
+    if (!connector.id || !authScope?.tenantId) {
+      return baseConfig;
+    }
+
+    const binding = await this.authBindingService.resolveExecutionAuthConfig({
+      tenantId: authScope.tenantId,
+      connectorId: connector.id,
+      userId: authScope.userId,
+    });
+
+    if (binding?.authConfig) {
+      return this.mergeAuthConfig(baseConfig, binding.authConfig);
+    }
+
+    const delegated = await this.delegatedCredentialService.resolveExecutionAuthConfig({
+      tenantId: authScope.tenantId,
+      connectorId: connector.id,
+      userId: authScope.userId,
+      authType: connector.authType,
+      baseAuthConfig: baseConfig,
+    });
+
+    if (!delegated?.authConfig) {
+      return baseConfig;
+    }
+
+    return this.mergeAuthConfig(baseConfig, delegated.authConfig);
   }
 
   private async resolveSecretPayload(
@@ -241,11 +433,26 @@ export class AdapterRuntimeService {
   }
 
   private extractSensitiveAuthFields(authConfig: Record<string, any>) {
-    return Object.fromEntries(
+    const sensitive: Record<string, any> = Object.fromEntries(
       Object.entries(authConfig).filter(([key, value]) =>
-        SENSITIVE_AUTH_KEYS.has(key) && value !== undefined && value !== null && value !== ''
+        SENSITIVE_AUTH_KEYS.has(key) && value !== undefined && value !== null && value !== '',
       ),
     );
+
+    const platformConfig = authConfig.platformConfig;
+    if (platformConfig && typeof platformConfig === 'object' && !Array.isArray(platformConfig)) {
+      const platformSecrets = Object.fromEntries(
+        Object.entries(platformConfig as Record<string, any>).filter(([key, value]) =>
+          SENSITIVE_AUTH_KEYS.has(key) && value !== undefined && value !== null && value !== '',
+        ),
+      );
+
+      if (Object.keys(platformSecrets).length > 0) {
+        sensitive.platformConfig = platformSecrets;
+      }
+    }
+
+    return sensitive;
   }
 
   private mapRawSecret(raw: string, authType: string) {
@@ -269,5 +476,29 @@ export class AdapterRuntimeService {
     }
 
     return { secret: raw };
+  }
+
+  private mergeAuthConfig(
+    baseConfig: Record<string, any>,
+    resolvedSecret: Record<string, any>,
+  ) {
+    const merged = {
+      ...baseConfig,
+      ...resolvedSecret,
+    };
+
+    const basePlatformConfig = baseConfig.platformConfig;
+    const secretPlatformConfig = resolvedSecret.platformConfig;
+    if (
+      (basePlatformConfig && typeof basePlatformConfig === 'object' && !Array.isArray(basePlatformConfig))
+      || (secretPlatformConfig && typeof secretPlatformConfig === 'object' && !Array.isArray(secretPlatformConfig))
+    ) {
+      merged.platformConfig = {
+        ...((basePlatformConfig as Record<string, any> | undefined) || {}),
+        ...((secretPlatformConfig as Record<string, any> | undefined) || {}),
+      };
+    }
+
+    return merged;
   }
 }

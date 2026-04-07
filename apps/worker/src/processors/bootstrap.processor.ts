@@ -13,6 +13,10 @@ import {
   BOOTSTRAP_TERMINAL_STATUSES,
   buildFullUrl,
   getNestedValue,
+  normalizeProcessName,
+  parseRpaFlowDefinitions,
+  resolveAssistantFieldPresentation,
+  type RpaFlowDefinition,
 } from '@uniflow/shared-types';
 
 type ValidationOverall = 'passed' | 'partial' | 'failed';
@@ -156,8 +160,10 @@ export class BootstrapProcessor {
           confidence: 0.5,
           risk: 'medium',
           evidence: [{
-            type: 'llm_analysis',
-            description: `LLM Agent identified ${parsedProcesses.length} business processes with ${totalEp} endpoints`,
+            type: this.isRpaOnlyBootstrap(bootstrapJob) ? 'rpa_analysis' : 'llm_analysis',
+            description: this.isRpaOnlyBootstrap(bootstrapJob)
+              ? `RPA bootstrap identified ${parsedProcesses.length} business processes with ${totalEp} synthetic actions`
+              : `LLM Agent identified ${parsedProcesses.length} business processes with ${totalEp} endpoints`,
             confidence: 0.5,
           }],
           recommendation: '',
@@ -178,32 +184,40 @@ export class BootstrapProcessor {
           risk: 'high',
           recommendation: '请检查 API 文档内容、servers 配置、业务接口命名和认证信息后重新处理。',
         });
-        await this.transitionState(jobId, 'FAILED');
+        await this.transitionState(jobId, 'FAILED', {
+          completedAt: new Date(),
+          lastError: 'No business processes were identified from the provided API document',
+        });
         return { success: false, reason: 'no_business_processes' };
       }
 
       // 3. AUTH_PROBING — 自动探测认证方式
-      await this.transitionState(jobId, 'AUTH_PROBING');
-      await this.runAuthProbing(bootstrapJob, parsedProcesses, apiDoc);
-      bootstrapJob = await this.prisma.bootstrapJob.findUnique({
-        where: { id: jobId },
-        include: { sources: true },
-      });
+      const rpaOnlyBootstrap = this.isRpaOnlyBootstrap(bootstrapJob);
 
-      if (!bootstrapJob) {
-        throw new Error(`Job ${jobId} not found after auth probing`);
+      if (!rpaOnlyBootstrap) {
+        await this.transitionState(jobId, 'AUTH_PROBING');
+        await this.runAuthProbing(bootstrapJob, parsedProcesses, apiDoc);
+        bootstrapJob = await this.prisma.bootstrapJob.findUnique({
+          where: { id: jobId },
+          include: { sources: true },
+        });
+
+        if (!bootstrapJob) {
+          throw new Error(`Job ${jobId} not found after auth probing`);
+        }
       }
 
-      // 4. VALIDATING
       await this.transitionState(jobId, 'VALIDATING');
       let workingProcesses = parsedProcesses;
-      let validationSummary = await this.runValidation(bootstrapJob, workingProcesses, {
-        reportId,
-        evidenceType: 'deep_validation',
-        evidenceLabel: 'Initial validation',
-      });
+      let validationSummary = rpaOnlyBootstrap
+        ? await this.buildRpaValidationSummary(bootstrapJob, workingProcesses, reportId)
+        : await this.runValidation(bootstrapJob, workingProcesses, {
+            reportId,
+            evidenceType: 'deep_validation',
+            evidenceLabel: 'Initial validation',
+          });
 
-      if (validationSummary.failedCount + validationSummary.partialCount > 0) {
+      if (!rpaOnlyBootstrap && validationSummary.failedCount + validationSummary.partialCount > 0) {
         const selfHealingResult = await this.runSelfHealing(
           bootstrapJob,
           apiDoc,
@@ -232,8 +246,10 @@ export class BootstrapProcessor {
         await this.prisma.adapterBuild.create({
           data: {
             bootstrapJobId: jobId,
-            adapterType: 'mcp',
-            generatedCode: '// Validation failed: no flows were eligible for MCP registration',
+            adapterType: rpaOnlyBootstrap ? 'rpa' : 'mcp',
+            generatedCode: rpaOnlyBootstrap
+              ? '// Validation failed: no RPA flows were eligible for publishing'
+              : '// Validation failed: no flows were eligible for MCP registration',
             buildStatus: 'failed',
             buildLog: JSON.stringify(validationSummary.validationResults),
           },
@@ -286,6 +302,11 @@ export class BootstrapProcessor {
 
   private async runDiscovery(bootstrapJob: any): Promise<string | null> {
     this.logger.log(`Running discovery for ${bootstrapJob.oaUrl || 'uploaded doc'}`);
+
+    if (this.getBootstrapMode(bootstrapJob) === 'rpa_only') {
+      this.logger.log('Skipping API discovery because the job is configured for page automation only');
+      return null;
+    }
 
     // 1. 优先使用上传的文档内容
     const docSource = bootstrapJob.sources.find(
@@ -409,7 +430,13 @@ ${JSON.stringify(forms, null, 2)}
 
   private async runParsing(bootstrapJob: any, apiDoc: string | null): Promise<BusinessProcess[]> {
     if (!apiDoc) {
-      this.logger.log(`No API doc found, skipping parsing`);
+      const rpaDefinitions = this.getRpaDefinitions(bootstrapJob);
+      if (rpaDefinitions.length > 0) {
+        this.logger.log(`No API doc found, building ${rpaDefinitions.length} RPA processes`);
+        return this.buildProcessesFromRpaDefinitions(rpaDefinitions);
+      }
+
+      this.logger.log('No API doc found, skipping parsing');
       return [];
     }
 
@@ -430,6 +457,70 @@ ${JSON.stringify(forms, null, 2)}
       `Identified ${result.data.processes.length} business processes, ${result.data.totalEndpoints} endpoints`,
     );
     return result.data.processes;
+  }
+
+  private async buildRpaValidationSummary(
+    bootstrapJob: any,
+    processes: BusinessProcess[],
+    reportId: string,
+  ): Promise<ValidationSummary> {
+    const validationResults = processes.map<ProcessValidationResult>((process) => {
+      const hasSubmit = process.endpoints.some((endpoint) => endpoint.category === 'submit');
+      const hasStatusQuery = process.endpoints.some(
+        (endpoint) => endpoint.category === 'query' || endpoint.category === 'status_query',
+      );
+
+      return {
+        processCode: process.processCode,
+        overall: hasSubmit ? 'passed' : 'failed',
+        failureType: hasSubmit ? undefined : 'missing_submit',
+        repairable: false,
+        reason: hasSubmit
+          ? `RPA flow validated with ${hasStatusQuery ? 'submit and status query' : 'submit-only'} capability`
+          : 'RPA flow does not define submit steps',
+        endpointChecks: process.endpoints.map((endpoint) => ({
+          endpointName: endpoint.name,
+          category: endpoint.category,
+          method: endpoint.method,
+          path: endpoint.path,
+          status: hasSubmit ? 'passed' : 'failed',
+          checkedWith: 'core_validation',
+          reachable: hasSubmit,
+          usable: hasSubmit,
+          reason: hasSubmit ? 'Validated from uploaded RPA definition' : 'Missing submit action',
+        })),
+      };
+    });
+
+    const passedProcesses = processes.filter((process) =>
+      validationResults.some((result) => result.processCode === process.processCode && result.overall === 'passed'),
+    );
+
+    const summary: ValidationSummary = {
+      validationResults,
+      passedProcesses,
+      passedCount: validationResults.filter((item) => item.overall === 'passed').length,
+      partialCount: validationResults.filter((item) => item.overall === 'partial').length,
+      failedCount: validationResults.filter((item) => item.overall === 'failed').length,
+    };
+
+    await this.appendReportEvidence(reportId, [{
+      type: 'rpa_validation',
+      description: `RPA validation: ${summary.passedCount} passed, ${summary.failedCount} failed`,
+      confidence: summary.failedCount === 0 ? 0.75 : 0.4,
+      passed: summary.passedCount,
+      failed: summary.failedCount,
+    }], {
+      oclLevel: summary.passedCount > 0 ? this.computeOclLevel(passedProcesses) : 'OCL0',
+      coverage: processes.length > 0 ? summary.passedCount / processes.length : 0,
+      confidence: summary.failedCount === 0 ? 0.75 : 0.4,
+      risk: summary.failedCount === 0 ? 'medium' : 'high',
+      recommendation: summary.failedCount === 0
+        ? 'Uploaded RPA definitions were accepted for publishing.'
+        : 'Some RPA definitions are missing submit actions and were not published.',
+    });
+
+    return summary;
   }
 
   // ============================================================
@@ -674,7 +765,7 @@ ${JSON.stringify(forms, null, 2)}
       try {
         const resp = await axios.get(target, { timeout: 5000, validateStatus: () => true });
         if (resp.status === 401 || resp.status === 403) {
-          return null;
+          continue;
         }
 
         const contentType = String(resp.headers['content-type'] || '').toLowerCase();
@@ -1791,7 +1882,7 @@ ${JSON.stringify(forms, null, 2)}
   }
 
   private mapHttpStatusToFailureType(statusCode?: number): ValidationFailureType {
-    if (statusCode === 400) return 'param_error';
+    if (statusCode === 400 || statusCode === 422) return 'param_error';
     if (statusCode === 401 || statusCode === 403) return 'auth_failed';
     if (statusCode === 404) return 'endpoint_not_found';
     if (statusCode && statusCode >= 500) return 'server_error';
@@ -1802,7 +1893,7 @@ ${JSON.stringify(forms, null, 2)}
     if (!statusCode) {
       return 'Request failed';
     }
-    if (statusCode === 400) return 'Endpoint rejected the probe parameters';
+    if (statusCode === 400 || statusCode === 422) return 'Endpoint rejected the probe parameters';
     if (statusCode === 401 || statusCode === 403) return 'Authentication or permission validation failed';
     if (statusCode === 404) return 'Endpoint not found';
     if (statusCode >= 500) return `Server error: HTTP ${statusCode}`;
@@ -1876,7 +1967,7 @@ ${JSON.stringify(forms, null, 2)}
       });
 
       // 分析 400 错误信息
-      if (response.status === 400) {
+      if (response.status === 400 || response.status === 422) {
         const errorMsg = response.data?.message || JSON.stringify(response.data);
         const discoveredFields = this.extractFieldsFromError(errorMsg);
 
@@ -2014,7 +2105,7 @@ ${JSON.stringify(forms, null, 2)}
       }
 
       // 400: 参数错误 — 接口存在但测试数据不符合要求，标记为 partial
-      if (response.status === 400) {
+      if (response.status === 400 || response.status === 422) {
         return {
           success: false,
           statusCode: response.status,
@@ -2091,32 +2182,50 @@ ${JSON.stringify(forms, null, 2)}
       return param.defaultValue;
     }
 
-    const type = param.type || 'string';
-    switch (type.toLowerCase()) {
+    if (Array.isArray(param.enumValues) && param.enumValues.length > 0) {
+      return param.enumValues[0];
+    }
+
+    const schemaValue = this.buildValueFromSchema(param.schema, param.name);
+    if (schemaValue !== undefined) {
+      return schemaValue;
+    }
+
+    const type = String(param.type || 'string').toLowerCase();
+    const format = typeof param.format === 'string' ? param.format.toLowerCase() : undefined;
+
+    switch (type) {
       case 'string': {
+        if (format === 'date') {
+          return this.buildTemporalSample(param.name, 'date');
+        }
+        if (format === 'date-time' || format === 'datetime') {
+          return this.buildTemporalSample(param.name, 'date-time');
+        }
+
+        const namedSample = this.buildNamedStringSample(param.name);
+        if (namedSample !== undefined) {
+          return namedSample;
+        }
+
         const maxLen = param.maxLength || param.max_length;
         const label = param.description || param.name;
         const value = `[TEST]${label}`;
         return maxLen && value.length > maxLen ? value.substring(0, maxLen) : value;
       }
       case 'number':
+        return this.buildNumericSample(param, false);
       case 'integer':
-        return param.min ?? param.minimum ?? 1;
-      case 'date': {
+        return this.buildNumericSample(param, true);
+      case 'date':
         // 默认用明天，兼容"未来日期"约束
-        const tomorrow = new Date();
-        tomorrow.setDate(tomorrow.getDate() + 1);
-        return tomorrow.toISOString().split('T')[0];
-      }
-      case 'datetime': {
-        const tomorrowDt = new Date();
-        tomorrowDt.setDate(tomorrowDt.getDate() + 1);
-        return tomorrowDt.toISOString();
-      }
+        return this.buildTemporalSample(param.name, 'date');
+      case 'datetime':
+        return this.buildTemporalSample(param.name, 'date-time');
       case 'boolean':
         return true;
       case 'array':
-        return [];
+        return [this.buildFallbackArrayItem(param.name)];
       case 'object':
         return {};
       default:
@@ -2127,6 +2236,260 @@ ${JSON.stringify(forms, null, 2)}
   /**
    * 验证响应结构
    */
+  private buildValueFromSchema(schema: any, fieldName?: string, depth = 0): any {
+    if (!schema || typeof schema !== 'object') {
+      return undefined;
+    }
+
+    if (depth > 5) {
+      return undefined;
+    }
+
+    if (schema.default !== undefined) {
+      return schema.default;
+    }
+
+    if (Array.isArray(schema.enum) && schema.enum.length > 0) {
+      return schema.enum[0];
+    }
+
+    if (Array.isArray(schema.anyOf)) {
+      return this.buildValueFromSchema(
+        schema.anyOf.find((variant: any) => !this.schemaAllowsOnlyNull(variant)) || schema.anyOf[0],
+        fieldName,
+        depth + 1,
+      );
+    }
+
+    if (Array.isArray(schema.oneOf)) {
+      return this.buildValueFromSchema(
+        schema.oneOf.find((variant: any) => !this.schemaAllowsOnlyNull(variant)) || schema.oneOf[0],
+        fieldName,
+        depth + 1,
+      );
+    }
+
+    if (Array.isArray(schema.allOf) && schema.allOf.length > 0) {
+      const mergedObject: Record<string, any> = {};
+      let hasObjectShape = false;
+
+      for (const variant of schema.allOf) {
+        const value = this.buildValueFromSchema(variant, fieldName, depth + 1);
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+          Object.assign(mergedObject, value);
+          hasObjectShape = true;
+        } else if (value !== undefined) {
+          return value;
+        }
+      }
+
+      if (hasObjectShape) {
+        return mergedObject;
+      }
+    }
+
+    const type = this.getSchemaTypeForSample(schema);
+    switch (type) {
+      case 'string':
+        return this.buildSchemaStringSample(schema, fieldName);
+      case 'number':
+        return this.buildNumericSample(schema, false);
+      case 'integer':
+        return this.buildNumericSample(schema, true);
+      case 'boolean':
+        return schema.default ?? true;
+      case 'array': {
+        const itemCount = Math.max(
+          1,
+          Math.min(typeof schema.minItems === 'number' ? schema.minItems : 1, 3),
+        );
+        const itemValue = this.buildValueFromSchema(schema.items, fieldName, depth + 1)
+          ?? this.buildFallbackArrayItem(fieldName);
+        return Array.from({ length: itemCount }, () => itemValue);
+      }
+      case 'object': {
+        const properties = schema.properties || {};
+        const propertyEntries = Object.entries(properties);
+        if (propertyEntries.length === 0) {
+          return {};
+        }
+
+        const required = Array.isArray(schema.required) ? schema.required : [];
+        const keys = required.length > 0 ? required : propertyEntries.map(([key]) => key);
+        const result: Record<string, any> = {};
+
+        for (const key of keys) {
+          const propertySchema = properties[key];
+          const value = this.buildValueFromSchema(propertySchema, key, depth + 1);
+          if (value !== undefined) {
+            result[key] = value;
+          }
+        }
+
+        return result;
+      }
+      default:
+        return undefined;
+    }
+  }
+
+  private getSchemaTypeForSample(schema: any): string | undefined {
+    if (!schema || typeof schema !== 'object') {
+      return undefined;
+    }
+
+    if (typeof schema.type === 'string' && schema.type !== 'null') {
+      return schema.type;
+    }
+
+    if (Array.isArray(schema.type)) {
+      const candidate = schema.type.find((value: unknown) => typeof value === 'string' && value !== 'null');
+      if (typeof candidate === 'string') {
+        return candidate;
+      }
+    }
+
+    if (schema.properties) {
+      return 'object';
+    }
+
+    if (schema.items) {
+      return 'array';
+    }
+
+    return undefined;
+  }
+
+  private schemaAllowsOnlyNull(schema: any): boolean {
+    if (!schema || typeof schema !== 'object') {
+      return false;
+    }
+
+    if (schema.type === 'null') {
+      return true;
+    }
+
+    return Array.isArray(schema.type) && schema.type.every((value: unknown) => value === 'null');
+  }
+
+  private buildSchemaStringSample(schema: any, fieldName?: string): string {
+    const format = typeof schema?.format === 'string' ? schema.format.toLowerCase() : undefined;
+    if (format === 'date') {
+      return this.buildTemporalSample(fieldName, 'date');
+    }
+    if (format === 'date-time' || format === 'datetime') {
+      return this.buildTemporalSample(fieldName, 'date-time');
+    }
+
+    const namedSample = this.buildNamedStringSample(fieldName);
+    if (namedSample !== undefined) {
+      return namedSample;
+    }
+
+    const label = schema?.title || fieldName || 'test';
+    const maxLength = schema?.maxLength || schema?.max_length;
+    const value = `[TEST]${label}`;
+    return maxLength && value.length > maxLength ? value.substring(0, maxLength) : value;
+  }
+
+  private buildTemporalSample(
+    fieldName: string | undefined,
+    mode: 'date' | 'date-time',
+  ): string {
+    const base = new Date();
+    base.setUTCDate(base.getUTCDate() + 1);
+
+    if (mode === 'date') {
+      if (fieldName && /(end|to|deadline|due)/i.test(fieldName)) {
+        base.setUTCDate(base.getUTCDate() + 1);
+      }
+      return base.toISOString().split('T')[0];
+    }
+
+    if (fieldName && /(end|out|to|deadline|due)/i.test(fieldName)) {
+      base.setUTCHours(18, 0, 0, 0);
+    } else if (fieldName && /(start|begin|from|in)/i.test(fieldName)) {
+      base.setUTCHours(9, 0, 0, 0);
+    } else {
+      base.setUTCHours(12, 0, 0, 0);
+    }
+
+    return base.toISOString();
+  }
+
+  private buildNamedStringSample(fieldName?: string): string | undefined {
+    const normalized = String(fieldName || '').toLowerCase();
+    if (!normalized) {
+      return undefined;
+    }
+
+    if (/(leave_?type|vacation_?type)/.test(normalized)) return 'annual';
+    if (/expense_?type/.test(normalized)) return 'travel';
+    if (/vehicle_?type/.test(normalized)) return 'visitor';
+    if (/(phone|mobile|tel)/.test(normalized)) return '13800138000';
+    if (/email/.test(normalized)) return 'test@example.com';
+    if (/account/.test(normalized)) return '6222021234567890';
+    if (/bank/.test(normalized)) return 'Test Bank';
+    if (/plate/.test(normalized)) return 'TEST123';
+    if (/name/.test(normalized)) return 'Test User';
+    if (/(reason|purpose|remark|description|content)/.test(normalized)) return 'automation test';
+    if (/type/.test(normalized)) return 'general';
+    return undefined;
+  }
+
+  private buildNumericSample(schemaOrParam: any, integer: boolean): number {
+    const minimum = this.extractNumericConstraint(schemaOrParam, 'minimum');
+    const exclusiveMinimum = this.extractNumericConstraint(schemaOrParam, 'exclusiveMinimum');
+    let value = 1;
+
+    if (typeof exclusiveMinimum === 'number') {
+      value = integer ? Math.floor(exclusiveMinimum) + 1 : exclusiveMinimum + 1;
+    } else if (typeof minimum === 'number') {
+      value = minimum;
+    }
+
+    if (integer) {
+      return Number.isInteger(value) ? value : Math.ceil(value);
+    }
+
+    return value;
+  }
+
+  private extractNumericConstraint(schemaOrParam: any, key: 'minimum' | 'exclusiveMinimum'): number | undefined {
+    if (!schemaOrParam || typeof schemaOrParam !== 'object') {
+      return undefined;
+    }
+
+    const directValue = schemaOrParam[key];
+    if (typeof directValue === 'number') {
+      return directValue;
+    }
+
+    const schemaValue = schemaOrParam.schema?.[key];
+    if (typeof schemaValue === 'number') {
+      return schemaValue;
+    }
+
+    const unionSchemas = [
+      ...(Array.isArray(schemaOrParam.anyOf) ? schemaOrParam.anyOf : []),
+      ...(Array.isArray(schemaOrParam.oneOf) ? schemaOrParam.oneOf : []),
+      ...(Array.isArray(schemaOrParam.schema?.anyOf) ? schemaOrParam.schema.anyOf : []),
+      ...(Array.isArray(schemaOrParam.schema?.oneOf) ? schemaOrParam.schema.oneOf : []),
+    ];
+
+    for (const candidate of unionSchemas) {
+      if (candidate && typeof candidate[key] === 'number') {
+        return candidate[key];
+      }
+    }
+
+    return undefined;
+  }
+
+  private buildFallbackArrayItem(fieldName?: string): any {
+    return this.buildNamedStringSample(fieldName) ?? 'test';
+  }
+
   private verifyResponseStructure(
     response: any,
     responseMapping?: Record<string, string>,
@@ -2214,7 +2577,15 @@ ${JSON.stringify(forms, null, 2)}
       response.result?.id,
     ];
 
-    return candidates.find((v) => typeof v === 'string' && v.length > 0);
+    const matched = candidates.find((value) =>
+      (typeof value === 'string' && value.length > 0) || typeof value === 'number',
+    );
+
+    if (matched === undefined || matched === null) {
+      return undefined;
+    }
+
+    return String(matched);
   }
 
   /**
@@ -2317,12 +2688,11 @@ ${JSON.stringify(forms, null, 2)}
   }
 
   private resolveSubmissionPath(path: string, submissionId: string): string {
-    return path
-      .replace(/\{id\}/g, submissionId)
-      .replace(/\{submissionId\}/g, submissionId)
-      .replace(/\{applicationId\}/g, submissionId)
-      .replace(/\{requestId\}/g, submissionId)
-      .replace(/\{workId\}/g, submissionId);
+    return path.replace(/\{([^}]+)\}/g, (placeholder, key: string) => (
+      /(id|submission_?id|application_?id|request_?id|work_?id|task_?id)$/i.test(key)
+        ? submissionId
+        : placeholder
+    ));
   }
 
   private findFormsEndpointPath(documentContent: string): string | null {
@@ -2502,13 +2872,14 @@ ${JSON.stringify(forms, null, 2)}
     validationResults: ProcessValidationResult[],
     reportId: string,
   ) {
-    this.logger.log(`Normalizing ${processes.length} business processes`);
+    const normalizedProcesses = this.normalizeBusinessProcessNames(processes);
+    this.logger.log(`Normalizing ${normalizedProcesses.length} business processes`);
 
     await this.prisma.fieldIR.deleteMany({ where: { bootstrapJobId: jobId } });
     await this.prisma.flowIR.deleteMany({ where: { bootstrapJobId: jobId } });
     const repairSummaries = await this.getFlowRepairSummaries(jobId);
 
-    for (const proc of processes) {
+    for (const proc of normalizedProcesses) {
       const validation = validationResults.find((result) => result.processCode === proc.processCode);
       const repair = repairSummaries[proc.processCode];
       await this.prisma.flowIR.upsert({
@@ -2630,14 +3001,32 @@ ${JSON.stringify(forms, null, 2)}
     finalStatus: 'PUBLISHED' | 'PARTIALLY_PUBLISHED',
     failedProcessCodes: string[],
   ) {
-    if (processes.length === 0) {
+    const normalizedProcesses = this.normalizeBusinessProcessNames(processes);
+
+    if (normalizedProcesses.length === 0) {
       this.logger.warn('No processes to compile, skipping MCP publication');
       return;
     }
 
+    const rpaDefinitions = this.getRpaDefinitions(bootstrapJob);
+    const rpaDefinitionMap = new Map(rpaDefinitions.map((definition) => [definition.processCode, definition]));
+    const hasRpaDefinitions = rpaDefinitions.length > 0;
+    const hasApiEndpoints = normalizedProcesses.some((process) =>
+      process.endpoints.some((endpoint) => endpoint.method.toUpperCase() !== 'RPA'),
+    );
+    const connectorOaType = hasApiEndpoints && hasRpaDefinitions
+      ? 'hybrid'
+      : hasRpaDefinitions
+        ? 'form-page'
+        : 'openapi';
+    const adapterBuildType = hasApiEndpoints && hasRpaDefinitions
+      ? 'hybrid'
+      : hasRpaDefinitions
+        ? 'rpa'
+        : 'mcp';
     const baseUrl = this.resolveBaseUrl(bootstrapJob);
     const authConfig = bootstrapJob.authConfig || {};
-    const authType = authConfig.authType;
+    const authType = authConfig.authType || (hasRpaDefinitions ? 'cookie' : 'apikey');
     const connectorName = bootstrapJob.name || `OA-${bootstrapJob.id.substring(0, 8)}`;
     const oclLevel = this.computeOclLevel(processes);
 
@@ -2657,7 +3046,7 @@ ${JSON.stringify(forms, null, 2)}
         create: {
           tenantId: bootstrapJob.tenantId,
           name: connectorName,
-          oaType: 'openapi',
+          oaType: connectorOaType,
           baseUrl,
           authType,
           authConfig: publicConfig,
@@ -2665,6 +3054,7 @@ ${JSON.stringify(forms, null, 2)}
           status: 'active',
         },
         update: {
+          oaType: connectorOaType,
           baseUrl,
           authType,
           authConfig: publicConfig,
@@ -2729,8 +3119,12 @@ ${JSON.stringify(forms, null, 2)}
       let toolCount = 0;
       const usedNames = new Set<string>();
 
-      for (const proc of processes) {
+      for (const proc of normalizedProcesses) {
         for (const endpoint of proc.endpoints) {
+          if (endpoint.method.toUpperCase() === 'RPA') {
+            continue;
+          }
+
           let toolName = this.generateToolName(proc.processCode, endpoint);
 
           if (usedNames.has(toolName)) {
@@ -2821,7 +3215,7 @@ ${JSON.stringify(forms, null, 2)}
       // ── 5. 创建 RemoteProcess + ProcessTemplate（Publishing）──
       let publishedCount = 0;
 
-      for (const proc of processes) {
+      for (const proc of normalizedProcesses) {
         const sourceHash = createHash('sha256')
           .update(JSON.stringify({
             processCode: proc.processCode,
@@ -2877,10 +3271,16 @@ ${JSON.stringify(forms, null, 2)}
           .filter((p) => p.in === 'body')
           .reduce((acc, p) => {
             if (!acc.find((f: any) => f.key === p.name)) {
-              acc.push({
+              const presentation = resolveAssistantFieldPresentation({
                 key: p.name,
                 label: p.description || p.name,
                 type: this.mapFieldType(p.type),
+                processCode: proc.processCode,
+              });
+              acc.push({
+                key: p.name,
+                label: presentation.label,
+                type: presentation.type,
                 required: p.required || false,
               });
             }
@@ -2909,6 +3309,25 @@ ${JSON.stringify(forms, null, 2)}
           })
           : null;
 
+        const templateUiHints = {
+          executionModes: {
+            submit: proc.endpoints.some((endpoint) => endpoint.category === 'submit' && endpoint.method.toUpperCase() !== 'RPA')
+              ? ['api', ...(rpaDefinitionMap.has(proc.processCode) ? ['rpa'] : [])]
+              : (rpaDefinitionMap.has(proc.processCode) ? ['rpa'] : []),
+            queryStatus: proc.endpoints.some((endpoint) =>
+              ['query', 'status_query'].includes(endpoint.category) && endpoint.method.toUpperCase() !== 'RPA',
+            )
+              ? ['api', ...(rpaDefinitionMap.has(proc.processCode) ? ['rpa'] : [])]
+              : (rpaDefinitionMap.has(proc.processCode) ? ['rpa'] : []),
+          },
+          rpaDefinition: (rpaDefinitionMap.get(proc.processCode) || null) as any,
+          endpoints: proc.endpoints.map((e) => ({
+            path: e.path,
+            method: e.method,
+            category: e.category,
+          })),
+        } as any;
+
         const templatePayload = {
           tenantId: bootstrapJob.tenantId,
           connectorId: connector.id,
@@ -2923,13 +3342,7 @@ ${JSON.stringify(forms, null, 2)}
           schema: { fields: schemaFields },
           rules: Prisma.JsonNull,
           permissions: Prisma.JsonNull,
-          uiHints: {
-            endpoints: proc.endpoints.map((e) => ({
-              path: e.path,
-              method: e.method,
-              category: e.category,
-            })),
-          },
+          uiHints: templateUiHints,
           lastSyncedAt: new Date(),
           publishedAt: new Date(),
         } satisfies Prisma.ProcessTemplateUncheckedCreateInput;
@@ -3012,8 +3425,8 @@ ${JSON.stringify(forms, null, 2)}
       await tx.adapterBuild.create({
         data: {
           bootstrapJobId: bootstrapJob.id,
-          adapterType: 'mcp',
-          generatedCode: `// MCP-based adapter: ${toolCount} tools, ${publishedCount} templates`,
+          adapterType: adapterBuildType,
+          generatedCode: `// ${adapterBuildType}-based adapter: ${toolCount} MCP tools, ${publishedCount} templates, ${rpaDefinitions.length} RPA flows`,
           buildStatus: 'success',
         },
       });
@@ -3164,6 +3577,144 @@ ${JSON.stringify(forms, null, 2)}
     return summaries;
   }
 
+  private getBootstrapMode(bootstrapJob: any): 'api_only' | 'rpa_only' | 'hybrid' {
+    const authConfig = (bootstrapJob.authConfig as Record<string, any> | null) || {};
+    const configuredAccessMode = String(authConfig.accessMode || '').toLowerCase();
+    if (configuredAccessMode === 'backend_api') return 'api_only';
+    if (configuredAccessMode === 'direct_link' || configuredAccessMode === 'text_guide') return 'rpa_only';
+
+    const configuredMode = authConfig.bootstrapMode;
+    if (configuredMode === 'rpa_only' || configuredMode === 'hybrid' || configuredMode === 'api_only') {
+      return configuredMode;
+    }
+
+    const hasApiSources = (bootstrapJob.sources || []).some((source: any) =>
+      ['openapi', 'swagger', 'custom'].includes(source.sourceType),
+    );
+    const hasRpaSources = (bootstrapJob.sources || []).some((source: any) =>
+      ['manual_rpa', 'rpa_bundle'].includes(source.sourceType),
+    );
+
+    if (hasApiSources && hasRpaSources) return 'hybrid';
+    if (hasRpaSources) return 'rpa_only';
+    return 'api_only';
+  }
+
+  private isRpaOnlyBootstrap(bootstrapJob: any): boolean {
+    return this.getBootstrapMode(bootstrapJob) === 'rpa_only';
+  }
+
+  private getRpaDefinitions(bootstrapJob: any): RpaFlowDefinition[] {
+    if (this.getBootstrapMode(bootstrapJob) === 'api_only') {
+      return [];
+    }
+
+    const definitions: RpaFlowDefinition[] = [];
+
+    for (const source of bootstrapJob.sources || []) {
+      if (!['manual_rpa', 'rpa_bundle'].includes(source.sourceType) || !source.sourceContent) {
+        continue;
+      }
+
+      const parsed = parseRpaFlowDefinitions(source.sourceContent);
+      const metadata = (source.metadata as Record<string, any> | null) || {};
+      const rawPlatformConfig = (metadata.platformConfig as Record<string, any> | null) || {};
+      const platformConfig = { ...rawPlatformConfig };
+      delete platformConfig.executorMode;
+
+      for (const definition of parsed) {
+        const runtime = {
+          ...((definition.runtime as Record<string, any> | undefined) || {}),
+        };
+        const executorMode = String(rawPlatformConfig.executorMode || '').toLowerCase();
+        if (!runtime.executorMode && ['browser', 'local', 'http', 'stub'].includes(executorMode)) {
+          runtime.executorMode = executorMode;
+        }
+
+        definitions.push({
+          ...definition,
+          platform: {
+            ...platformConfig,
+            ...(definition.platform || {}),
+          },
+          runtime,
+        });
+      }
+    }
+
+    return definitions;
+  }
+
+  private buildProcessesFromRpaDefinitions(definitions: RpaFlowDefinition[]): BusinessProcess[] {
+    return definitions.map((definition) => {
+      const endpoints: Endpoint[] = [];
+      const fields = definition.fields || [];
+
+      if (definition.actions?.submit) {
+        endpoints.push({
+          name: `${definition.processName} submit`,
+          method: 'RPA',
+          path: `rpa://${definition.processCode}/submit`,
+          description: definition.description || `${definition.processName} submit flow`,
+          category: 'submit',
+          parameters: fields.map((field: NonNullable<RpaFlowDefinition['fields']>[number]) => ({
+            name: field.key,
+            type: field.type || 'string',
+            required: !!field.required,
+            description: field.label || field.key,
+            in: 'body',
+            defaultValue: field.defaultValue,
+          })),
+          responseMapping: {
+            success: 'success',
+            data: 'data',
+            id: 'submissionId',
+            message: 'message',
+          },
+          bodyTemplate: {
+            kind: 'rpa_submit',
+            processCode: definition.processCode,
+          },
+        });
+      }
+
+      if (definition.actions?.queryStatus) {
+        endpoints.push({
+          name: `${definition.processName} status query`,
+          method: 'RPA',
+          path: `rpa://${definition.processCode}/status`,
+          description: `${definition.processName} status query flow`,
+          category: 'status_query',
+          parameters: [{
+            name: 'submissionId',
+            type: 'string',
+            required: true,
+            description: 'OA submission identifier',
+            in: 'body',
+          }],
+          responseMapping: {
+            success: 'success',
+            data: 'data',
+            status: 'status',
+            message: 'message',
+          },
+          bodyTemplate: {
+            kind: 'rpa_status_query',
+            processCode: definition.processCode,
+          },
+        });
+      }
+
+      return {
+        processName: definition.processName,
+        processCode: definition.processCode,
+        category: definition.category || 'rpa',
+        description: definition.description || `${definition.processName} RPA flow`,
+        endpoints,
+      };
+    });
+  }
+
   private sanitizeRepairedProcess(
     original: BusinessProcess,
     candidate: BusinessProcess,
@@ -3300,12 +3851,43 @@ ${JSON.stringify(forms, null, 2)}
   } {
     if (!authConfig) return { publicConfig: {}, secretFields: null };
 
-    const sensitiveKeys = new Set(['password', 'token', 'appSecret', 'accessToken', 'refreshToken', 'secret']);
+    const sensitiveKeys = new Set([
+      'password',
+      'token',
+      'appSecret',
+      'accessToken',
+      'refreshToken',
+      'secret',
+      'serviceToken',
+      'ticketHeaderValue',
+    ]);
     const publicConfig: Record<string, any> = {};
     const secretFields: Record<string, any> = {};
     let hasSecret = false;
 
     for (const [key, value] of Object.entries(authConfig)) {
+      if (key === 'platformConfig' && value && typeof value === 'object' && !Array.isArray(value)) {
+        const publicPlatformConfig: Record<string, any> = {};
+        const secretPlatformConfig: Record<string, any> = {};
+
+        for (const [nestedKey, nestedValue] of Object.entries(value as Record<string, any>)) {
+          if (sensitiveKeys.has(nestedKey)) {
+            secretPlatformConfig[nestedKey] = nestedValue;
+            hasSecret = true;
+          } else {
+            publicPlatformConfig[nestedKey] = nestedValue;
+          }
+        }
+
+        if (Object.keys(publicPlatformConfig).length > 0) {
+          publicConfig[key] = publicPlatformConfig;
+        }
+        if (Object.keys(secretPlatformConfig).length > 0) {
+          secretFields[key] = secretPlatformConfig;
+        }
+        continue;
+      }
+
       if (sensitiveKeys.has(key)) {
         secretFields[key] = value;
         hasSecret = true;
@@ -3360,6 +3942,16 @@ ${JSON.stringify(forms, null, 2)}
     return typeMap[apiType] || 'text';
   }
 
+  private normalizeBusinessProcessNames(processes: BusinessProcess[]): BusinessProcess[] {
+    return processes.map((process) => ({
+      ...process,
+      processName: normalizeProcessName({
+        processName: process.processName,
+        processCode: process.processCode,
+      }),
+    }));
+  }
+
   /**
    * 根据实际发现的端点类型推断 ConnectorCapability
    */
@@ -3393,6 +3985,14 @@ ${JSON.stringify(forms, null, 2)}
    * 优先级：oaUrl > openApiUrl 的 origin > API 文档 servers 字段 > fallback
    */
   private resolveBaseUrl(bootstrapJob: any): string {
+    const authConfig = (bootstrapJob.authConfig as Record<string, any> | null) || {};
+    const platformConfig = (authConfig.platformConfig as Record<string, any> | null) || {};
+
+    if (platformConfig.entryUrl) {
+      try {
+        return new URL(platformConfig.entryUrl).origin;
+      } catch { /* ignore */ }
+    }
     // 1. 优先使用 oaUrl
     if (bootstrapJob.oaUrl) {
       return new URL(bootstrapJob.oaUrl).origin;

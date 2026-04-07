@@ -8,15 +8,29 @@
     "packages/*"
   ],
   "scripts": {
-    "dev": "turbo run dev",
-    "build": "turbo run build",
-    "test": "turbo run test",
-    "test:integration": "turbo run test:integration",
-    "test:e2e": "turbo run test:e2e",
-    "bootstrap:smoke": "tsx scripts/bootstrap-smoke.ts",
-    "db:migrate": "cd apps/api && pnpm prisma migrate dev",
-    "db:generate": "cd apps/api && pnpm prisma generate",
-    "db:seed": "cd apps/api && pnpm prisma db seed",
+    "dev": "node scripts/dev.js",
+    "dev:core": "node scripts/dev.js --apps=api,web",
+    "dev:api": "corepack pnpm --dir apps/api run dev",
+    "dev:web": "corepack pnpm --dir apps/web run dev",
+    "start:core": "node scripts/dev.js --mode=start --apps=api,web",
+    "start:api": "corepack pnpm --dir apps/api run build && corepack pnpm --dir apps/api run start",
+    "start:web": "corepack pnpm --dir apps/web run build && corepack pnpm --dir apps/web run start",
+    "logs": "node scripts/logs.js summary",
+    "logs:sessions": "node scripts/logs.js sessions",
+    "logs:path": "node scripts/logs.js path",
+    "logs:tail": "node scripts/logs.js tail",
+    "logs:organize": "node scripts/logs.js archive-legacy",
+    "logs:organize:dry-run": "node scripts/logs.js archive-legacy --dry-run",
+    "build": "node scripts/run-turbo.js build",
+    "test": "node scripts/run-turbo.js test",
+    "test:integration": "node scripts/run-turbo.js test:integration",
+    "test:e2e": "node scripts/run-turbo.js test:e2e",
+    "bootstrap:smoke": "corepack pnpm exec tsx scripts/bootstrap-smoke.ts",
+    "db:migrate": "corepack pnpm exec prisma migrate dev --schema prisma/schema.prisma",
+    "db:generate": "corepack pnpm exec prisma generate --schema prisma/schema.prisma",
+    "db:seed": "corepack pnpm --dir apps/api run prisma:seed",
+    "db:normalize-process-names": "corepack pnpm exec tsx scripts/normalize-process-names.ts --apply",
+    "db:normalize-process-names:dry-run": "corepack pnpm exec tsx scripts/normalize-process-names.ts",
     "docker:up": "docker compose up -d",
     "docker:down": "docker compose down",
     "docker:build": "docker compose up --build"
@@ -36,5 +50,12 @@
   "packageManager": "pnpm@8.15.0",
   "dependencies": {
     "@prisma/client": "5.22.0"
+  },
+  "pnpm": {
+    "overrides": {
+      "@nestjs/core": "10.4.22",
+      "@nestjs/common": "10.4.22",
+      "reflect-metadata": "0.2.2"
+    }
   }
 }

@@ -17,10 +17,12 @@ describe('SyncService Integration', () => {
 
   const mockPrisma = {
     connector: {
+      findFirst: jest.fn(),
       findUnique: jest.fn(),
     },
     connectorCapability: {
       findMany: jest.fn(),
+      findFirst: jest.fn(),
       findUnique: jest.fn(),
       upsert: jest.fn(),
     },
@@ -114,7 +116,7 @@ describe('SyncService Integration', () => {
       return Promise.resolve(null);
     });
 
-    mockPrisma.connector.findUnique.mockResolvedValue({
+    mockPrisma.connector.findFirst.mockResolvedValue({
       id: 'connector-1',
       tenantId: 'tenant-1',
     });
@@ -214,7 +216,33 @@ describe('SyncService Integration', () => {
 
     mockPrisma.connectorCapability.upsert.mockResolvedValue({});
 
-    const result = await service.updateConfig('connector-1', {
+    mockPrisma.connector.findFirst.mockResolvedValue({
+      id: 'connector-1',
+      tenantId: 'tenant-1',
+      oaType: 'openapi',
+      oclLevel: 'OCL4',
+      capability: {
+        supportsSchemaSync: true,
+        supportsReferenceSync: true,
+        supportsStatusPull: true,
+        supportsWebhook: true,
+        supportsCancel: true,
+        supportsUrge: true,
+        supportsDelegate: true,
+        supportsSupplement: true,
+        supportsRealtimePerm: true,
+        supportsIdempotency: true,
+        syncModes: ['full', 'incremental'],
+        metadata: {
+          webhookConfig: {
+            signatureHeader: 'x-webhook-signature',
+          },
+          customTag: 'keep-me',
+        },
+      },
+    });
+
+    const result = await service.updateConfig('connector-1', 'tenant-1', {
       updatedBy: 'admin',
       domains: {
         status: {
@@ -242,6 +270,7 @@ describe('SyncService Integration', () => {
     expect(mockPrisma.connectorCapability.upsert).toHaveBeenCalledWith({
       where: { connectorId: 'connector-1' },
       create: expect.objectContaining({
+        tenantId: 'tenant-1',
         metadata: expect.objectContaining({
           webhookConfig: {
             signatureHeader: 'x-webhook-signature',

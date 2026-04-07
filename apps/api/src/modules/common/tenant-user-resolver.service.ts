@@ -40,6 +40,11 @@ export class TenantUserResolverService {
       throw new BadRequestException('缺少用户身份，请重新登录');
     }
 
+    // In production, never allow fallback to arbitrary tenant user
+    if (process.env.NODE_ENV === 'production') {
+      throw new BadRequestException('生产环境不允许用户身份回退，请提供有效的用户凭证');
+    }
+
     const fallbackUser = await this.prisma.user.findFirst({
       where: {
         tenantId,

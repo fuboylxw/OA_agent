@@ -1,8 +1,11 @@
 import axios from 'axios';
 import * as fs from 'fs';
 import * as path from 'path';
+import { readEnv, resolveApiOrigin } from './lib/api-config';
 
-const API_BASE_URL = 'http://localhost:3001';
+const API_BASE_URL = resolveApiOrigin();
+const TEST_TENANT_ID = readEnv('TEST_TENANT_ID', 'TEST_TENANT_CODE') || 'test-tenant';
+const TEST_CONNECTOR_ID = readEnv('TEST_CONNECTOR_ID', 'TEST_CONNECTOR_NAME') || 'test-connector';
 
 /**
  * 测试API上传和办事流程识别系统
@@ -187,8 +190,8 @@ async function testApiUploadSystem() {
     const uploadResponse = await axios.post(
       `${API_BASE_URL}/mcp/upload-api-json`,
       {
-        tenantId: 'test-tenant',
-        connectorId: 'test-connector',
+        tenantId: TEST_TENANT_ID,
+        connectorId: TEST_CONNECTOR_ID,
         docType: 'openapi',
         docContent: JSON.stringify(sampleOpenApiDoc),
         oaUrl: 'https://oa.example.com',
@@ -242,8 +245,8 @@ async function testApiUploadSystem() {
       `${API_BASE_URL}/mcp/upload-history`,
       {
         params: {
-          tenantId: 'test-tenant',
-          connectorId: 'test-connector',
+          tenantId: TEST_TENANT_ID,
+          connectorId: TEST_CONNECTOR_ID,
         },
       },
     );
@@ -273,7 +276,7 @@ async function testApiUploadSystem() {
           {},
           {
             params: {
-              connectorId: 'test-connector',
+              connectorId: TEST_CONNECTOR_ID,
             },
           },
         );

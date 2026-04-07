@@ -1,0 +1,153 @@
+{
+  "flows": [
+    {
+      "processCode": "leave_apply",
+      "processName": "请假申请",
+      "category": "holiday",
+      "description": "基于 perManaGement 老 OA 的请假申请流程。登录页带验证码，初始化阶段仅用于生成 RPA 流程定义。",
+      "fields": [
+        {
+          "key": "login_emp_id",
+          "label": "登录工号",
+          "type": "text",
+          "required": true
+        },
+        {
+          "key": "login_password",
+          "label": "登录密码",
+          "type": "text",
+          "required": true
+        },
+        {
+          "key": "captcha",
+          "label": "验证码",
+          "type": "text",
+          "required": true
+        },
+        {
+          "key": "start_date",
+          "label": "开始日期",
+          "type": "date",
+          "required": true
+        },
+        {
+          "key": "end_date",
+          "label": "结束日期",
+          "type": "date",
+          "required": true
+        },
+        {
+          "key": "leave_reason",
+          "label": "请假原因",
+          "type": "textarea",
+          "required": true
+        }
+      ],
+      "actions": {
+        "submit": {
+          "steps": [
+            {
+              "type": "goto",
+              "value": "http://localhost:8080/perManaGement/Login.jsp",
+              "description": "打开登录页"
+            },
+            {
+              "type": "input",
+              "selector": "#uid",
+              "fieldKey": "login_emp_id",
+              "description": "填写工号"
+            },
+            {
+              "type": "input",
+              "selector": "#pwd",
+              "fieldKey": "login_password",
+              "description": "填写密码"
+            },
+            {
+              "type": "input",
+              "selector": "#yanzhengma",
+              "fieldKey": "captcha",
+              "description": "填写验证码"
+            },
+            {
+              "type": "click",
+              "selector": "#submit",
+              "description": "提交登录"
+            },
+            {
+              "type": "goto",
+              "value": "http://localhost:8080/perManaGement/holsAction_addHolsUI.action",
+              "description": "进入请假申请页面"
+            },
+            {
+              "type": "input",
+              "selector": "input[name=\"hols.startTime\"]",
+              "fieldKey": "start_date",
+              "description": "填写开始日期"
+            },
+            {
+              "type": "input",
+              "selector": "input[name=\"hols.endTime\"]",
+              "fieldKey": "end_date",
+              "description": "填写结束日期"
+            },
+            {
+              "type": "input",
+              "selector": "textarea[name=\"hols.executes\"]",
+              "fieldKey": "leave_reason",
+              "description": "填写请假原因"
+            },
+            {
+              "type": "click",
+              "selector": "input[type=\"submit\"]",
+              "description": "提交请假申请"
+            }
+          ],
+          "successAssert": {
+            "type": "text",
+            "value": "请假情况列表"
+          }
+        },
+        "queryStatus": {
+          "steps": [
+            {
+              "type": "goto",
+              "value": "http://localhost:8080/perManaGement/holsAction_findHolsPageList.action",
+              "description": "进入请假申请查询页面"
+            },
+            {
+              "type": "wait",
+              "timeoutMs": 1500,
+              "description": "等待列表渲染"
+            },
+            {
+              "type": "extract",
+              "selector": "table",
+              "fieldKey": "status",
+              "description": "提取请假状态列表"
+            }
+          ],
+          "successAssert": {
+            "type": "text",
+            "value": "请假情况列表"
+          }
+        }
+      },
+      "platform": {
+        "entryUrl": "http://localhost:8080/perManaGement/Login.jsp",
+        "targetSystem": "perManaGement",
+        "timeoutMs": 15000
+      },
+      "runtime": {
+        "executorMode": "browser",
+        "browserProvider": "playwright",
+        "headless": false,
+        "snapshotMode": "structured-text",
+        "timeoutMs": 15000,
+        "stabilityTimeoutMs": 1500,
+        "maxSteps": 20,
+        "maxRetries": 1
+      }
+    }
+  ]
+}

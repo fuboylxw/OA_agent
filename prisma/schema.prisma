@@ -6,7 +6,7 @@ generator client {
 }
 
 datasource db {
-  provider = "mysql"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
@@ -33,8 +33,12 @@ model Tenant {
   permissionPolicies    PermissionPolicy[]
   chatSessions          ChatSession[]
   mcpTools              MCPTool[]
+  apiUploadJobs         ApiUploadJob[]
   parseJobs             ParseJob[]
   connectorSecretRefs   ConnectorSecretRef[]
+  authBindings          AuthBinding[]
+  authSessionAssets     AuthSessionAsset[]
+  delegatedCredentials  UserDelegatedCredential[]
   connectorCapabilities ConnectorCapability[]
   remoteProcesses       RemoteProcess[]
   syncCursors           SyncCursor[]
@@ -62,6 +66,8 @@ model User {
   drafts       ProcessDraft[]
   submissions  Submission[]
   chatSessions ChatSession[]
+  authBindings AuthBinding[]
+  delegatedCredentials UserDelegatedCredential[]
 
   @@unique([tenantId, username])
   @@unique([tenantId, email])
@@ -122,7 +128,7 @@ model BootstrapSource {
   bootstrapJobId String
   sourceType     String // oa_url, source_bundle, openapi, har, file
   sourceUrl      String?
-  sourceContent  String?  @db.LongText // For inline content
+  sourceContent  String?  @db.Text // For inline content
   metadata       Json? // Additional metadata
   createdAt      DateTime @default(now())
 
@@ -364,8 +370,11 @@ model Connector {
   webhookInboxes    WebhookInbox[]
   processTemplates  ProcessTemplate[]
   mcpTools          MCPTool[]
+  apiUploadJobs     ApiUploadJob[]
   syncLogs          SyncLog[]
   bootstrapJobs     BootstrapJob[]
+  authBindings      AuthBinding[]
+  delegatedCredentials UserDelegatedCredential[]
 
   @@unique([tenantId, name])
   @@map("connectors")
@@ -388,6 +397,84 @@ model ConnectorSecretRef {
 
   @@index([tenantId])
   @@map("connector_secret_refs")
+}
+
+model AuthBinding {
+  id           String    @id @default(uuid())
+  tenantId     String
+  connectorId  String
+  userId       String?
+  bindingName  String?
+  ownerType    String    @default("user") // user, service
+  authType     String // oauth2, basic, apikey, cookie
+  authMode     String // password_bootstrap, api_token, cookie_session, browser_session, ticket_broker
+  status       String    @default("active") // active, inactive, expired, revoked
+  isDefault    Boolean   @default(false)
+  lastBoundAt  DateTime?
+  lastUsedAt   DateTime?
+  expiresAt    DateTime?
+  metadata     Json?
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  tenant       Tenant             @relation(fields: [tenantId], references: [id])
+  connector    Connector          @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+  user         User?              @relation(fields: [userId], references: [id], onDelete: SetNull)
+  sessionAssets AuthSessionAsset[]
+
+  @@index([tenantId, connectorId, status])
+  @@index([tenantId, userId, status])
+  @@index([connectorId, userId, isDefault])
+  @@map("auth_bindings")
+}
+
+model AuthSessionAsset {
+  id              String    @id @default(uuid())
+  tenantId        String
+  authBindingId   String
+  assetType       String // auth_payload, api_token, cookie_session, browser_session, jump_ticket
+  status          String    @default("active") // active, stale, expired, revoked
+  encryptedPayload String   @db.Text
+  issuedAt        DateTime?
+  expiresAt       DateTime?
+  lastValidatedAt DateTime?
+  metadata        Json?
+  createdAt       DateTime  @default(now())
+  updatedAt       DateTime  @updatedAt
+
+  tenant       Tenant      @relation(fields: [tenantId], references: [id])
+  authBinding  AuthBinding @relation(fields: [authBindingId], references: [id], onDelete: Cascade)
+
+  @@index([tenantId, authBindingId, status])
+  @@index([authBindingId, assetType, status])
+  @@map("auth_session_assets")
+}
+
+model UserDelegatedCredential {
+  id                   String    @id @default(uuid())
+  tenantId             String
+  userId               String
+  connectorId          String
+  providerType         String
+  subject              String?
+  status               String    @default("active")
+  encryptedAccessToken String?   @db.Text
+  encryptedRefreshToken String?  @db.Text
+  accessTokenExpiresAt DateTime?
+  scope                String?
+  metadata             Json?
+  lastUsedAt           DateTime?
+  createdAt            DateTime  @default(now())
+  updatedAt            DateTime  @updatedAt
+
+  tenant    Tenant    @relation(fields: [tenantId], references: [id])
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  connector Connector @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+
+  @@unique([tenantId, userId, connectorId])
+  @@index([tenantId, userId, status])
+  @@index([connectorId, status])
+  @@map("user_delegated_credentials")
 }
 
 model ConnectorCapability {
@@ -610,6 +697,7 @@ model ChatMessage {
   session ChatSession @relation(fields: [sessionId], references: [id], onDelete: Cascade)
 
   @@index([sessionId])
+  @@index([sessionId, createdAt])
   @@map("chat_messages")
 }
 
@@ -669,6 +757,7 @@ model Submission {
   @@unique([tenantId, idempotencyKey])
   @@index([tenantId, userId])
   @@index([tenantId, oaSubmissionId])
+  @@index([tenantId, templateId, status])
   @@map("submissions")
 }
 
@@ -831,12 +920,78 @@ model MCPTool {
   @@index([connectorId])
   @@index([flowCode])
   @@index([category])
+  @@index([connectorId, category, enabled])
   @@map("mcp_tools")
 }
 
 // ============================================================
 // API Document Parser (智能体API文档解析)
 // ============================================================
+
+model ApiUploadJob {
+  id                      String   @id @default(uuid())
+  tenantId                String
+  connectorId             String
+  sourceName              String?
+  sourceHash              String
+  sourceContent           String   @db.Text
+  docType                 String
+  oaUrl                   String?
+  authConfig              Json?
+  autoValidate            Boolean  @default(true)
+  autoGenerateMcp         Boolean  @default(true)
+  status                  String   @default("PENDING")
+  currentAttemptNo        Int      @default(0)
+  finalDecision           String?
+  finalErrorType          String?
+  finalErrorMessage       String?  @db.Text
+  acceptedContent         String?  @db.Text
+  acceptedContentHash     String?
+  acceptedEndpointCount   Int?
+  acceptedWorkflowCount   Int?
+  acceptedValidationScore Float?
+  uploadResult            Json?
+  createdAt               DateTime @default(now())
+  updatedAt               DateTime @updatedAt
+  completedAt             DateTime?
+
+  tenant    Tenant             @relation(fields: [tenantId], references: [id])
+  connector Connector          @relation(fields: [connectorId], references: [id], onDelete: Cascade)
+  attempts  ApiUploadAttempt[]
+
+  @@index([tenantId, connectorId])
+  @@index([tenantId, status])
+  @@map("api_upload_jobs")
+}
+
+model ApiUploadAttempt {
+  id              String   @id @default(uuid())
+  jobId           String
+  attemptNo       Int
+  stage           String
+  strategy        String
+  inputContent    String   @db.Text
+  inputHash       String
+  outputContent   String?  @db.Text
+  outputHash      String?
+  diagnostics     Json?
+  repairActions   Json?
+  parseSuccess    Boolean  @default(false)
+  endpointCount   Int      @default(0)
+  workflowCount   Int      @default(0)
+  validationScore Float?
+  decision        String
+  errorType       String?
+  errorMessage    String?  @db.Text
+  createdAt       DateTime @default(now())
+  updatedAt       DateTime @updatedAt
+
+  job ApiUploadJob @relation(fields: [jobId], references: [id], onDelete: Cascade)
+
+  @@unique([jobId, attemptNo])
+  @@index([jobId, decision])
+  @@map("api_upload_attempts")
+}
 
 model ParseJob {
   id             String       @id @default(uuid())
@@ -908,7 +1063,7 @@ model SyncCursor {
   connectorId   String
   syncDomain    String // schema, reference, status
   cursorType    String // watermark, token, etag, page
-  cursorValue   String?   @db.LongText
+  cursorValue   String?   @db.Text
   lastVersion   String?
   lastSuccessAt DateTime?
   lastFailureAt DateTime?

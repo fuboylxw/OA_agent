@@ -10,6 +10,11 @@ export const CreateBootstrapJobSchema = z.object({
   openApiUrl: z.string().url().optional(),
   harFileUrl: z.string().url().optional(),
   uploadedFiles: z.array(z.string()).optional(),
+  accessMode: z.enum(['backend_api', 'direct_link', 'text_guide']).optional(),
+  bootstrapMode: z.enum(['api_only', 'rpa_only', 'hybrid']).optional(),
+  rpaFlowContent: z.string().optional(),
+  rpaSourceType: z.enum(['manual', 'recording', 'bundle', 'direct_link', 'text_guide']).optional(),
+  platformConfig: z.record(z.any()).optional(),
 });
 
 export type CreateBootstrapJobInput = z.infer<typeof CreateBootstrapJobSchema>;

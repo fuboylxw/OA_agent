@@ -11,6 +11,7 @@ export function mapExternalStatusToSubmissionStatus(
   const normalized = (externalStatus || '').trim().toLowerCase();
 
   if (!normalized) return fallbackStatus;
+
   if (
     ['error', 'failed', 'failure', 'timeout'].includes(normalized)
     || normalized.includes('失败')
@@ -18,6 +19,7 @@ export function mapExternalStatusToSubmissionStatus(
   ) {
     return 'failed';
   }
+
   if (
     ['cancelled', 'canceled', 'revoked', 'terminated'].includes(normalized)
     || normalized.includes('recall')
@@ -27,6 +29,7 @@ export function mapExternalStatusToSubmissionStatus(
   ) {
     return 'cancelled';
   }
+
   if (
     normalized.includes('reject')
     || normalized.includes('deny')
@@ -36,6 +39,20 @@ export function mapExternalStatusToSubmissionStatus(
   ) {
     return 'rejected';
   }
+
+  if (
+    normalized.includes('draft')
+    || normalized.includes('create')
+    || normalized.includes('new')
+    || normalized.includes('init')
+    || normalized.includes('saved')
+    || normalized.includes('草稿')
+    || normalized.includes('新建')
+    || normalized.includes('已创建')
+  ) {
+    return 'pending';
+  }
+
   if (
     normalized.includes('approve')
     || normalized.includes('pass')
@@ -49,6 +66,7 @@ export function mapExternalStatusToSubmissionStatus(
   ) {
     return 'approved';
   }
+
   if (
     normalized.includes('pending')
     || normalized.includes('review')

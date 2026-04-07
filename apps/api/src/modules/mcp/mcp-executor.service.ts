@@ -27,10 +27,15 @@ export class MCPExecutorService {
     toolName: string,
     params: Record<string, any>,
     connectorId: string,
+    tenantId?: string,
   ): Promise<any> {
     // 1. Query MCP tool definition
     const tool = await this.prisma.mCPTool.findFirst({
-      where: { toolName, connectorId },
+      where: {
+        toolName,
+        connectorId,
+        ...(tenantId ? { tenantId } : {}),
+      },
       include: {
         connector: {
           include: {
@@ -57,10 +62,9 @@ export class MCPExecutorService {
     }
 
     // 2. Apply parameter mapping
-    const mappedParams = this.applyParamMapping(
-      params,
-      tool.paramMapping as any,
-    );
+    const mappedParams = tool.paramMapping
+      ? this.applyParamMapping(params, tool.paramMapping as any)
+      : params;
 
     // 3. Build HTTP request
     const resolvedAuthConfig = await this.adapterRuntimeService.resolveAuthConfig(tool.connector);
@@ -81,6 +85,7 @@ export class MCPExecutorService {
       this.logger.debug(`Response status: ${response.status}`);
 
       // 5. Apply response mapping
+      if (!tool.responseMapping) return response.data;
       const mappedResponse = this.applyResponseMapping(
         response.data,
         tool.responseMapping as any,
@@ -92,10 +97,16 @@ export class MCPExecutorService {
       if (error.response?.status === 401 && tool.connector.authType === 'cookie') {
         this.logger.warn(`Got 401, clearing cookie cache and retrying...`);
         this.cookieCache.delete(tool.connector.id);
-        const cookie = await this.getCookieForConnector(tool.connector, resolvedAuthConfig);
-        request.headers = { ...request.headers, Cookie: cookie };
-        const retryResp = await axios(request);
-        return this.applyResponseMapping(retryResp.data, tool.responseMapping as any);
+        try {
+          const cookie = await this.getCookieForConnector(tool.connector, resolvedAuthConfig);
+          request.headers = { ...request.headers, Cookie: cookie };
+          const retryResp = await axios(request);
+          if (!tool.responseMapping) return retryResp.data;
+          return this.applyResponseMapping(retryResp.data, tool.responseMapping as any);
+        } catch (retryError: any) {
+          this.logger.error(`Cookie retry also failed for ${toolName}: ${retryError.message}`);
+          throw new Error(`MCP tool execution failed after cookie retry: ${retryError.response?.data?.message || retryError.message}`);
+        }
       }
       this.logger.error(`Tool ${toolName} execution failed: ${error.message}`);
       throw new Error(`MCP tool execution failed: ${error.response?.data?.message || error.message}`);
@@ -281,7 +292,7 @@ export class MCPExecutorService {
     const resp = await axios.post(
       loginUrl,
       { username: authConfig.username, password: authConfig.password },
-      { headers: { 'Content-Type': 'application/json' }, maxRedirects: 0 },
+      { headers: { 'Content-Type': 'application/json' }, maxRedirects: 0, validateStatus: () => true },
     );
 
     // Extract Set-Cookie header

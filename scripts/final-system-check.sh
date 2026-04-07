@@ -78,7 +78,7 @@ if [ -f .env ]; then
                 API_KEY=$(grep OPENAI_API_KEY .env | cut -d'=' -f2)
                 MODEL=$(grep OPENAI_MODEL .env | cut -d'=' -f2)
                 echo "Model: $MODEL"
-                echo "API Key: ${API_KEY:0:10}...${API_KEY: -4}"
+                echo "API Key: [configured]"
 
                 # Quick test
                 echo -n "Testing OpenAI API... "
@@ -99,7 +99,7 @@ if [ -f .env ]; then
                 API_KEY=$(grep ANTHROPIC_API_KEY .env | cut -d'=' -f2 | sed 's/#.*//' | xargs)
                 MODEL=$(grep ANTHROPIC_MODEL .env | cut -d'=' -f2 | sed 's/#.*//' | xargs)
                 echo "Model: $MODEL"
-                echo "API Key: ${API_KEY:0:10}...${API_KEY: -4}"
+                echo "API Key: [configured]"
                 echo -e "${BLUE}(Skipping API test)${NC}"
                 ;;
 

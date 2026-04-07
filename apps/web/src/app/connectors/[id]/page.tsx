@@ -1,5 +1,10 @@
-import { getApiUrl, getServerAuth } from '../../lib/auth';
-import { notFound, redirect } from 'next/navigation';
+'use client';
+
+import { useEffect, useState } from 'react';
+import { useParams } from 'next/navigation';
+import Link from 'next/link';
+import AuthGuard from '../../components/AuthGuard';
+import { apiClient } from '../../lib/api-client';
 
 function formatDate(value?: string | null) {
   if (!value) return '-';
@@ -12,29 +17,51 @@ function renderBoolean(value: boolean | null | undefined) {
   return '-';
 }
 
-export default async function ConnectorDetailPage({
-  params,
-}: {
-  params: { id: string };
-}) {
-  const { userId, roles } = await getServerAuth();
-  if (!userId) redirect('/login');
-  if (!roles.includes('admin') && !roles.includes('flow_manager')) redirect('/');
+function renderExecutionModes(uiHints: Record<string, any> | null | undefined) {
+  const executionModes = uiHints?.executionModes as Record<string, string[]> | undefined;
+  if (!executionModes) return '-';
+  const submit = Array.isArray(executionModes.submit) ? executionModes.submit.join(' / ') : '-';
+  const queryStatus = Array.isArray(executionModes.queryStatus) ? executionModes.queryStatus.join(' / ') : '-';
+  return `submit: ${submit}; queryStatus: ${queryStatus}`;
+}
 
-  const API_URL = getApiUrl();
-  const response = await fetch(`${API_URL}/api/v1/connectors/${params.id}`, {
-    cache: 'no-store',
-  });
+function ConnectorDetail() {
+  const params = useParams<{ id: string }>();
+  const [connector, setConnector] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
-  if (response.status === 404) {
-    notFound();
+  useEffect(() => {
+    if (!params.id) return;
+    apiClient.get(`/connectors/${params.id}`).then((res) => {
+      setConnector(res.data);
+    }).catch((err) => {
+      setError(err.response?.status === 404 ? '连接器不存在' : '加载失败');
+    }).finally(() => setLoading(false));
+  }, [params.id]);
+
+  if (loading) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <div className="text-center">
+          <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-gray-200 border-t-blue-600"></div>
+          <p className="text-sm text-gray-500">加载中...</p>
+        </div>
+      </div>
+    );
   }
 
-  if (!response.ok) {
-    throw new Error(`Failed to load connector: ${response.status}`);
+  if (error || !connector) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <div className="text-center">
+          <p className="text-gray-500">{error || '连接器不存在'}</p>
+          <Link href="/connectors" className="mt-4 inline-block text-sm text-blue-600 hover:text-blue-800">返回连接器列表</Link>
+        </div>
+      </div>
+    );
   }
 
-  const connector = await response.json();
   const capability = connector.capability || {};
 
   return (
@@ -42,9 +69,9 @@ export default async function ConnectorDetailPage({
       <div className="mx-auto max-w-6xl px-6 py-8">
         <div className="mb-6 flex items-center justify-between gap-4">
           <div>
-            <a href="/connectors" className="text-sm text-blue-600 hover:text-blue-800">
+            <Link href="/connectors" className="text-sm text-blue-600 hover:text-blue-800">
               返回连接器列表
-            </a>
+            </Link>
             <h1 className="mt-2 text-2xl font-bold text-gray-900">{connector.name}</h1>
             <p className="mt-1 text-sm text-gray-600">
               {connector.oaVendor || '未知厂商'} · {connector.oaType} · 创建于 {formatDate(connector.createdAt)}
@@ -103,32 +130,50 @@ export default async function ConnectorDetailPage({
         <div className="mb-6 rounded-xl border border-gray-200 bg-white p-6">
           <h2 className="mb-4 text-lg font-semibold text-gray-900">能力矩阵</h2>
           <div className="grid grid-cols-1 gap-4 text-sm md:grid-cols-3">
-            <div className="rounded-lg bg-gray-50 p-4">自动发现：{renderBoolean(capability.supportsDiscovery)}</div>
-            <div className="rounded-lg bg-gray-50 p-4">Schema 同步：{renderBoolean(capability.supportsSchemaSync)}</div>
-            <div className="rounded-lg bg-gray-50 p-4">字典同步：{renderBoolean(capability.supportsReferenceSync)}</div>
-            <div className="rounded-lg bg-gray-50 p-4">状态拉取：{renderBoolean(capability.supportsStatusPull)}</div>
-            <div className="rounded-lg bg-gray-50 p-4">Webhook：{renderBoolean(capability.supportsWebhook)}</div>
-            <div className="rounded-lg bg-gray-50 p-4">幂等：{renderBoolean(capability.supportsIdempotency)}</div>
+            <div className="rounded-lg bg-gray-50 p-4">自动发现: {renderBoolean(capability.supportsDiscovery)}</div>
+            <div className="rounded-lg bg-gray-50 p-4">Schema 同步: {renderBoolean(capability.supportsSchemaSync)}</div>
+            <div className="rounded-lg bg-gray-50 p-4">字典同步: {renderBoolean(capability.supportsReferenceSync)}</div>
+            <div className="rounded-lg bg-gray-50 p-4">状态拉取: {renderBoolean(capability.supportsStatusPull)}</div>
+            <div className="rounded-lg bg-gray-50 p-4">Webhook: {renderBoolean(capability.supportsWebhook)}</div>
+            <div className="rounded-lg bg-gray-50 p-4">幂等: {renderBoolean(capability.supportsIdempotency)}</div>
           </div>
         </div>
 
         <div className="rounded-xl border border-gray-200 bg-white p-6">
           <h2 className="mb-4 text-lg font-semibold text-gray-900">已发布流程</h2>
           {connector.processTemplates?.length ? (
-            <div className="space-y-3">
-              {connector.processTemplates.map((template: any) => (
-                <div key={template.id} className="rounded-lg border border-gray-200 p-4">
-                  <div className="flex items-center justify-between gap-4">
-                    <div>
-                      <div className="font-medium text-gray-900">{template.processName}</div>
-                      <div className="mt-1 text-sm text-gray-500">
-                        {template.processCode} · {template.processCategory || '未分类'}
+            <div className="space-y-4">
+              {connector.processTemplates.map((template: any) => {
+                const uiHints = (template.uiHints as Record<string, any> | null) || null;
+                const hasRpaDefinition = Boolean(uiHints?.rpaDefinition);
+                return (
+                  <div key={template.id} className="rounded-lg border border-gray-200 p-4">
+                    <div className="flex items-center justify-between gap-4">
+                      <div>
+                        <div className="font-medium text-gray-900">{template.processName}</div>
+                        <div className="mt-1 text-sm text-gray-500">
+                          {template.processCode} · {template.processCategory || '未分类'}
+                        </div>
+                      </div>
+                      <div className="text-sm text-gray-500">v{template.version}</div>
+                    </div>
+                    <div className="mt-3 grid grid-cols-1 gap-3 text-sm md:grid-cols-3">
+                      <div className="rounded-lg bg-gray-50 p-3">
+                        <div className="text-xs text-gray-500">FAL</div>
+                        <div className="mt-1 text-gray-900">{template.falLevel || '-'}</div>
+                      </div>
+                      <div className="rounded-lg bg-gray-50 p-3">
+                        <div className="text-xs text-gray-500">Execution Modes</div>
+                        <div className="mt-1 text-gray-900">{renderExecutionModes(uiHints)}</div>
+                      </div>
+                      <div className="rounded-lg bg-gray-50 p-3">
+                        <div className="text-xs text-gray-500">RPA Definition</div>
+                        <div className="mt-1 text-gray-900">{hasRpaDefinition ? '已配置' : '未配置'}</div>
                       </div>
                     </div>
-                    <div className="text-sm text-gray-500">v{template.version}</div>
                   </div>
-                </div>
-              ))}
+                );
+              })}
             </div>
           ) : (
             <div className="text-sm text-gray-500">暂无已发布流程</div>
@@ -136,5 +181,13 @@ export default async function ConnectorDetailPage({
         </div>
       </div>
     </main>
+  );
+}
+
+export default function ConnectorDetailPage() {
+  return (
+    <AuthGuard allowedRoles={['admin', 'flow_manager']}>
+      <ConnectorDetail />
+    </AuthGuard>
   );
 }

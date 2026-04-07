@@ -1,22 +1,9 @@
 import { Injectable, Logger } from '@nestjs/common';
+import { normalizeProcessName } from '@uniflow/shared-types';
 import { PrismaService } from '../common/prisma.service';
 import { AdapterRuntimeService } from '../adapter-runtime/adapter-runtime.service';
 import { GenericHttpAdapter } from '../adapter-runtime/generic-http-adapter';
 
-/**
- * 运行时流程发现服务
- *
- * 当初始化时只识别出"通用申请流程"（generic_application），
- * 本服务通过调用 OA 系统的流程列表接口（_system_flow_list MCPTool），
- * 动态发现具体的流程类型并自动创建 ProcessTemplate。
- *
- * 工作原理：
- *   1. 从 MCPTool 表找到 category='flow_list' 的工具
- *   2. 通过 GenericHttpAdapter 调用该接口
- *   3. 用 responseMapping 中的 listPath/code/name 解析响应
- *   4. 为每个发现的流程创建 ProcessTemplate（如果不存在）
- *   5. 缓存结果，避免重复调用
- */
 @Injectable()
 export class FlowDiscoveryService {
   private readonly logger = new Logger(FlowDiscoveryService.name);
@@ -26,14 +13,35 @@ export class FlowDiscoveryService {
     private readonly adapterRuntime: AdapterRuntimeService,
   ) {}
 
-  /**
-   * 发现 connector 下所有可用的流程类型
-   * 返回已有 + 新发现的流程列表
-   */
-  async discoverFlows(connectorId: string): Promise<DiscoveredFlow[]> {
-    // 1. 找到 flow_list 工具
+  async discoverFlows(connectorId: string, tenantId: string): Promise<DiscoveredFlow[]> {
+    const connector = await this.prisma.connector.findFirst({
+      where: {
+        id: connectorId,
+        tenantId,
+      },
+      select: {
+        id: true,
+        tenantId: true,
+      },
+    });
+
+    if (!connector) {
+      this.logger.warn(`Connector ${connectorId} not found for tenant ${tenantId}`);
+      return [];
+    }
+
     const flowListTool = await this.prisma.mCPTool.findFirst({
-      where: { connectorId, category: 'flow_list', enabled: true },
+      where: {
+        connectorId: connector.id,
+        tenantId,
+        category: 'flow_list',
+        enabled: true,
+      },
+      select: {
+        apiEndpoint: true,
+        httpMethod: true,
+        responseMapping: true,
+      },
     });
 
     if (!flowListTool) {
@@ -41,15 +49,9 @@ export class FlowDiscoveryService {
       return [];
     }
 
-    // 2. 调用 OA 系统的流程列表接口
-    const connector = await this.prisma.connector.findUnique({
-      where: { id: connectorId },
-    });
-    if (!connector) return [];
-
     let adapter;
     try {
-      adapter = await this.adapterRuntime.createAdapterForConnector(connectorId);
+      adapter = await this.adapterRuntime.createAdapterForConnector(connector.id);
 
       if (!('callEndpoint' in adapter)) {
         this.logger.log(`Connector ${connectorId}: adapter does not support callEndpoint`);
@@ -63,46 +65,66 @@ export class FlowDiscoveryService {
         {},
       );
 
-      // 3. 解析响应
-      const mapping = flowListTool.responseMapping as any;
-      const listPath = mapping?.listPath || 'data';
-      const codeField = mapping?.code || 'code';
-      const nameField = mapping?.name || 'name';
-      const categoryField = mapping?.category || 'category';
+      const mapping = (flowListTool.responseMapping || {}) as Record<string, any>;
+      const listPath = typeof mapping.listPath === 'string' ? mapping.listPath : 'data';
+      const codeField = typeof mapping.code === 'string' ? mapping.code : 'code';
+      const nameField = typeof mapping.name === 'string' ? mapping.name : 'name';
+      const categoryField = typeof mapping.category === 'string' ? mapping.category : 'category';
 
       const items = this.extractField(response, listPath);
       if (!Array.isArray(items)) {
-        this.logger.warn(`flow_list response at "${listPath}" is not an array`);
+        this.logger.warn(`Connector ${connectorId}: flow list at "${listPath}" is not an array`);
         return [];
       }
 
-      // 4. 为每个流程创建 ProcessTemplate（如果不存在）
-      const discovered: DiscoveredFlow[] = [];
-      const tenantId = connector.tenantId;
-
-      // 找到通用提交端点（generic_application 的 submit 工具）
       const genericSubmitTool = await this.prisma.mCPTool.findFirst({
-        where: { connectorId, flowCode: 'generic_application', category: 'submit' },
+        where: {
+          connectorId: connector.id,
+          tenantId,
+          flowCode: 'generic_application',
+          category: 'submit',
+        },
+        select: {
+          apiEndpoint: true,
+          httpMethod: true,
+        },
       });
 
-      for (const item of items) {
-        const code = item[codeField];
-        const name = item[nameField] || code;
-        const category = item[categoryField] || '其他';
+      const discovered: DiscoveredFlow[] = [];
 
-        if (!code) continue;
+      for (const rawItem of items) {
+        if (!rawItem || typeof rawItem !== 'object' || Array.isArray(rawItem)) {
+          continue;
+        }
 
-        const processCode = this.toProcessCode(code);
+        const item = rawItem as Record<string, any>;
+        const remoteCode = item[codeField];
+        if (!remoteCode) {
+          continue;
+        }
 
-        // 检查是否已存在
+        const processCode = this.toProcessCode(String(remoteCode));
+        const processName = normalizeProcessName({
+          processName: String(item[nameField] || remoteCode),
+          processCode,
+        });
+        const category = String(item[categoryField] || 'other');
+
         const existing = await this.prisma.processTemplate.findFirst({
-          where: { connectorId, processCode },
+          where: {
+            connectorId: connector.id,
+            tenantId,
+            processCode,
+          },
+          select: {
+            id: true,
+          },
         });
 
         if (existing) {
           discovered.push({
             processCode,
-            processName: name,
+            processName,
             category,
             isNew: false,
             templateId: existing.id,
@@ -110,15 +132,14 @@ export class FlowDiscoveryService {
           continue;
         }
 
-        // 创建新的 ProcessTemplate
         const template = await this.prisma.processTemplate.create({
           data: {
             tenantId,
-            connectorId,
+            connectorId: connector.id,
             processCode,
-            processName: name,
+            processName,
             processCategory: category,
-            description: `${name}（运行时发现）`,
+            description: `${processName} (runtime discovered)`,
             version: 1,
             status: 'published',
             falLevel: 'F2',
@@ -127,7 +148,7 @@ export class FlowDiscoveryService {
               submitEndpoint: genericSubmitTool?.apiEndpoint,
               submitMethod: genericSubmitTool?.httpMethod,
               flowTypeParam: codeField,
-              flowTypeValue: code,
+              flowTypeValue: remoteCode,
             },
             publishedAt: new Date(),
           },
@@ -135,17 +156,15 @@ export class FlowDiscoveryService {
 
         discovered.push({
           processCode,
-          processName: name,
+          processName,
           category,
           isNew: true,
           templateId: template.id,
         });
-
-        this.logger.log(`Discovered flow: ${processCode} (${name})`);
       }
 
       this.logger.log(
-        `Connector ${connectorId}: discovered ${discovered.length} flows (${discovered.filter(d => d.isNew).length} new)`,
+        `Connector ${connectorId}: discovered ${discovered.length} flows (${discovered.filter((flow) => flow.isNew).length} new)`,
       );
 
       return discovered;
@@ -159,82 +178,116 @@ export class FlowDiscoveryService {
     }
   }
 
-  /**
-   * 按关键词搜索流程（AI 对话时用）
-   * 先查本地 ProcessTemplate，没有再触发远程发现
-   */
   async findFlow(
     connectorId: string,
+    tenantId: string,
     keyword: string,
   ): Promise<DiscoveredFlow | null> {
-    // 1. 先查本地
-    const local = await this.prisma.processTemplate.findMany({
+    const normalizedKeyword = keyword.trim();
+    if (!normalizedKeyword) {
+      return null;
+    }
+
+    const local = await this.prisma.processTemplate.findFirst({
       where: {
         connectorId,
+        tenantId,
         status: 'published',
         OR: [
-          { processName: { contains: keyword } },
-          { processCode: { contains: keyword } },
-          { description: { contains: keyword } },
+          { processName: { contains: normalizedKeyword } },
+          { processCode: { contains: normalizedKeyword } },
+          { description: { contains: normalizedKeyword } },
         ],
       },
-      take: 1,
+      orderBy: {
+        updatedAt: 'desc',
+      },
+      select: {
+        id: true,
+        processCode: true,
+        processName: true,
+        processCategory: true,
+      },
     });
 
-    if (local.length > 0) {
+    if (local) {
       return {
-        processCode: local[0].processCode,
-        processName: local[0].processName,
-        category: local[0].processCategory || '其他',
+        processCode: local.processCode,
+        processName: normalizeProcessName({
+          processName: local.processName,
+          processCode: local.processCode,
+        }),
+        category: local.processCategory || 'other',
         isNew: false,
-        templateId: local[0].id,
+        templateId: local.id,
       };
     }
 
-    // 2. 本地没有，触发远程发现
-    const allFlows = await this.discoverFlows(connectorId);
-    if (allFlows.length === 0) return null;
+    const discovered = await this.discoverFlows(connectorId, tenantId);
+    if (discovered.length === 0) {
+      return null;
+    }
 
-    // 3. 从发现结果中模糊匹配
-    const kw = keyword.toLowerCase();
-    return allFlows.find(
-      f => f.processName.toLowerCase().includes(kw) || f.processCode.toLowerCase().includes(kw),
-    ) || null;
+    const loweredKeyword = normalizedKeyword.toLowerCase();
+    return (
+      discovered.find(
+        (flow) =>
+          flow.processName.toLowerCase().includes(loweredKeyword) ||
+          flow.processCode.toLowerCase().includes(loweredKeyword),
+      ) || null
+    );
   }
 
-  /**
-   * 列出 connector 下所有已知流程（本地 + 远程发现）
-   */
-  async listAllFlows(connectorId: string): Promise<DiscoveredFlow[]> {
-    // 先返回本地已有的
+  async listAllFlows(connectorId: string, tenantId: string): Promise<DiscoveredFlow[]> {
     const localTemplates = await this.prisma.processTemplate.findMany({
-      where: { connectorId, status: 'published' },
-      orderBy: { processName: 'asc' },
+      where: {
+        connectorId,
+        tenantId,
+        status: 'published',
+      },
+      orderBy: [
+        { processName: 'asc' },
+        { version: 'desc' },
+      ],
+      select: {
+        id: true,
+        processCode: true,
+        processName: true,
+        processCategory: true,
+      },
     });
 
-    const result: DiscoveredFlow[] = localTemplates.map(t => ({
-      processCode: t.processCode,
-      processName: t.processName,
-      category: t.processCategory || '其他',
-      isNew: false,
-      templateId: t.id,
-    }));
+    const result = new Map<string, DiscoveredFlow>();
+    for (const template of localTemplates) {
+      if (!result.has(template.processCode)) {
+        result.set(template.processCode, {
+          processCode: template.processCode,
+          processName: normalizeProcessName({
+            processName: template.processName,
+            processCode: template.processCode,
+          }),
+          category: template.processCategory || 'other',
+          isNew: false,
+          templateId: template.id,
+        });
+      }
+    }
 
-    // 如果只有 generic_application 或没有流程，尝试远程发现
-    const hasOnlyGeneric = result.length <= 1 &&
-      result.every(r => r.processCode === 'generic_application');
+    const current = [...result.values()];
+    const hasOnlyGeneric =
+      current.length === 0 ||
+      (current.length <= 1 && current.every((flow) => flow.processCode === 'generic_application'));
 
     if (hasOnlyGeneric) {
-      const discovered = await this.discoverFlows(connectorId);
-      // 合并去重
-      for (const d of discovered) {
-        if (!result.find(r => r.processCode === d.processCode)) {
-          result.push(d);
+      const discovered = await this.discoverFlows(connectorId, tenantId);
+      for (const flow of discovered) {
+        if (!result.has(flow.processCode)) {
+          result.set(flow.processCode, flow);
         }
       }
     }
 
-    return result;
+    return [...result.values()];
   }
 
   private extractField(obj: any, path: string): any {
@@ -242,12 +295,14 @@ export class FlowDiscoveryService {
   }
 
   private toProcessCode(raw: string): string {
-    return raw
-      .replace(/([a-z])([A-Z])/g, '$1_$2')
-      .replace(/[^a-zA-Z0-9]+/g, '_')
-      .replace(/^_|_$/g, '')
-      .toLowerCase()
-      .substring(0, 120) || 'unknown_flow';
+    return (
+      raw
+        .replace(/([a-z])([A-Z])/g, '$1_$2')
+        .replace(/[^a-zA-Z0-9]+/g, '_')
+        .replace(/^_+|_+$/g, '')
+        .toLowerCase()
+        .substring(0, 120) || 'unknown_flow'
+    );
   }
 }
 

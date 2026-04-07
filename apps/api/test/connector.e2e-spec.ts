@@ -4,6 +4,7 @@ import { INestApplication } from '@nestjs/common';
 import * as request from 'supertest';
 import { ConnectorController } from '../src/modules/connector/connector.controller';
 import { ConnectorService } from '../src/modules/connector/connector.service';
+import { RequestAuthService } from '../src/modules/common/request-auth.service';
 
 @Module({
   controllers: [ConnectorController],
@@ -19,6 +20,16 @@ import { ConnectorService } from '../src/modules/connector/connector.service';
         healthCheck: jest.fn(),
       },
     },
+    {
+      provide: RequestAuthService,
+      useValue: {
+        resolveTenant: jest.fn().mockReturnValue({
+          tenantId: 'tenant-1',
+          roles: [],
+          source: 'request',
+        }),
+      },
+    },
   ],
 })
 class ConnectorHttpTestModule {}
@@ -27,6 +38,7 @@ describe('Connector HTTP E2E', () => {
   let app: INestApplication;
   let httpApp: any;
   let connectorService: jest.Mocked<ConnectorService>;
+  let requestAuth: { resolveTenant: jest.Mock };
 
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
@@ -40,6 +52,7 @@ describe('Connector HTTP E2E', () => {
 
     httpApp = app.getHttpAdapter().getInstance();
     connectorService = moduleFixture.get(ConnectorService);
+    requestAuth = moduleFixture.get(RequestAuthService);
   });
 
   afterAll(async () => {
@@ -48,6 +61,11 @@ describe('Connector HTTP E2E', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
+    requestAuth.resolveTenant.mockReturnValue({
+      tenantId: 'tenant-1',
+      roles: [],
+      source: 'request',
+    });
   });
 
   it('validates create payload and forwards enterprise connector config', async () => {
@@ -97,7 +115,7 @@ describe('Connector HTTP E2E', () => {
       healthCheckUrl: 'https://oa.example.com/health',
       oclLevel: 'OCL4',
       falLevel: 'F2',
-    });
+    }, 'tenant-1');
 
     await request(httpApp)
       .post('/api/v1/connectors')
@@ -146,7 +164,7 @@ describe('Connector HTTP E2E', () => {
         expect(body.healthy).toBe(true);
       });
 
-    expect(connectorService.update).toHaveBeenCalledWith('connector-1', {
+    expect(connectorService.update).toHaveBeenCalledWith('connector-1', 'tenant-1', {
       oaType: 'hybrid',
       authType: 'cookie',
       authConfig: {
@@ -155,6 +173,6 @@ describe('Connector HTTP E2E', () => {
       oclLevel: 'OCL5',
       status: 'active',
     });
-    expect(connectorService.healthCheck).toHaveBeenCalledWith('connector-1');
+    expect(connectorService.healthCheck).toHaveBeenCalledWith('connector-1', 'tenant-1');
   });
 });

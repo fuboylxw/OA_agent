@@ -1,7 +1,7 @@
 import { randomUUID } from 'crypto';
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from 'fs';
 import { hostname } from 'os';
-import { dirname, resolve } from 'path';
+import { dirname, join, resolve } from 'path';
 
 export type RuntimeDiagnosticCategory = 'llm' | 'system';
 export type RuntimeDiagnosticLevel = 'info' | 'warn' | 'error';
@@ -55,9 +55,30 @@ const DEFAULT_MAX_ITEMS = parseInt(process.env.RUNTIME_DIAGNOSTICS_MAX_ITEMS || 
 const PROCESS_HANDLER_MARK = Symbol.for('uniflow.runtime_diagnostics.process_handlers');
 
 function getDiagnosticsFilePath() {
+  if (process.env.RUNTIME_DIAGNOSTICS_FILE) {
+    return resolve(process.env.RUNTIME_DIAGNOSTICS_FILE);
+  }
+
+  const workspaceRoot = findWorkspaceRoot(process.cwd());
   return resolve(
-    process.env.RUNTIME_DIAGNOSTICS_FILE || resolve(process.cwd(), '.logs/runtime-diagnostics.jsonl'),
+    join(workspaceRoot, '.logs', 'current', 'diagnostics', 'runtime-diagnostics.jsonl'),
   );
+}
+
+function findWorkspaceRoot(startDir: string) {
+  let currentDir = resolve(startDir);
+
+  while (true) {
+    if (existsSync(join(currentDir, 'pnpm-workspace.yaml')) || existsSync(join(currentDir, '.git'))) {
+      return currentDir;
+    }
+
+    const parentDir = dirname(currentDir);
+    if (parentDir === currentDir) {
+      return resolve(startDir);
+    }
+    currentDir = parentDir;
+  }
 }
 
 function detectSource() {
@@ -118,6 +139,10 @@ function sanitizeValue(value: any, depth = 0, visited = new WeakSet<object>()): 
   return record;
 }
 
+export function sanitizeStructuredData<T = any>(value: T): T {
+  return sanitizeValue(value) as T;
+}
+
 export function recordRuntimeDiagnostic(input: Omit<RuntimeDiagnosticEvent, 'id' | 'timestamp' | 'source' | 'pid' | 'hostname'> & {
   timestamp?: string;
   source?: string;
@@ -139,7 +164,7 @@ export function recordRuntimeDiagnostic(input: Omit<RuntimeDiagnosticEvent, 'id'
       tenantId: input.tenantId,
       userId: input.userId,
       tags: input.tags?.slice(0, DEFAULT_MAX_ITEMS),
-      data: input.data ? sanitizeValue(input.data) : undefined,
+      data: input.data ? sanitizeStructuredData(input.data) : undefined,
       pid: process.pid,
       hostname: hostname(),
     };

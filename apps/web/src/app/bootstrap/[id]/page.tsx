@@ -1,17 +1,14 @@
-import { getApiUrl, getServerAuth } from '../../lib/auth';
-import { notFound, redirect } from 'next/navigation';
+'use client';
+
+import { useEffect, useState } from 'react';
+import { useParams } from 'next/navigation';
+import Link from 'next/link';
+import AuthGuard from '../../components/AuthGuard';
+import { apiClient } from '../../lib/api-client';
 
 function formatDate(value?: string | null) {
   if (!value) return '-';
   return new Date(value).toLocaleString('zh-CN');
-}
-
-async function readJsonSafely(response: Response) {
-  const text = await response.text();
-  if (!text.trim()) {
-    return null;
-  }
-  return JSON.parse(text);
 }
 
 function renderJson(value: unknown) {
@@ -23,41 +20,56 @@ function renderJson(value: unknown) {
   );
 }
 
-export default async function BootstrapJobDetailPage({
-  params,
-}: {
-  params: { id: string };
-}) {
-  const { userId, roles } = await getServerAuth();
-  if (!userId) redirect('/login');
-  if (!roles.includes('admin')) redirect('/');
+function BootstrapJobDetail() {
+  const params = useParams<{ id: string }>();
+  const [job, setJob] = useState<any>(null);
+  const [report, setReport] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState('');
 
-  const API_URL = getApiUrl();
+  useEffect(() => {
+    if (!params.id) return;
+    Promise.all([
+      apiClient.get(`/bootstrap/jobs/${params.id}`),
+      apiClient.get(`/bootstrap/jobs/${params.id}/report`).catch(() => ({ data: null })),
+    ]).then(([jobRes, reportRes]) => {
+      setJob(jobRes.data);
+      setReport(reportRes.data);
+    }).catch((err) => {
+      setError(err.response?.status === 404 ? '任务不存在' : '加载失败');
+    }).finally(() => setLoading(false));
+  }, [params.id]);
 
-  const [jobRes, reportRes] = await Promise.all([
-    fetch(`${API_URL}/api/v1/bootstrap/jobs/${params.id}`, { cache: 'no-store' }),
-    fetch(`${API_URL}/api/v1/bootstrap/jobs/${params.id}/report`, { cache: 'no-store' }),
-  ]);
-
-  if (jobRes.status === 404) {
-    notFound();
+  if (loading) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <div className="text-center">
+          <div className="mx-auto mb-4 h-10 w-10 animate-spin rounded-full border-4 border-gray-200 border-t-blue-600"></div>
+          <p className="text-sm text-gray-500">加载中...</p>
+        </div>
+      </div>
+    );
   }
 
-  if (!jobRes.ok) {
-    throw new Error(`Failed to load bootstrap job: ${jobRes.status}`);
+  if (error || !job) {
+    return (
+      <div className="flex h-full items-center justify-center">
+        <div className="text-center">
+          <p className="text-gray-500">{error || '任务不存在'}</p>
+          <Link href="/bootstrap" className="mt-4 inline-block text-sm text-blue-600 hover:text-blue-800">返回初始化中心</Link>
+        </div>
+      </div>
+    );
   }
-
-  const job = await readJsonSafely(jobRes);
-  const report = reportRes.ok ? await readJsonSafely(reportRes) : null;
 
   return (
     <main className="h-full overflow-y-auto">
       <div className="mx-auto max-w-6xl px-6 py-8">
         <div className="mb-6 flex items-center justify-between gap-4">
           <div>
-            <a href="/bootstrap" className="text-sm text-blue-600 hover:text-blue-800">
+            <Link href="/bootstrap" className="text-sm text-blue-600 hover:text-blue-800">
               返回初始化中心
-            </a>
+            </Link>
             <h1 className="mt-2 text-2xl font-bold text-gray-900">
               {job.name || `初始化任务 ${job.id.slice(0, 8)}`}
             </h1>
@@ -200,5 +212,13 @@ export default async function BootstrapJobDetailPage({
         </div>
       </div>
     </main>
+  );
+}
+
+export default function BootstrapJobDetailPage() {
+  return (
+    <AuthGuard allowedRoles={['admin']}>
+      <BootstrapJobDetail />
+    </AuthGuard>
   );
 }

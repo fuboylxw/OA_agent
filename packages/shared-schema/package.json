@@ -5,8 +5,8 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch"
+    "build": "corepack pnpm exec tsc",
+    "dev": "corepack pnpm exec tsc --watch"
   },
   "dependencies": {
     "zod": "^3.22.4",

@@ -253,6 +253,9 @@ export interface ProcessTemplate {
 
 export * from './sync-utils';
 export * from './probe-utils';
+export * from './auth-session';
+export * from './process-name';
+export * from './field-presentation';
 
 export interface ProcessSchema {
   fields: ProcessField[];
@@ -352,4 +355,369 @@ export interface Connector {
   lastHealthCheck?: Date;
   createdAt: Date;
   updatedAt: Date;
+}
+
+// ============================================================
+// RPA Runtime
+// ============================================================
+
+export type RpaStepActionType =
+  | 'goto'
+  | 'wait'
+  | 'input'
+  | 'click'
+  | 'select'
+  | 'upload'
+  | 'extract'
+  | 'download'
+  | 'screenshot';
+
+export type RpaLocatorKind =
+  | 'selector'
+  | 'element_ref'
+  | 'image'
+  | 'text'
+  | 'url';
+
+export interface RpaTargetRegion {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface RpaTargetDefinition {
+  kind: RpaLocatorKind;
+  value: string;
+  label?: string;
+  description?: string;
+  imageUrl?: string;
+  confidenceThreshold?: number;
+  region?: Partial<RpaTargetRegion>;
+}
+
+export interface RpaFieldBinding {
+  key: string;
+  label?: string;
+  type?: string;
+  required?: boolean;
+  selector?: string;
+  defaultValue?: any;
+}
+
+export interface RpaStepDefinition {
+  type: RpaStepActionType;
+  selector?: string;
+  fieldKey?: string;
+  value?: string;
+  description?: string;
+  timeoutMs?: number;
+  target?: RpaTargetDefinition;
+  continueOnError?: boolean;
+  stabilityKey?: string;
+}
+
+export interface RpaAssertionDefinition {
+  type: 'text' | 'selector' | 'status_field';
+  value: string;
+  selector?: string;
+}
+
+export interface RpaActionDefinition {
+  steps: RpaStepDefinition[];
+  successAssert?: RpaAssertionDefinition;
+  resultMapping?: {
+    submissionIdPath?: string;
+    statusPath?: string;
+    messagePath?: string;
+  };
+}
+
+export interface RpaPlatformDefinition {
+  entryUrl?: string;
+  targetSystem?: string;
+  ticketBrokerUrl?: string;
+  jumpUrlTemplate?: string;
+  ticketHeaderName?: string;
+  ticketHeaderValue?: string;
+  serviceToken?: string;
+  timeoutMs?: number;
+}
+
+export interface RpaRuntimeDefinition {
+  executorMode?: 'stub' | 'http' | 'local' | 'browser';
+  browserProvider?: 'playwright' | 'stub';
+  browserExecutablePath?: string;
+  headless?: boolean;
+  submitEndpoint?: string;
+  statusEndpoint?: string;
+  timeoutMs?: number;
+  stabilityTimeoutMs?: number;
+  maxSteps?: number;
+  maxRetries?: number;
+  snapshotMode?: 'structured-text';
+  headers?: Record<string, string>;
+}
+
+export const API_DELIVERY_PATH = 'api';
+export const URL_DELIVERY_PATH = 'url';
+export const VISION_DELIVERY_PATH = 'vision';
+export const DELIVERY_PATHS = [
+  API_DELIVERY_PATH,
+  URL_DELIVERY_PATH,
+  VISION_DELIVERY_PATH,
+] as const;
+export type DeliveryPath = typeof DELIVERY_PATHS[number];
+export const DEFAULT_DELIVERY_PATH: DeliveryPath = API_DELIVERY_PATH;
+export type DeliveryHealth = 'healthy' | 'degraded' | 'unavailable';
+export type VisionStartContext =
+  | 'portal_home'
+  | 'attach_session'
+  | 'manual_opened'
+  | 'local_app';
+
+export function isDeliveryPath(value: unknown): value is DeliveryPath {
+  return typeof value === 'string'
+    && (DELIVERY_PATHS as readonly string[]).includes(value);
+}
+
+export interface DeliveryCapabilityState {
+  available: boolean;
+  submitEnabled: boolean;
+  queryEnabled: boolean;
+  health: DeliveryHealth;
+}
+
+export interface DeliveryCapabilitySummary {
+  api: DeliveryCapabilityState & {
+    toolNames?: string[];
+  };
+  url: DeliveryCapabilityState & {
+    entryUrl?: string;
+    jumpUrlTemplate?: string;
+    ticketBrokerUrl?: string;
+    executorMode?: 'browser' | 'local' | 'http' | 'stub';
+  };
+  vision: DeliveryCapabilityState & {
+    startContext?: VisionStartContext;
+    templateBundleRef?: string;
+    templateCount?: number;
+    ocrReady?: boolean;
+  };
+  fallbackOrder?: DeliveryPath[];
+  source?: 'delivery' | 'legacy_ui_hints' | 'inferred';
+}
+
+export interface RpaFlowDefinition {
+  processCode: string;
+  processName: string;
+  category?: string;
+  description?: string;
+  fields?: RpaFieldBinding[];
+  actions?: {
+    submit?: RpaActionDefinition;
+    queryStatus?: RpaActionDefinition;
+  };
+  platform?: RpaPlatformDefinition;
+  runtime?: RpaRuntimeDefinition;
+}
+
+export interface ArtifactReference {
+  id: string;
+  kind:
+    | 'screenshot'
+    | 'ocr'
+    | 'page_snapshot'
+    | 'template_bundle'
+    | 'api_trace'
+    | 'execution_log'
+    | 'other';
+  uri?: string;
+  summary?: string;
+}
+
+export interface TaskObjective {
+  intent: 'submit' | 'query_status' | 'cancel' | 'urge' | 'supplement';
+  processCode: string;
+  processName: string;
+}
+
+export interface TaskPacket {
+  taskId: string;
+  sessionId: string;
+  tenantId: string;
+  userId: string;
+  objective: TaskObjective;
+  selectedPath: DeliveryPath;
+  fallbackPolicy: DeliveryPath[];
+  connector: {
+    connectorId: string;
+    connectorName: string;
+  };
+  form: {
+    formData: Record<string, any>;
+    missingFields: Array<{ key: string; label: string }>;
+  };
+  capability: DeliveryCapabilitySummary;
+  runtime: {
+    idempotencyKey: string;
+    traceId: string;
+    timeoutMs: number;
+  };
+  artifactRefs: ArtifactReference[];
+}
+
+export interface AgentResultPacket {
+  taskId: string;
+  agentType: DeliveryPath;
+  success: boolean;
+  output?: {
+    submissionId?: string;
+    externalSubmissionId?: string;
+    status?: string;
+    message?: string;
+  };
+  fallbackHint?: {
+    shouldFallback: boolean;
+    nextPath?: DeliveryPath;
+    errorType?: string;
+    reason?: string;
+  };
+  evidence: {
+    artifactRefs: ArtifactReference[];
+    summary: string;
+  };
+  statePatch?: {
+    lastExecutionPath?: DeliveryPath;
+    currentOaSubmissionId?: string | null;
+  };
+}
+
+export type BrowserSnapshotRegionRole =
+  | 'header'
+  | 'navigation'
+  | 'main'
+  | 'form'
+  | 'table'
+  | 'dialog'
+  | 'sidebar'
+  | 'footer'
+  | 'status';
+
+export type BrowserSnapshotElementRole =
+  | 'button'
+  | 'input'
+  | 'select'
+  | 'checkbox'
+  | 'radio'
+  | 'upload'
+  | 'link'
+  | 'textarea'
+  | 'table'
+  | 'dialog'
+  | 'text'
+  | 'status'
+  | 'unknown';
+
+export interface BrowserSnapshotElement {
+  ref: string;
+  role: BrowserSnapshotElementRole;
+  text?: string;
+  label?: string;
+  fieldKey?: string;
+  selector?: string;
+  href?: string;
+  regionId?: string;
+  required?: boolean;
+  disabled?: boolean;
+  value?: string;
+  bounds?: RpaTargetRegion;
+  targetHints?: RpaTargetDefinition[];
+}
+
+export interface BrowserSnapshotRegion {
+  id: string;
+  role: BrowserSnapshotRegionRole;
+  name: string;
+  summary?: string;
+  elementRefs: string[];
+}
+
+export interface BrowserSnapshotFormField {
+  ref: string;
+  label?: string;
+  fieldKey?: string;
+  required?: boolean;
+}
+
+export interface BrowserSnapshotForm {
+  id: string;
+  name: string;
+  fieldRefs: string[];
+  fields: BrowserSnapshotFormField[];
+}
+
+export interface BrowserSnapshotTable {
+  id: string;
+  name: string;
+  summary?: string;
+}
+
+export interface BrowserSnapshotDialog {
+  id: string;
+  title: string;
+  summary?: string;
+}
+
+export interface BrowserPageSnapshot {
+  snapshotId: string;
+  title: string;
+  url: string;
+  generatedAt: string;
+  regions: BrowserSnapshotRegion[];
+  forms: BrowserSnapshotForm[];
+  tables: BrowserSnapshotTable[];
+  dialogs: BrowserSnapshotDialog[];
+  importantTexts: string[];
+  interactiveElements: BrowserSnapshotElement[];
+  structuredText: string;
+}
+
+export function parseRpaFlowDefinitions(input: unknown): RpaFlowDefinition[] {
+  if (!input) return [];
+
+  const normalized = typeof input === 'string'
+    ? safeParseJson(input)
+    : input;
+
+  if (Array.isArray(normalized)) {
+    return normalized.filter(isRpaFlowDefinition);
+  }
+
+  if (
+    normalized
+    && typeof normalized === 'object'
+    && Array.isArray((normalized as Record<string, unknown>).flows)
+  ) {
+    return ((normalized as Record<string, unknown>).flows as unknown[]).filter(isRpaFlowDefinition);
+  }
+
+  return [];
+}
+
+function safeParseJson(input: string): unknown {
+  try {
+    return JSON.parse(input);
+  } catch {
+    return null;
+  }
+}
+
+function isRpaFlowDefinition(value: unknown): value is RpaFlowDefinition {
+  if (!value || typeof value !== 'object') {
+    return false;
+  }
+
+  const flow = value as Record<string, unknown>;
+  return typeof flow.processCode === 'string' && typeof flow.processName === 'string';
 }

@@ -1,5 +1,9 @@
 'use client';
 
+import { useEffect, useState } from 'react';
+import Link from 'next/link';
+import { apiClient } from '../lib/api-client';
+
 interface Stats {
   totalSubmissions: number;
   monthlySubmissions: number;
@@ -17,11 +21,22 @@ interface Activity {
   createdAt: string;
 }
 
-interface Props {
-  stats: Stats;
-  recentActivity: Activity[];
-  displayName: string;
-}
+const DEFAULT_STATS: Stats = {
+  totalSubmissions: 0,
+  monthlySubmissions: 0,
+  templateCount: 0,
+  connectorCount: 0,
+  pendingSubmissions: 0,
+  systemHealth: 100,
+};
+
+const COLOR_CLASSES: Record<string, { bg: string; text: string }> = {
+  purple: { bg: 'bg-purple-100', text: 'text-purple-600' },
+  green: { bg: 'bg-green-100', text: 'text-green-600' },
+  red: { bg: 'bg-red-100', text: 'text-red-600' },
+  orange: { bg: 'bg-orange-100', text: 'text-orange-600' },
+  blue: { bg: 'bg-blue-100', text: 'text-blue-600' },
+};
 
 const getActivityIcon = (type: string, status: string) => {
   if (type === 'bootstrap') return { icon: 'fa-sync', color: 'purple' };
@@ -42,7 +57,35 @@ const formatDate = (dateStr: string) => {
   });
 };
 
-export default function HomeContent({ stats, recentActivity, displayName }: Props) {
+const formatActivityStatus = (status: string) => {
+  switch (status) {
+    case 'completed':
+      return '已完成';
+    case 'failed':
+      return '失败';
+    case 'pending':
+      return '待处理';
+    case 'running':
+      return '进行中';
+    default:
+      return status;
+  }
+};
+
+export default function HomeContent() {
+  const [stats, setStats] = useState<Stats>(DEFAULT_STATS);
+  const [recentActivity, setRecentActivity] = useState<Activity[]>([]);
+  const [displayName, setDisplayName] = useState('用户');
+
+  useEffect(() => {
+    apiClient.get('/dashboard/overview').then((res) => {
+      const data = res.data || {};
+      setStats(data.stats || DEFAULT_STATS);
+      setRecentActivity(data.recentActivity || []);
+      setDisplayName(data.user?.displayName || '用户');
+    }).catch(() => {});
+  }, []);
+
   return (
     <main className="h-full overflow-y-auto">
       <div className="max-w-7xl mx-auto px-6 py-8">
@@ -54,7 +97,7 @@ export default function HomeContent({ stats, recentActivity, displayName }: Prop
 
       {/* Quick Actions Cards */}
       <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-4 gap-6 mb-8">
-        <a href="/chat" className="bg-white rounded-xl shadow-sm p-6 border border-gray-200 hover:shadow-md transition-shadow cursor-pointer block">
+        <Link href="/chat" className="bg-white rounded-xl shadow-sm p-6 border border-gray-200 hover:shadow-md transition-shadow cursor-pointer block">
           <div className="flex items-center justify-between mb-4">
             <div className="w-12 h-12 bg-blue-100 rounded-lg flex items-center justify-center">
               <i className="fas fa-comments text-blue-600"></i>
@@ -64,9 +107,9 @@ export default function HomeContent({ stats, recentActivity, displayName }: Prop
           <h3 className="text-lg font-semibold text-gray-900 mb-2">对话办事</h3>
           <p className="text-gray-600 text-sm mb-4">通过自然语言发起办事申请</p>
           <div className="text-xs text-gray-500">快速开始</div>
-        </a>
+        </Link>
 
-        <a href="/submissions" className="bg-white rounded-xl shadow-sm p-6 border border-gray-200 hover:shadow-md transition-shadow cursor-pointer block">
+        <Link href="/submissions" className="bg-white rounded-xl shadow-sm p-6 border border-gray-200 hover:shadow-md transition-shadow cursor-pointer block">
           <div className="flex items-center justify-between mb-4">
             <div className="w-12 h-12 bg-green-100 rounded-lg flex items-center justify-center">
               <i className="fas fa-file-alt text-green-600"></i>
@@ -76,9 +119,9 @@ export default function HomeContent({ stats, recentActivity, displayName }: Prop
           <h3 className="text-lg font-semibold text-gray-900 mb-2">我的申请</h3>
           <p className="text-gray-600 text-sm mb-4">查看申请进度和状态</p>
           <div className="text-xs text-gray-500">{stats.pendingSubmissions} 个待处理</div>
-        </a>
+        </Link>
 
-        <a href="/processes" className="bg-white rounded-xl shadow-sm p-6 border border-gray-200 hover:shadow-md transition-shadow cursor-pointer block">
+        <Link href="/processes" className="bg-white rounded-xl shadow-sm p-6 border border-gray-200 hover:shadow-md transition-shadow cursor-pointer block">
           <div className="flex items-center justify-between mb-4">
             <div className="w-12 h-12 bg-purple-100 rounded-lg flex items-center justify-center">
               <i className="fas fa-book text-purple-600"></i>
@@ -88,9 +131,9 @@ export default function HomeContent({ stats, recentActivity, displayName }: Prop
           <h3 className="text-lg font-semibold text-gray-900 mb-2">流程库</h3>
           <p className="text-gray-600 text-sm mb-4">浏览所有可用流程模板</p>
           <div className="text-xs text-gray-500">{stats.templateCount} 个流程</div>
-        </a>
+        </Link>
 
-        <a href="/bootstrap" className="bg-white rounded-xl shadow-sm p-6 border border-gray-200 hover:shadow-md transition-shadow cursor-pointer block">
+        <Link href="/bootstrap" className="bg-white rounded-xl shadow-sm p-6 border border-gray-200 hover:shadow-md transition-shadow cursor-pointer block">
           <div className="flex items-center justify-between mb-4">
             <div className="w-12 h-12 bg-orange-100 rounded-lg flex items-center justify-center">
               <i className="fas fa-cogs text-orange-600"></i>
@@ -100,7 +143,7 @@ export default function HomeContent({ stats, recentActivity, displayName }: Prop
           <h3 className="text-lg font-semibold text-gray-900 mb-2">初始化中心</h3>
           <p className="text-gray-600 text-sm mb-4">配置OA系统和流程发现</p>
           <div className="text-xs text-gray-500">{stats.connectorCount} 个连接器</div>
-        </a>
+        </Link>
       </div>
 
       {/* New User Guide */}
@@ -192,18 +235,19 @@ export default function HomeContent({ stats, recentActivity, displayName }: Prop
           <div className="space-y-3">
             {recentActivity.map((activity) => {
               const { icon, color } = getActivityIcon(activity.type, activity.status);
+              const cls = COLOR_CLASSES[color] || COLOR_CLASSES.blue;
               return (
                 <div key={activity.id} className="flex items-center justify-between p-3 hover:bg-gray-50 rounded-lg">
                   <div className="flex items-center space-x-3">
-                    <div className={`w-8 h-8 bg-${color}-100 rounded-full flex items-center justify-center`}>
-                      <i className={`fas ${icon} text-${color}-600 text-xs`}></i>
+                    <div className={`w-8 h-8 ${cls.bg} rounded-full flex items-center justify-center`}>
+                      <i className={`fas ${icon} ${cls.text} text-xs`}></i>
                     </div>
                     <div>
                       <p className="font-medium text-gray-900">{activity.title}</p>
                       <p className="text-sm text-gray-600">{formatDate(activity.createdAt)}</p>
                     </div>
                   </div>
-                  <span className="text-xs text-gray-500">{activity.status}</span>
+                  <span className="text-xs text-gray-500">{formatActivityStatus(activity.status)}</span>
                 </div>
               );
             })}

@@ -197,6 +197,18 @@ export class AuditService {
     return `trace-${uuidv4()}`;
   }
 
+  /** Delete audit logs older than the given number of days */
+  async purgeOldLogs(retentionDays: number = 90): Promise<number> {
+    const cutoff = new Date();
+    cutoff.setDate(cutoff.getDate() - retentionDays);
+
+    const result = await this.prisma.auditLog.deleteMany({
+      where: { createdAt: { lt: cutoff } },
+    });
+
+    return result.count;
+  }
+
   async queryRuntimeDiagnostics(query: RuntimeDiagnosticQuery): Promise<{
     items: RuntimeDiagnosticEvent[];
     total: number;

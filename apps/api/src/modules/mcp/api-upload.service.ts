@@ -1,5 +1,9 @@
 import { BadRequestException, Injectable, Logger, NotFoundException } from '@nestjs/common';
 import { createHash } from 'crypto';
+import {
+  normalizeProcessName,
+  resolveAssistantFieldPresentation,
+} from '@uniflow/shared-types';
 import { PrismaService } from '../common/prisma.service';
 import { ApiDocParserAgent } from './agents/api-doc-parser.agent';
 import { WorkflowApiIdentifierAgent } from './agents/workflow-api-identifier.agent';
@@ -167,7 +171,7 @@ export class ApiUploadService {
     }
 
     const result: ApiUploadResult = {
-      uploadId: `upload-${Date.now()}`,
+      uploadId: `upload-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
       totalEndpoints: parsedDoc.endpoints?.length || 0,
       workflowEndpoints: identificationResult.workflowApis?.length || 0,
       validatedEndpoints: validationResults.filter(v => v.isAccessible).length,
@@ -196,11 +200,19 @@ export class ApiUploadService {
     const stored: any[] = [];
 
     for (const api of workflowApis) {
+      const processName = normalizeProcessName({
+        processName: api.description,
+        processCode: api.workflowType,
+      });
       // 查找对应的验证结果
       const validation = validationResults.find(
         v => v.path === api.path && v.method === api.method,
       );
-      const schemaFields = this.convertParametersToSchema(api.parameters, api.requestBody);
+      const schemaFields = this.convertParametersToSchema(
+        api.parameters,
+        api.requestBody,
+        api.workflowType,
+      );
       const sourceHash = this.computeSourceHash({
         workflowType: api.workflowType,
         workflowCategory: api.workflowCategory,
@@ -220,7 +232,7 @@ export class ApiUploadService {
           connectorId,
           remoteProcessId: api.workflowType,
           remoteProcessCode: api.workflowType,
-          remoteProcessName: api.description,
+          remoteProcessName: processName,
           processCategory: api.workflowCategory,
           sourceHash,
           sourceVersion: '1',
@@ -233,7 +245,7 @@ export class ApiUploadService {
         },
         update: {
           remoteProcessCode: api.workflowType,
-          remoteProcessName: api.description,
+          remoteProcessName: processName,
           processCategory: api.workflowCategory,
           sourceHash,
           sourceVersion: '1',
@@ -260,7 +272,7 @@ export class ApiUploadService {
           connectorId,
           remoteProcessId: remoteProcess.id,
           processCode: api.workflowType,
-          processName: api.description,
+          processName,
           processCategory: api.workflowCategory,
           version: 1,
           status: 'draft',
@@ -282,7 +294,7 @@ export class ApiUploadService {
         },
         update: {
           remoteProcessId: remoteProcess.id,
-          processName: api.description,
+          processName,
           processCategory: api.workflowCategory,
           sourceHash,
           schema: {
@@ -315,15 +327,21 @@ export class ApiUploadService {
   /**
    * 将API参数转换为表单Schema
    */
-  private convertParametersToSchema(parameters: any[], requestBody: any): any[] {
+  private convertParametersToSchema(parameters: any[], requestBody: any, processCode?: string): any[] {
     const fields: any[] = [];
 
     // 处理URL参数和查询参数
     for (const param of parameters || []) {
-      fields.push({
+      const presentation = resolveAssistantFieldPresentation({
         key: param.name,
         label: param.description || param.name,
         type: this.mapApiTypeToFieldType(param.type),
+        processCode,
+      });
+      fields.push({
+        key: param.name,
+        label: presentation.label,
+        type: presentation.type,
         required: param.required || false,
         defaultValue: null,
         validation: param.required ? { required: true } : null,
@@ -334,10 +352,16 @@ export class ApiUploadService {
     if (requestBody?.properties) {
       for (const [key, value] of Object.entries(requestBody.properties)) {
         const prop = value as any;
-        fields.push({
+        const presentation = resolveAssistantFieldPresentation({
           key,
           label: prop.description || key,
           type: this.mapApiTypeToFieldType(prop.type),
+          processCode,
+        });
+        fields.push({
+          key,
+          label: presentation.label,
+          type: presentation.type,
           required: requestBody.required?.includes(key) || false,
           defaultValue: prop.default || null,
           validation: requestBody.required?.includes(key)

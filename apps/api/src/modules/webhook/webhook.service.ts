@@ -94,17 +94,31 @@ export class WebhookService {
     };
   }
 
-  async processInbox(inboxId: string) {
-    const inbox = await this.prisma.webhookInbox.findUnique({
-      where: { id: inboxId },
-      include: {
-        connector: {
-          include: {
-            capability: true,
+  async processInbox(inboxId: string, tenantId?: string) {
+    const inbox = tenantId
+      ? await this.prisma.webhookInbox.findFirst({
+          where: {
+            id: inboxId,
+            tenantId,
           },
-        },
-      },
-    });
+          include: {
+            connector: {
+              include: {
+                capability: true,
+              },
+            },
+          },
+        })
+      : await this.prisma.webhookInbox.findUnique({
+          where: { id: inboxId },
+          include: {
+            connector: {
+              include: {
+                capability: true,
+              },
+            },
+          },
+        });
 
     if (!inbox) {
       throw new NotFoundException('Webhook inbox not found');
@@ -163,14 +177,13 @@ export class WebhookService {
       });
     }
 
-    await this.prisma.submission.update({
-      where: { id: submission.id },
-      data: {
-        status: nextSubmissionStatus,
-      },
-    });
-
     if (eventCreated || nextSubmissionStatus !== previousStatus) {
+      await this.prisma.submission.update({
+        where: { id: submission.id },
+        data: {
+          status: nextSubmissionStatus,
+        },
+      });
       await this.chatSessionProcessService.syncSubmissionStatusToSession({
         submissionId: submission.id,
         previousSubmissionStatus: previousStatus,
@@ -233,9 +246,9 @@ export class WebhookService {
     });
   }
 
-  async getInbox(id: string) {
-    const inbox = await this.prisma.webhookInbox.findUnique({
-      where: { id },
+  async getInbox(id: string, tenantId: string) {
+    const inbox = await this.prisma.webhookInbox.findFirst({
+      where: { id, tenantId },
       include: {
         connector: {
           select: {
@@ -255,16 +268,23 @@ export class WebhookService {
     return inbox;
   }
 
-  async getConfig(connectorId: string) {
+  async getConfig(connectorId: string, tenantId: string) {
     const connector = await this.adapterRuntimeService.getConnectorWithSecrets(connectorId);
+    if (connector.tenantId !== tenantId) {
+      throw new NotFoundException('Connector not found');
+    }
     return this.getWebhookConfig(connector);
   }
 
   async updateConfig(
     connectorId: string,
+    tenantId: string,
     config: Record<string, any>,
   ) {
     const connector = await this.adapterRuntimeService.getConnectorWithSecrets(connectorId);
+    if (connector.tenantId !== tenantId) {
+      throw new NotFoundException('Connector not found');
+    }
     const currentMetadata = (connector.capability?.metadata as Record<string, any> | null) || {};
     const updatedMetadata = {
       ...currentMetadata,

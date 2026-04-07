@@ -2,7 +2,12 @@ import { Injectable, BadRequestException, NotFoundException } from '@nestjs/comm
 import { Prisma } from '@prisma/client';
 import { InjectQueue } from '@nestjs/bull';
 import { Queue } from 'bull';
-import { buildStatusEventRemoteId } from '@uniflow/shared-types';
+import { Subject } from 'rxjs';
+import {
+  buildStatusEventRemoteId,
+  DEFAULT_DELIVERY_PATH,
+  type DeliveryPath,
+} from '@uniflow/shared-types';
 import { PrismaService } from '../common/prisma.service';
 import { AuditService } from '../audit/audit.service';
 import { RuleService } from '../rule/rule.service';
@@ -12,11 +17,20 @@ import { AdapterRuntimeService } from '../adapter-runtime/adapter-runtime.servic
 import { ChatSessionProcessService } from '../common/chat-session-process.service';
 import { AttachmentBindingService } from '../attachment/attachment-binding.service';
 import { AttachmentService } from '../attachment/attachment.service';
+import { DeliveryOrchestratorService } from '../delivery-runtime/delivery-orchestrator.service';
 import {
   getSubmissionStatusText,
   isActiveSubmissionStatus,
   mapExternalStatusToSubmissionStatus,
 } from '../common/submission-status.util';
+
+export interface SubmissionStatusEvent {
+  submissionId: string;
+  tenantId: string;
+  userId: string;
+  status: string;
+  statusText: string;
+}
 
 interface SubmitInput {
   tenantId: string;
@@ -24,6 +38,8 @@ interface SubmitInput {
   draftId: string;
   idempotencyKey: string;
   traceId: string;
+  selectedPath?: DeliveryPath | null;
+  fallbackPolicy?: DeliveryPath[];
 }
 
 export interface SubmitResult {
@@ -35,6 +51,8 @@ export interface SubmitResult {
 
 @Injectable()
 export class SubmissionService {
+  readonly statusUpdates$ = new Subject<SubmissionStatusEvent>();
+
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
@@ -42,6 +60,7 @@ export class SubmissionService {
     private readonly permissionService: PermissionService,
     private readonly processLibraryService: ProcessLibraryService,
     private readonly adapterRuntimeService: AdapterRuntimeService,
+    private readonly deliveryOrchestrator: DeliveryOrchestratorService,
     private readonly chatSessionProcessService: ChatSessionProcessService,
     private readonly attachmentService: AttachmentService,
     private readonly attachmentBindingService: AttachmentBindingService,
@@ -92,6 +111,10 @@ export class SubmissionService {
 
     if (!draft) {
       throw new NotFoundException('Draft not found');
+    }
+
+    if (!draft.template) {
+      throw new NotFoundException('Draft template not found');
     }
 
     if (draft.status !== 'ready') {
@@ -192,8 +215,11 @@ export class SubmissionService {
       submissionId: submission.id,
       connectorId: draft.template.connectorId,
       processCode: draft.template.processCode,
+      processName: draft.template.processName,
       formData: draft.formData,
       idempotencyKey: input.idempotencyKey,
+      selectedPath: input.selectedPath || null,
+      fallbackPolicy: input.fallbackPolicy || [],
     });
 
     await this.auditService.createLog({
@@ -217,7 +243,16 @@ export class SubmissionService {
   }
 
   async executeSubmission(jobData: any) {
-    const { submissionId, connectorId, processCode, formData, idempotencyKey } = jobData;
+    const {
+      submissionId,
+      connectorId,
+      processCode,
+      processName,
+      formData,
+      idempotencyKey,
+      selectedPath,
+      fallbackPolicy,
+    } = jobData;
 
     try {
       const originalSubmission = await this.prisma.submission.findUnique({
@@ -244,26 +279,32 @@ export class SubmissionService {
         formData: (originalSubmission.formData as Record<string, any>) || formData,
         schema: originalSubmission.template?.schema as any,
       });
-      const adapter = await this.adapterRuntimeService.createAdapterForConnector(
+      const execution = await this.deliveryOrchestrator.submit({
         connectorId,
-        [{ flowCode: processCode, flowName: processCode }],
-      );
-
-      // Submit to OA
-      const result = await adapter.submit({
-        flowCode: processCode,
+        processCode,
+        processName,
+        tenantId: originalSubmission.tenantId,
+        userId: originalSubmission.userId,
         formData: preparedPayload.sanitizedFormData,
-        idempotencyKey,
         attachments: preparedPayload.adapterAttachments,
+        idempotencyKey,
+        selectedPath: selectedPath || null,
+        fallbackPolicy: Array.isArray(fallbackPolicy) ? fallbackPolicy : [],
       });
+      const result = execution.submitResult;
+      const persistedResult = this.buildPersistedSubmitResult(result, {
+        connectorId,
+        processCode,
+      });
+      const normalizedOaSubmissionId = this.normalizeOaSubmissionId(result.submissionId);
 
       // Update submission
       await this.prisma.submission.update({
         where: { id: submissionId },
         data: {
           status: result.success ? 'submitted' : 'failed',
-          oaSubmissionId: result.submissionId,
-          submitResult: result as any,
+          oaSubmissionId: normalizedOaSubmissionId,
+          submitResult: persistedResult as any,
           errorMsg: result.errorMessage,
           submittedAt: result.success ? new Date() : undefined,
         },
@@ -293,7 +334,7 @@ export class SubmissionService {
         submissionId,
         previousSubmissionStatus: originalSubmission.status,
         externalStatus: result.success ? 'submitted' : 'failed',
-        payload: result as Record<string, any>,
+        payload: persistedResult as Record<string, any>,
         createStatusMessage: false,
       });
 
@@ -331,9 +372,12 @@ export class SubmissionService {
     }
   }
 
-  async getSubmission(id: string) {
-    const submission = await this.prisma.submission.findUnique({
-      where: { id },
+  async getSubmission(id: string, tenantId?: string) {
+    const submission = await this.prisma.submission.findFirst({
+      where: {
+        id,
+        ...(tenantId ? { tenantId } : {}),
+      },
       include: {
         user: {
           select: {
@@ -355,7 +399,8 @@ export class SubmissionService {
       where: { id: submission.templateId },
     });
 
-    await this.refreshTrackedSubmissionStatuses([submission], new Map([[submission.templateId, template]]));
+    // Fire-and-forget: don't block the detail response waiting for external OA
+    void this.refreshTrackedSubmissionStatuses([submission], new Map([[submission.templateId, template]])).catch(() => {});
 
     return {
       ...submission,
@@ -391,7 +436,8 @@ export class SubmissionService {
     });
     const templateMap = new Map(templates.map(t => [t.id, t]));
 
-    await this.refreshTrackedSubmissionStatuses(submissions, templateMap);
+    // Fire-and-forget: refresh statuses in background, don't block the list response
+    void this.refreshTrackedSubmissionStatuses(submissions, templateMap).catch(() => {});
 
     return submissions.map(s => {
       const template = templateMap.get(s.templateId);
@@ -423,7 +469,7 @@ export class SubmissionService {
     const schema = template?.schema as any;
     const fields: any[] = schema?.fields || [];
 
-    return Object.entries(formData).map(([key, value]) => {
+    return Object.entries(formData || {}).map(([key, value]) => {
       const field = fields.find((f: any) => f.key === key);
       let displayValue = value;
       if (field?.options && Array.isArray(field.options)) {
@@ -441,8 +487,8 @@ export class SubmissionService {
     });
   }
 
-  async cancel(submissionId: string, userId: string, traceId: string) {
-    const submission = await this.getSubmission(submissionId);
+  async cancel(submissionId: string, tenantId: string, userId: string, traceId: string) {
+    const submission = await this.getSubmission(submissionId, tenantId);
     if (!submission) {
       throw new NotFoundException('Submission not found');
     }
@@ -455,16 +501,14 @@ export class SubmissionService {
       throw new BadRequestException('Submission cannot be cancelled in current status');
     }
 
-    const template = await this.prisma.processTemplate.findUnique({
-      where: { id: submission.templateId },
-    });
-    const adapter = template
-      ? await this.adapterRuntimeService.createAdapterForConnector(template.connectorId, [
-          { flowCode: submission.processCode, flowName: submission.processName || submission.processCode || 'flow' },
-        ])
-      : null;
-    if (adapter?.cancel && submission.oaSubmissionId) {
-      await adapter.cancel(submission.oaSubmissionId);
+    if (submission.oaSubmissionId) {
+      const adapter = await this.createSubmissionAdapter(submission);
+      if (!adapter?.cancel) {
+        throw new BadRequestException('Current connector does not support cancel');
+      }
+
+      const result = await adapter.cancel(submission.oaSubmissionId);
+      this.assertAdapterActionSucceeded('cancel', result, 'Current connector does not support cancel');
     }
 
     await this.prisma.submission.update({
@@ -500,8 +544,8 @@ export class SubmissionService {
     return { success: true, message: '申请已撤回' };
   }
 
-  async urge(submissionId: string, userId: string, traceId: string) {
-    const submission = await this.getSubmission(submissionId);
+  async urge(submissionId: string, tenantId: string, userId: string, traceId: string) {
+    const submission = await this.getSubmission(submissionId, tenantId);
     if (!submission) {
       throw new NotFoundException('Submission not found');
     }
@@ -510,17 +554,17 @@ export class SubmissionService {
       throw new BadRequestException('You can only urge your own submissions');
     }
 
-    const template = await this.prisma.processTemplate.findUnique({
-      where: { id: submission.templateId },
-    });
-    const adapter = template
-      ? await this.adapterRuntimeService.createAdapterForConnector(template.connectorId, [
-          { flowCode: submission.processCode, flowName: submission.processName || submission.processCode || 'flow' },
-        ])
-      : null;
-    if (adapter?.urge && submission.oaSubmissionId) {
-      await adapter.urge(submission.oaSubmissionId);
+    if (!submission.oaSubmissionId) {
+      throw new BadRequestException('Submission has not been delivered to OA yet');
     }
+
+    const adapter = await this.createSubmissionAdapter(submission);
+    if (!adapter?.urge) {
+      throw new BadRequestException('Current connector does not support urge');
+    }
+
+    const result = await adapter.urge(submission.oaSubmissionId);
+    this.assertAdapterActionSucceeded('urge', result, 'Current connector does not support urge');
 
     await this.auditService.createLog({
       tenantId: submission.tenantId,
@@ -534,14 +578,24 @@ export class SubmissionService {
     return { success: true, message: '催办成功' };
   }
 
-  async supplement(submissionId: string, userId: string, supplementData: Record<string, any>, traceId: string) {
-    const submission = await this.getSubmission(submissionId);
+  async supplement(
+    submissionId: string,
+    tenantId: string,
+    userId: string,
+    supplementData: Record<string, any>,
+    traceId: string,
+  ) {
+    const submission = await this.getSubmission(submissionId, tenantId);
     if (!submission) {
       throw new NotFoundException('Submission not found');
     }
 
     if (submission.userId !== userId) {
       throw new BadRequestException('You can only supplement your own submissions');
+    }
+
+    if (!submission.oaSubmissionId) {
+      throw new BadRequestException('Submission has not been delivered to OA yet');
     }
 
     const template = await this.prisma.processTemplate.findUnique({
@@ -553,18 +607,21 @@ export class SubmissionService {
       formData: supplementData,
       schema: template?.schema as any,
     });
-    const adapter = template
-      ? await this.adapterRuntimeService.createAdapterForConnector(template.connectorId, [
-          { flowCode: submission.processCode, flowName: submission.processName || submission.processCode || 'flow' },
-        ])
-      : null;
-    if (adapter?.supplement && submission.oaSubmissionId) {
-      await adapter.supplement({
-        submissionId: submission.oaSubmissionId,
-        supplementData: preparedPayload.sanitizedFormData,
-        attachments: preparedPayload.adapterAttachments,
-      });
+    const adapter = await this.createSubmissionAdapter(submission);
+    if (!adapter?.supplement) {
+      throw new BadRequestException('Current connector does not support supplement');
     }
+
+    const result = await adapter.supplement({
+      submissionId: submission.oaSubmissionId,
+      supplementData: preparedPayload.sanitizedFormData,
+      attachments: preparedPayload.adapterAttachments,
+    });
+    this.assertAdapterActionSucceeded(
+      'supplement',
+      result,
+      'Current connector does not support supplement',
+    );
 
     await this.attachmentBindingService.syncSubmissionBindings({
       tenantId: submission.tenantId,
@@ -596,8 +653,15 @@ export class SubmissionService {
     return { success: true, message: '补件成功' };
   }
 
-  async delegate(submissionId: string, userId: string, targetUserId: string, reason: string, traceId: string) {
-    const submission = await this.getSubmission(submissionId);
+  async delegate(
+    submissionId: string,
+    tenantId: string,
+    userId: string,
+    targetUserId: string,
+    reason: string,
+    traceId: string,
+  ) {
+    const submission = await this.getSubmission(submissionId, tenantId);
     if (!submission) {
       throw new NotFoundException('Submission not found');
     }
@@ -606,21 +670,25 @@ export class SubmissionService {
       throw new BadRequestException('You can only delegate your own submissions');
     }
 
-    const template = await this.prisma.processTemplate.findUnique({
-      where: { id: submission.templateId },
-    });
-    const adapter = template
-      ? await this.adapterRuntimeService.createAdapterForConnector(template.connectorId, [
-          { flowCode: submission.processCode, flowName: submission.processName || submission.processCode || 'flow' },
-        ])
-      : null;
-    if (adapter?.delegate && submission.oaSubmissionId) {
-      await adapter.delegate({
-        submissionId: submission.oaSubmissionId,
-        targetUserId,
-        reason,
-      });
+    if (!submission.oaSubmissionId) {
+      throw new BadRequestException('Submission has not been delivered to OA yet');
     }
+
+    const adapter = await this.createSubmissionAdapter(submission);
+    if (!adapter?.delegate) {
+      throw new BadRequestException('Current connector does not support delegate');
+    }
+
+    const result = await adapter.delegate({
+      submissionId: submission.oaSubmissionId,
+      targetUserId,
+      reason,
+    });
+    this.assertAdapterActionSucceeded(
+      'delegate',
+      result,
+      'Current connector does not support delegate',
+    );
 
     await this.createSubmissionEvent({
       tenantId: submission.tenantId,
@@ -641,6 +709,38 @@ export class SubmissionService {
     });
 
     return { success: true, message: '转办成功' };
+  }
+
+  private async createSubmissionAdapter(submission: {
+    templateId: string;
+    processCode?: string | null;
+    processName?: string | null;
+  }) {
+    const template = await this.prisma.processTemplate.findUnique({
+      where: { id: submission.templateId },
+    });
+    if (!template) {
+      return null;
+    }
+
+    return this.adapterRuntimeService.createAdapterForConnector(template.connectorId, [
+      {
+        flowCode: submission.processCode || template.processCode,
+        flowName: submission.processName || template.processName || submission.processCode || 'flow',
+      },
+    ]);
+  }
+
+  private assertAdapterActionSucceeded(
+    action: 'cancel' | 'urge' | 'supplement' | 'delegate',
+    result: { success: boolean; message?: string } | null | undefined,
+    defaultMessage: string,
+  ) {
+    if (result?.success) {
+      return;
+    }
+
+    throw new BadRequestException(result?.message || defaultMessage || `Submission ${action} failed`);
   }
 
   private async createSubmissionEvent(input: {
@@ -666,10 +766,47 @@ export class SubmissionService {
     });
   }
 
+  private normalizeOaSubmissionId(value: unknown): string | undefined {
+    if (value === null || value === undefined) {
+      return undefined;
+    }
+
+    if (typeof value === 'string') {
+      const trimmed = value.trim();
+      return trimmed || undefined;
+    }
+
+    if (typeof value === 'number' || typeof value === 'bigint') {
+      return String(value);
+    }
+
+    return undefined;
+  }
+
+  private buildPersistedSubmitResult(
+    result: Record<string, any>,
+    context: {
+      connectorId: string;
+      processCode: string;
+    },
+  ) {
+    const metadata = ((result.metadata as Record<string, any> | undefined) || {});
+    return {
+        ...result,
+        metadata: {
+          ...metadata,
+          connectorId: metadata.connectorId || context.connectorId,
+          flowCode: metadata.flowCode || context.processCode,
+          deliveryPath: metadata.deliveryPath || DEFAULT_DELIVERY_PATH,
+        },
+      };
+  }
+
   private async refreshTrackedSubmissionStatuses(
     submissions: Array<{
       id: string;
       tenantId: string;
+      userId: string;
       templateId: string;
       status: string;
       oaSubmissionId?: string | null;
@@ -681,7 +818,11 @@ export class SubmissionService {
         queriedAt: Date;
       }>;
     }>,
-    templateMap: Map<string, { connectorId?: string | null } | null | undefined>,
+    templateMap: Map<string, {
+      connectorId?: string | null;
+      processCode?: string | null;
+      processName?: string | null;
+    } | null | undefined>,
   ) {
     const adapterPromises = new Map<string, Promise<any>>();
 
@@ -696,12 +837,21 @@ export class SubmissionService {
         if (!connectorId) {
           return;
         }
+        const adapterKey = `${connectorId}:${template?.processCode || '*'}`;
 
         try {
-          let adapterPromise = adapterPromises.get(connectorId);
+          let adapterPromise = adapterPromises.get(adapterKey);
           if (!adapterPromise) {
-            adapterPromise = this.adapterRuntimeService.createAdapterForConnector(connectorId, []);
-            adapterPromises.set(connectorId, adapterPromise);
+            adapterPromise = this.adapterRuntimeService.createAdapterForConnector(
+              connectorId,
+              template?.processCode
+                ? [{
+                    flowCode: template.processCode,
+                    flowName: template.processName || template.processCode,
+                  }]
+                : [],
+            );
+            adapterPromises.set(adapterKey, adapterPromise);
           }
 
           const adapter = await adapterPromise;
@@ -755,6 +905,13 @@ export class SubmissionService {
               data: { status: mappedStatus },
             });
             submission.status = mappedStatus;
+            this.statusUpdates$.next({
+              submissionId: submission.id,
+              tenantId: submission.tenantId,
+              userId: submission.userId,
+              status: mappedStatus,
+              statusText: getSubmissionStatusText(mappedStatus),
+            });
           }
 
           if (eventCreated || mappedStatus !== previousStatus) {

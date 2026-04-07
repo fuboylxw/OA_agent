@@ -1,5 +1,7 @@
 'use client';
 
+import { useEffect, useState } from 'react';
+import Link from 'next/link';
 import { usePathname } from 'next/navigation';
 
 const NAV_ITEMS = [
@@ -11,28 +13,41 @@ const NAV_ITEMS = [
   { href: '/connectors', label: '连接器管理', roles: ['admin', 'flow_manager'] },
 ];
 
-export default function NavBar({ roles }: { roles: string[] }) {
+export default function NavBar() {
   const pathname = usePathname();
+  const [roles, setRoles] = useState<string[]>([]);
+
+  useEffect(() => {
+    try {
+      setRoles(JSON.parse(localStorage.getItem('roles') || '[]'));
+    } catch {
+      setRoles([]);
+    }
+  }, []);
+
+  if (pathname === '/login') {
+    return null;
+  }
 
   const visibleItems = NAV_ITEMS.filter((item) => {
     if (!item.roles) return true;
-    return item.roles.some((r) => roles.includes(r));
+    return item.roles.some((role) => roles.includes(role));
   });
 
   return (
     <nav className="hidden md:flex space-x-6">
       {visibleItems.map((item) => (
-        <a
+        <Link
           key={item.href}
           href={item.href}
           className={`font-medium ${
-            pathname === item.href
+            (item.href === '/' ? pathname === '/' : pathname.startsWith(item.href))
               ? 'text-blue-600'
               : 'text-gray-500 hover:text-gray-900'
           }`}
         >
           {item.label}
-        </a>
+        </Link>
       ))}
     </nav>
   );

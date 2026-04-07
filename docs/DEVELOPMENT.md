@@ -370,6 +370,24 @@ Create `.vscode/launch.json`:
 
 ### Logging
 
+Local runtime logs are now organized under the repository root `.logs` directory:
+
+```bash
+# Show the current session and recent archives
+pnpm logs
+
+# Print the current API log file path
+pnpm logs:path -- api
+
+# Tail the latest worker stderr
+pnpm logs:tail -- worker stderr 120
+
+# Archive old loose files left in .logs root
+pnpm logs:organize
+```
+
+Current runs write to `.logs/current/`, and previous runs are archived to `.logs/runs/`.
+
 Enable debug logging:
 
 ```bash

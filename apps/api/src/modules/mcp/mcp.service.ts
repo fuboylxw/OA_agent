@@ -8,8 +8,8 @@ export class MCPService {
   /**
    * List all MCP tools for a connector
    */
-  async listTools(connectorId: string, category?: string) {
-    const where: any = { connectorId, enabled: true };
+  async listTools(tenantId: string, connectorId: string, category?: string) {
+    const where: any = { tenantId, connectorId, enabled: true };
     if (category) {
       where.category = category;
     }
@@ -32,9 +32,9 @@ export class MCPService {
   /**
    * Get a specific MCP tool
    */
-  async getTool(connectorId: string, toolName: string) {
+  async getTool(tenantId: string, connectorId: string, toolName: string) {
     const tool = await this.prisma.mCPTool.findFirst({
-      where: { connectorId, toolName },
+      where: { tenantId, connectorId, toolName },
       include: { connector: true },
     });
 

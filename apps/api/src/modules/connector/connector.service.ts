@@ -10,8 +10,7 @@ export class ConnectorService {
     private readonly adapterRuntimeService: AdapterRuntimeService,
   ) {}
 
-  async create(dto: CreateConnectorDto) {
-    const tenantId = process.env.DEFAULT_TENANT_ID || 'default-tenant';
+  async create(dto: CreateConnectorDto, tenantId: string) {
     const { publicAuthConfig, secretRef } = this.splitAuthConfig(dto.authConfig);
 
     return this.prisma.$transaction(async (tx) => {
@@ -65,9 +64,9 @@ export class ConnectorService {
     });
   }
 
-  async get(id: string) {
-    const connector = await this.prisma.connector.findUnique({
-      where: { id },
+  async get(id: string, tenantId: string) {
+    const connector = await this.prisma.connector.findFirst({
+      where: { id, tenantId },
       include: {
         capability: true,
         secretRef: true,
@@ -85,9 +84,9 @@ export class ConnectorService {
     return connector;
   }
 
-  async update(id: string, dto: UpdateConnectorDto) {
-    const existing = await this.prisma.connector.findUnique({
-      where: { id },
+  async update(id: string, tenantId: string, dto: UpdateConnectorDto) {
+    const existing = await this.prisma.connector.findFirst({
+      where: { id, tenantId },
       include: {
         capability: true,
       },
@@ -135,7 +134,7 @@ export class ConnectorService {
         }
       }
 
-      if (dto.oaType || dto.authType || dto.oclLevel || dto.falLevel) {
+      if (dto.oaType ?? dto.authType ?? dto.oclLevel ?? dto.falLevel) {
         await tx.connectorCapability.upsert({
           where: { connectorId: id },
           create: {
@@ -143,28 +142,28 @@ export class ConnectorService {
             connectorId: id,
             ...this.inferCapabilities({
               name: connector.name,
-              oaType: dto.oaType || connector.oaType,
-              oaVendor: dto.oaVendor || connector.oaVendor || undefined,
-              oaVersion: dto.oaVersion || connector.oaVersion || undefined,
-              baseUrl: dto.baseUrl || connector.baseUrl,
-              authType: dto.authType || connector.authType,
-              authConfig: dto.authConfig || (connector.authConfig as Record<string, any>),
-              healthCheckUrl: dto.healthCheckUrl || connector.healthCheckUrl || undefined,
-              oclLevel: dto.oclLevel || connector.oclLevel,
-              falLevel: dto.falLevel || connector.falLevel || undefined,
+              oaType: dto.oaType ?? connector.oaType,
+              oaVendor: dto.oaVendor ?? connector.oaVendor ?? undefined,
+              oaVersion: dto.oaVersion ?? connector.oaVersion ?? undefined,
+              baseUrl: dto.baseUrl ?? connector.baseUrl,
+              authType: dto.authType ?? connector.authType,
+              authConfig: dto.authConfig ?? (connector.authConfig as Record<string, any>),
+              healthCheckUrl: dto.healthCheckUrl ?? connector.healthCheckUrl ?? undefined,
+              oclLevel: dto.oclLevel ?? connector.oclLevel,
+              falLevel: dto.falLevel ?? connector.falLevel ?? undefined,
             }, existing.capability?.metadata as Record<string, any> | undefined),
           },
           update: this.inferCapabilities({
             name: connector.name,
-            oaType: dto.oaType || connector.oaType,
-            oaVendor: dto.oaVendor || connector.oaVendor || undefined,
-            oaVersion: dto.oaVersion || connector.oaVersion || undefined,
-            baseUrl: dto.baseUrl || connector.baseUrl,
-            authType: dto.authType || connector.authType,
-            authConfig: dto.authConfig || (connector.authConfig as Record<string, any>),
-            healthCheckUrl: dto.healthCheckUrl || connector.healthCheckUrl || undefined,
-            oclLevel: dto.oclLevel || connector.oclLevel,
-            falLevel: dto.falLevel || connector.falLevel || undefined,
+            oaType: dto.oaType ?? connector.oaType,
+            oaVendor: dto.oaVendor ?? connector.oaVendor ?? undefined,
+            oaVersion: dto.oaVersion ?? connector.oaVersion ?? undefined,
+            baseUrl: dto.baseUrl ?? connector.baseUrl,
+            authType: dto.authType ?? connector.authType,
+            authConfig: dto.authConfig ?? (connector.authConfig as Record<string, any>),
+            healthCheckUrl: dto.healthCheckUrl ?? connector.healthCheckUrl ?? undefined,
+            oclLevel: dto.oclLevel ?? connector.oclLevel,
+            falLevel: dto.falLevel ?? connector.falLevel ?? undefined,
           }, existing.capability?.metadata as Record<string, any> | undefined),
         });
       }
@@ -173,9 +172,9 @@ export class ConnectorService {
     });
   }
 
-  async delete(id: string) {
-    const connector = await this.prisma.connector.findUnique({
-      where: { id },
+  async delete(id: string, tenantId: string) {
+    const connector = await this.prisma.connector.findFirst({
+      where: { id, tenantId },
     });
 
     if (!connector) {
@@ -191,8 +190,8 @@ export class ConnectorService {
     return this.prisma.connector.delete({ where: { id } });
   }
 
-  async healthCheck(id: string) {
-    const connector = await this.get(id);
+  async healthCheck(id: string, tenantId: string) {
+    const connector = await this.get(id, tenantId);
 
     const adapter = await this.adapterRuntimeService.createAdapterForConnector(id, []);
     const result = await adapter.healthCheck();

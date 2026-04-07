@@ -1,0 +1,73 @@
+import {
+  API_DELIVERY_PATH,
+  URL_DELIVERY_PATH,
+  VISION_DELIVERY_PATH,
+} from '@uniflow/shared-types';
+import { buildExecutionOrder, resolveAvailablePaths } from './delivery-path-resolver';
+
+describe('delivery-path-resolver', () => {
+  it('prefers api, vision, url when an rpa flow is present', () => {
+    const paths = resolveAvailablePaths({
+      executionModes: {
+        submit: ['api', 'rpa'],
+      },
+      rpaDefinition: {
+        processCode: 'leave_apply',
+        processName: 'Leave Apply',
+        platform: {
+          entryUrl: 'https://oa.example.com/leave',
+        },
+        actions: {
+          submit: {
+            steps: [{
+              type: 'click',
+              selector: '#submit',
+            }],
+          },
+        },
+      },
+    }, 'submit');
+
+    expect(paths).toEqual([API_DELIVERY_PATH, VISION_DELIVERY_PATH, URL_DELIVERY_PATH]);
+  });
+
+  it('keeps selected path first and appends remaining fallbacks without duplication', () => {
+    const order = buildExecutionOrder(
+      VISION_DELIVERY_PATH,
+      [URL_DELIVERY_PATH],
+      [API_DELIVERY_PATH, VISION_DELIVERY_PATH, URL_DELIVERY_PATH],
+    );
+    expect(order).toEqual([VISION_DELIVERY_PATH, URL_DELIVERY_PATH, API_DELIVERY_PATH]);
+  });
+
+  it('does not append undeclared fallback paths', () => {
+    const order = buildExecutionOrder(
+      API_DELIVERY_PATH,
+      [VISION_DELIVERY_PATH, URL_DELIVERY_PATH],
+      [API_DELIVERY_PATH],
+    );
+    expect(order).toEqual([API_DELIVERY_PATH]);
+  });
+
+  it('filters unknown explicit fallback entries before building the available path list', () => {
+    const paths = resolveAvailablePaths({
+      delivery: {
+        fallbackOrder: [VISION_DELIVERY_PATH, 'manual', URL_DELIVERY_PATH],
+        vision: {
+          available: true,
+          submitEnabled: true,
+          queryEnabled: true,
+          health: 'healthy',
+        },
+        url: {
+          available: true,
+          submitEnabled: true,
+          queryEnabled: true,
+          health: 'healthy',
+        },
+      },
+    }, 'submit');
+
+    expect(paths).toEqual([VISION_DELIVERY_PATH, URL_DELIVERY_PATH]);
+  });
+});

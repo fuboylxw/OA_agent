@@ -1,4 +1,5 @@
 import { Injectable, NotFoundException } from '@nestjs/common';
+import { normalizeProcessName } from '@uniflow/shared-types';
 import { PrismaService } from '../common/prisma.service';
 
 type ProcessLibraryItem = {
@@ -97,7 +98,10 @@ export class ProcessLibraryService {
           return {
             id: flow.id,
             processCode: flow.flowCode,
-            processName: flow.flowName,
+            processName: normalizeProcessName({
+              processName: flow.flowName,
+              processCode: flow.flowCode,
+            }),
             processCategory: flow.flowCategory || null,
             status: normalizedStatus,
             falLevel: null,
@@ -124,7 +128,10 @@ export class ProcessLibraryService {
     const publishedItems: ProcessLibraryItem[] = publishedTemplates.map((template) => ({
       id: template.id,
       processCode: template.processCode,
-      processName: template.processName,
+      processName: normalizeProcessName({
+        processName: template.processName,
+        processCode: template.processCode,
+      }),
       processCategory: template.processCategory || null,
       status: template.status,
       falLevel: template.falLevel,
@@ -179,9 +186,9 @@ export class ProcessLibraryService {
     return template;
   }
 
-  async getById(id: string) {
-    const template = await this.prisma.processTemplate.findUnique({
-      where: { id },
+  async getById(id: string, tenantId: string) {
+    const template = await this.prisma.processTemplate.findFirst({
+      where: { id, tenantId },
       include: {
         connector: true,
       },

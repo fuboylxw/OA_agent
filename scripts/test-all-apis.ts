@@ -5,9 +5,9 @@
  */
 
 import axios, { AxiosInstance } from 'axios';
+import { readEnv, resolveApiBaseUrl } from './lib/api-config';
 
-const API_BASE_URL = process.env.API_URL || 'http://localhost:3001';
-const API_PREFIX = '/api/v1';
+const API_BASE_URL = resolveApiBaseUrl();
 
 interface TestResult {
   module: string;
@@ -22,12 +22,12 @@ interface TestResult {
 class APITester {
   private client: AxiosInstance;
   private results: TestResult[] = [];
-  private tenantId = 'test-tenant';
-  private userId = 'test-user';
+  private tenantId = readEnv('TEST_TENANT_ID', 'TEST_TENANT_CODE') || 'test-tenant';
+  private userId = readEnv('TEST_USER_ID') || 'test-user';
 
   constructor() {
     this.client = axios.create({
-      baseURL: `${API_BASE_URL}${API_PREFIX}`,
+      baseURL: API_BASE_URL,
       timeout: 10000,
       headers: {
         'Content-Type': 'application/json',
@@ -328,7 +328,7 @@ class APITester {
   // Run all tests
   async runAllTests() {
     console.log('🚀 Starting comprehensive API tests...');
-    console.log(`API Base URL: ${API_BASE_URL}${API_PREFIX}`);
+    console.log(`API Base URL: ${API_BASE_URL}`);
     console.log(`Tenant ID: ${this.tenantId}`);
     console.log(`User ID: ${this.userId}`);
 

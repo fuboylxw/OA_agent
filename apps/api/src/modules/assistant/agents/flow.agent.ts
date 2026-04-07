@@ -109,11 +109,14 @@ ${flowList}
     if (result.matched && result.processCode) {
       const flow = availableFlows.find(f => f.processCode === result.processCode);
       if (flow) {
-        this.logger.log(`LLM 匹配流程: ${flow.processName} (${flow.processCode}), 置信度: ${result.confidence}`);
+        const displayProcessName = typeof result.processName === 'string' && result.processName.trim()
+          ? result.processName.trim()
+          : flow.processName;
+        this.logger.log(`LLM 匹配流程: ${displayProcessName} (${flow.processCode}), 置信度: ${result.confidence}`);
         return {
           matchedFlow: {
             processCode: flow.processCode,
-            processName: flow.processName,
+            processName: displayProcessName,
             confidence: result.confidence || 0.9,
           },
           needsClarification: false,
@@ -132,9 +135,11 @@ ${flowList}
    * LLM 不可用时的简单回退匹配
    */
   private matchFlowFallback(message: string, availableFlows: FlowInfo[]): FlowMatchResult {
+    let bestMatch: { flow: FlowInfo; score: number } | null = null;
+
     for (const flow of availableFlows) {
       const name = flow.processName;
-      // 消息包含流程名，或流程名中的任意两个连续字出现在消息中
+      // 消息包含完整流程名
       if (message.includes(name)) {
         return {
           matchedFlow: {
@@ -145,18 +150,37 @@ ${flowList}
           needsClarification: false,
         };
       }
-      for (let i = 0; i <= name.length - 2; i++) {
-        if (message.includes(name.substring(i, i + 2))) {
-          return {
-            matchedFlow: {
-              processCode: flow.processCode,
-              processName: flow.processName,
-              confidence: 0.6,
-            },
-            needsClarification: false,
-          };
+
+      // 检查流程名中的连续子串是否出现在消息中（从最长子串开始）
+      if (name.length >= 2) {
+        let longestOverlap = 0;
+        for (let len = name.length - 1; len >= 2; len--) {
+          for (let start = 0; start <= name.length - len; start++) {
+            if (message.includes(name.substring(start, start + len))) {
+              longestOverlap = Math.max(longestOverlap, len);
+            }
+          }
+          if (longestOverlap > 0) break;
+        }
+        const overlapRatio = longestOverlap / name.length;
+        if (overlapRatio >= 0.4) {
+          const score = overlapRatio * name.length;
+          if (!bestMatch || score > bestMatch.score) {
+            bestMatch = { flow, score };
+          }
         }
       }
+    }
+
+    if (bestMatch) {
+      return {
+        matchedFlow: {
+          processCode: bestMatch.flow.processCode,
+          processName: bestMatch.flow.processName,
+          confidence: 0.6,
+        },
+        needsClarification: false,
+      };
     }
 
     return {

@@ -4,6 +4,7 @@ import { BootstrapController } from './bootstrap.controller';
 import { BootstrapService } from './bootstrap.service';
 import { PrismaService } from '../common/prisma.service';
 import { WorkerAvailabilityService } from './worker-availability.service';
+import { TextGuideLlmParserService } from './text-guide-llm-parser.service';
 
 @Module({
   imports: [
@@ -15,6 +16,7 @@ import { WorkerAvailabilityService } from './worker-availability.service';
   providers: [
     BootstrapService,
     PrismaService,
+    TextGuideLlmParserService,
     WorkerAvailabilityService,
   ],
   exports: [BootstrapService, WorkerAvailabilityService],

@@ -4,8 +4,10 @@
   "private": true,
   "scripts": {
     "dev": "next dev",
+    "dev:sandbox": "next build && next start",
     "build": "next build",
     "start": "next start",
+    "start:standalone": "node .next/standalone/apps/web/server.js",
     "lint": "next lint",
     "test": "jest"
   },
@@ -14,7 +16,7 @@
     "@uniflow/shared-types": "workspace:*",
     "axios": "^1.6.5",
     "lucide-react": "^0.577.0",
-    "next": "^14.1.0",
+    "next": "^14.2.35",
     "react": "^18.2.0",
     "react-dom": "^18.2.0",
     "zod": "^3.22.4"

@@ -1,6 +1,8 @@
 'use client';
 
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
+import Link from 'next/link';
+import { apiClient } from '../lib/api-client';
 
 const CATEGORY_ICONS: Record<string, string> = {
   '财务': 'fa-money-bill-wave',
@@ -27,9 +29,14 @@ const FAL_COLORS: Record<string, { bg: string; text: string }> = {
 };
 
 export default function ProcessesContent({ initialProcesses }: { initialProcesses: any[] }) {
+  const [processes, setProcesses] = useState<any[]>(initialProcesses);
   const [searchTerm, setSearchTerm] = useState('');
 
-  const filteredProcesses = initialProcesses.filter((p) =>
+  useEffect(() => {
+    apiClient.get('/process-library').then((res) => setProcesses(res.data)).catch(() => {});
+  }, []);
+
+  const filteredProcesses = processes.filter((p) =>
     (p.processName || '').includes(searchTerm) || (p.processCode || '').includes(searchTerm)
   );
 
@@ -116,10 +123,10 @@ export default function ProcessesContent({ initialProcesses }: { initialProcesse
             {searchTerm ? '未找到匹配的流程' : '暂无流程模板'}
           </p>
           {!searchTerm && (
-            <a href="/bootstrap" className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg text-sm font-medium inline-flex items-center gap-2 transition-colors">
+            <Link href="/bootstrap" className="bg-blue-600 hover:bg-blue-700 text-white px-5 py-2.5 rounded-lg text-sm font-medium inline-flex items-center gap-2 transition-colors">
               <i className="fas fa-cogs"></i>
               前往初始化中心导入 OA 系统
-            </a>
+            </Link>
           )}
         </div>
       )}

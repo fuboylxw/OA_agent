@@ -53,8 +53,12 @@ export class AttachmentPreviewService {
       },
     });
 
-    const sourcePath = this.storageService.resolveStoragePath(asset.storageKey);
     const tempDir = await this.storageService.createTempPreviewDir(asset.id);
+    const sourcePath = await this.storageService.materializeToTempFile(
+      asset.storageKey,
+      tempDir,
+      asset.originalName,
+    );
 
     try {
       const outputPdfPath = await this.convertOfficeToPdf(sourcePath, tempDir);

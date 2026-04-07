@@ -1,9 +1,12 @@
 'use client';
 
 import { useState, useEffect } from 'react';
+import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import { FileText, CheckCircle, Clock, AlertCircle, Search } from 'lucide-react';
-
-const API_URL = process.env.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+import { authFetch } from '../lib/api-client';
+import { withBrowserApiBase } from '../lib/browser-api-base-url';
+import { hasClientSession } from '../lib/client-auth';
 
 interface ProcessTemplate {
   id: string;
@@ -27,6 +30,7 @@ interface ProcessTemplate {
 }
 
 export default function ProcessLibraryPage() {
+  const router = useRouter();
   const [processes, setProcesses] = useState<ProcessTemplate[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -38,22 +42,18 @@ export default function ProcessLibraryPage() {
       return;
     }
 
-    const storedTenantId = localStorage.getItem('tenantId');
-    if (!storedTenantId) {
-      setError('缺少租户信息，请先登录。');
-      setLoading(false);
+    if (!hasClientSession()) {
+      router.replace('/login');
       return;
     }
 
-    void fetchProcesses(storedTenantId);
+    void fetchProcesses();
   }, []);
 
-  const fetchProcesses = async (tenantId: string) => {
+  const fetchProcesses = async () => {
     try {
       setError(null);
-      const response = await fetch(
-        `${API_URL}/api/v1/process-library?tenantId=${encodeURIComponent(tenantId)}`,
-      );
+      const response = await authFetch(withBrowserApiBase('/api/v1/process-library'));
 
       if (!response.ok) {
         throw new Error('流程库加载失败');
@@ -246,7 +246,7 @@ export default function ProcessLibraryPage() {
               </div>
 
               {/* API信息 */}
-              {process.uiHints && (
+              {process.uiHints && typeof process.uiHints === 'object' && (
                 <div className="bg-gray-50 rounded-lg p-4 mb-4">
                   {process.sourceType === 'published' && process.uiHints.apiMethod && process.uiHints.apiPath && (
                     <div className="flex items-center gap-2 mb-2">
@@ -272,9 +272,9 @@ export default function ProcessLibraryPage() {
                         <AlertCircle className="w-4 h-4 text-red-500" />
                         <span className="text-red-600">该流程尚未通过验证，未注册到 MCP</span>
                       </div>
-                      {process.uiHints.repairResult && process.uiHints.repairResult.attempts > 0 && (
+                      {process.uiHints.repairResult?.attempts > 0 && (
                         <div className="text-gray-600">
-                          自动修复: 已尝试 {process.uiHints.repairResult.attempts} 次，最近结果为 {getRepairStatusText(process.uiHints.repairResult.lastStatus)}
+                          自动修复: 已尝试 {process.uiHints.repairResult.attempts} 次，最近结果为 {getRepairStatusText(process.uiHints.repairResult?.lastStatus || '')}
                         </div>
                       )}
                       {process.uiHints.repairResult?.lastSummary && (
@@ -332,12 +332,12 @@ export default function ProcessLibraryPage() {
                   )}
                   {process.sourceType === 'bootstrap_candidate' && process.bootstrapJobId && (
                     <div className="mt-3">
-                      <a
+                      <Link
                         href={`/bootstrap/${process.bootstrapJobId}`}
                         className="inline-flex items-center gap-2 rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
                       >
                         前往初始化任务处理
-                      </a>
+                      </Link>
                     </div>
                   )}
                 </div>

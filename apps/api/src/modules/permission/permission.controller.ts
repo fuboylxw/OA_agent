@@ -1,10 +1,18 @@
-import { Controller, Post, Body, Get, Query, Param } from '@nestjs/common';
+import { Controller, Post, Body, Req } from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import { PermissionService } from './permission.service';
 import { IsString, IsEnum, IsOptional, IsObject } from 'class-validator';
 import { ApiProperty } from '@nestjs/swagger';
+import type { Request } from 'express';
+import { RequestAuthService } from '../common/request-auth.service';
+import { randomUUID } from 'crypto';
 
 class CheckPermissionDto {
+  @ApiProperty({ required: false })
+  @IsOptional()
+  @IsString()
+  tenantId?: string;
+
   @ApiProperty()
   @IsString()
   userId: string;
@@ -44,19 +52,29 @@ class CreatePolicyDto {
 @ApiTags('permission')
 @Controller('permission')
 export class PermissionController {
-  constructor(private readonly permissionService: PermissionService) {}
+  constructor(
+    private readonly permissionService: PermissionService,
+    private readonly requestAuth: RequestAuthService,
+  ) {}
 
   @Post('check')
   @ApiOperation({ summary: 'Check permission for an action' })
-  async check(@Body() dto: CheckPermissionDto) {
-    const tenantId = process.env.DEFAULT_TENANT_ID || 'default-tenant';
-    return this.permissionService.check({
-      tenantId,
+  async check(
+    @Req() req: Request,
+    @Body() dto: CheckPermissionDto,
+  ) {
+    const auth = await this.requestAuth.resolveUser(req, {
+      tenantId: dto.tenantId,
       userId: dto.userId,
+      requireUser: true,
+    });
+    return this.permissionService.check({
+      tenantId: auth.tenantId,
+      userId: auth.userId!,
       processCode: dto.processCode,
       action: dto.action,
       context: dto.context,
-      traceId: `perm-${Date.now()}`,
+      traceId: (req as any).traceId || randomUUID(),
     });
   }
 }

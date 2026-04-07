@@ -5,9 +5,9 @@
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "scripts": {
-    "build": "tsc",
-    "dev": "tsc --watch",
-    "test": "jest"
+    "build": "corepack pnpm exec tsc",
+    "dev": "corepack pnpm exec tsc --watch",
+    "test": "corepack pnpm exec jest"
   },
   "dependencies": {
     "axios": "^1.6.5",
