@@ -1,7 +1,49 @@
 export const ACTIVE_SUBMISSION_STATUSES = ['pending', 'submitted'] as const;
 
+const UNSUPPORTED_STATUS_QUERY_ERROR_PATTERNS = [
+  'no rpa status query flow configured',
+  'status query is not configured',
+  'query status is not configured',
+  'no adapter available for status query',
+] as const;
+
 export function isActiveSubmissionStatus(status: string) {
   return ACTIVE_SUBMISSION_STATUSES.includes(status as (typeof ACTIVE_SUBMISSION_STATUSES)[number]);
+}
+
+export function isUnsupportedStatusQueryResult(
+  result:
+    | {
+        status?: string | null;
+        statusDetail?: Record<string, any> | null;
+        errorMessage?: string | null;
+      }
+    | null
+    | undefined,
+) {
+  if (!result || typeof result !== 'object') {
+    return false;
+  }
+
+  const normalizedStatus = typeof result.status === 'string'
+    ? result.status.trim().toLowerCase()
+    : '';
+
+  if (normalizedStatus !== 'error') {
+    return false;
+  }
+
+  const errorMessages = [
+    result.errorMessage,
+    result.statusDetail?.error,
+    result.statusDetail?.message,
+  ]
+    .filter((value): value is string => typeof value === 'string')
+    .map((value) => value.trim().toLowerCase());
+
+  return errorMessages.some((message) =>
+    UNSUPPORTED_STATUS_QUERY_ERROR_PATTERNS.some((pattern) => message.includes(pattern)),
+  );
 }
 
 export function mapExternalStatusToSubmissionStatus(

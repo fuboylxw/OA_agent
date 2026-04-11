@@ -9,7 +9,10 @@ import {
   type DeliveryPath,
 } from '@uniflow/shared-types';
 import { DeliveryOrchestratorService } from '../delivery-runtime/delivery-orchestrator.service';
-import { mapExternalStatusToSubmissionStatus } from '../common/submission-status.util';
+import {
+  isUnsupportedStatusQueryResult,
+  mapExternalStatusToSubmissionStatus,
+} from '../common/submission-status.util';
 
 @Injectable()
 export class StatusService {
@@ -71,73 +74,77 @@ export class StatusService {
       });
       const result = execution.statusResult;
       oaStatus = result;
-      const queriedAt = new Date();
-      const mappedStatus = mapExternalStatusToSubmissionStatus(result.status, submission.status);
-      const statusRecord = {
-        id: `status-${submission.id}-${queriedAt.getTime()}`,
-        submissionId: submission.id,
-        status: result.status,
-        statusDetail: result as any,
-        queriedAt,
-      };
-      const statusEvent = {
-        id: `event-${submission.id}-${queriedAt.getTime()}`,
-        tenantId: submission.tenantId,
-        submissionId: submission.id,
-        eventType: 'status_polled',
-        eventSource: 'oa_pull',
-        remoteEventId: buildStatusEventRemoteId(submission.oaSubmissionId, result as Record<string, any>),
-        eventTime: queriedAt,
-        status: result.status,
-        payload: result as any,
-        createdAt: queriedAt,
-      };
-
-      const eventCreated = await this.createSubmissionEvent({
-        data: {
+      if (isUnsupportedStatusQueryResult(result)) {
+        oaStatus = null;
+      } else {
+        const queriedAt = new Date();
+        const mappedStatus = mapExternalStatusToSubmissionStatus(result.status, submission.status);
+        const statusRecord = {
+          id: `status-${submission.id}-${queriedAt.getTime()}`,
+          submissionId: submission.id,
+          status: result.status,
+          statusDetail: result as any,
+          queriedAt,
+        };
+        const statusEvent = {
+          id: `event-${submission.id}-${queriedAt.getTime()}`,
           tenantId: submission.tenantId,
           submissionId: submission.id,
           eventType: 'status_polled',
           eventSource: 'oa_pull',
-          remoteEventId: statusEvent.remoteEventId,
+          remoteEventId: buildStatusEventRemoteId(submission.oaSubmissionId, result as Record<string, any>),
           eventTime: queriedAt,
           status: result.status,
           payload: result as any,
-        },
-      });
-      if (eventCreated) {
-        await this.prisma.submissionStatus.create({
+          createdAt: queriedAt,
+        };
+
+        const eventCreated = await this.createSubmissionEvent({
           data: {
+            tenantId: submission.tenantId,
             submissionId: submission.id,
+            eventType: 'status_polled',
+            eventSource: 'oa_pull',
+            remoteEventId: statusEvent.remoteEventId,
+            eventTime: queriedAt,
             status: result.status,
-            statusDetail: result as any,
+            payload: result as any,
           },
         });
-      }
-      await this.prisma.submission.update({
-        where: { id: submission.id },
-        data: {
-          status: mappedStatus,
-        },
-      });
-
-      if (eventCreated || mappedStatus !== previousStatus) {
-        await this.chatSessionProcessService.syncSubmissionStatusToSession({
-          submissionId: submission.id,
-          previousSubmissionStatus: previousStatus,
-          externalStatus: result.status,
-          payload: result as Record<string, any>,
-          createStatusMessage: eventCreated,
+        if (eventCreated) {
+          await this.prisma.submissionStatus.create({
+            data: {
+              submissionId: submission.id,
+              status: result.status,
+              statusDetail: result as any,
+            },
+          });
+        }
+        await this.prisma.submission.update({
+          where: { id: submission.id },
+          data: {
+            status: mappedStatus,
+          },
         });
-      }
 
-      effectiveStatus = mappedStatus;
-      effectiveStatusRecords = eventCreated
-        ? [statusRecord, ...submission.statusRecords]
-        : submission.statusRecords;
-      effectiveEvents = eventCreated
-        ? [statusEvent, ...submission.events]
-        : submission.events;
+        if (eventCreated || mappedStatus !== previousStatus) {
+          await this.chatSessionProcessService.syncSubmissionStatusToSession({
+            submissionId: submission.id,
+            previousSubmissionStatus: previousStatus,
+            externalStatus: result.status,
+            payload: result as Record<string, any>,
+            createStatusMessage: eventCreated,
+          });
+        }
+
+        effectiveStatus = mappedStatus;
+        effectiveStatusRecords = eventCreated
+          ? [statusRecord, ...submission.statusRecords]
+          : submission.statusRecords;
+        effectiveEvents = eventCreated
+          ? [statusEvent, ...submission.events]
+          : submission.events;
+      }
     }
 
     await this.auditService.createLog({

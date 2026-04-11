@@ -1,7 +1,8 @@
 import type { Metadata } from 'next';
 import Link from 'next/link';
-import Script from 'next/script';
 import './globals.css';
+import '@fortawesome/fontawesome-free/css/all.min.css';
+import AuthBootstrap from './components/AuthBootstrap';
 import UserHeader from './components/UserHeader';
 import NavBar from './components/NavBar';
 
@@ -17,14 +18,8 @@ export default function RootLayout({
 }) {
   return (
     <html lang="zh-CN">
-      <head>
-        <link rel="preload" href="/vendor/fontawesome/css/all.min.css" as="style" />
-        <noscript><link rel="stylesheet" href="/vendor/fontawesome/css/all.min.css" /></noscript>
-      </head>
       <body className="bg-gray-50 h-screen w-full flex flex-col overflow-hidden">
-        <Script id="fa-async" strategy="afterInteractive">{`
-          var l=document.createElement('link');l.rel='stylesheet';l.href='/vendor/fontawesome/css/all.min.css';document.head.appendChild(l);
-        `}</Script>
+        <AuthBootstrap />
         <header className="bg-white shadow-sm h-16 flex items-center justify-between px-6 flex-shrink-0 z-50">
           <div className="flex items-center space-x-4">
             <Link href="/" className="font-brand text-xl text-blue-600">UniFlow</Link>

@@ -177,7 +177,7 @@ describe('Sync/Webhook HTTP E2E', () => {
         status: { enabled: true, intervalMinutes: 5 },
       },
     });
-    expect(syncService.dispatchDueSchedules).toHaveBeenCalledWith('connector-1');
+    expect(syncService.dispatchDueSchedules).toHaveBeenCalledWith('connector-1', 'tenant-1');
     expect(syncService.enqueue).toHaveBeenCalledWith({
       tenantId: 'tenant-1',
       connectorId: 'connector-1',

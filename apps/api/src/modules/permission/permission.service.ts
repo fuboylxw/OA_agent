@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import axios from 'axios';
 import { PrismaService } from '../common/prisma.service';
 import { AuditService } from '../audit/audit.service';
-import { AdapterRuntimeService } from '../adapter-runtime/adapter-runtime.service';
+import { IntegrationRuntimeService } from '../integration-runtime/integration-runtime.service';
 
 export interface PermissionCheckInput {
   tenantId: string;
@@ -25,15 +25,13 @@ export class PermissionService {
   constructor(
     private readonly prisma: PrismaService,
     private readonly auditService: AuditService,
-    private readonly adapterRuntimeService: AdapterRuntimeService,
+    private readonly integrationRuntimeService: IntegrationRuntimeService,
   ) {}
 
   async check(input: PermissionCheckInput): Promise<PermissionCheckResult> {
-    // Step 1: Platform permission check (RBAC + ABAC)
     const platformResult = await this.checkPlatformPermission(input);
 
-    // Step 2: OA real-time permission check (if platform passes)
-    let oaResult = { passed: true, reason: 'OA check skipped (platform denied)' };
+    let oaResult = { passed: true, reason: 'OA check skipped because platform permission failed' };
     if (platformResult.passed) {
       oaResult = await this.checkOAPermission(input);
     }
@@ -43,9 +41,8 @@ export class PermissionService {
       ? platformResult.reason
       : !oaResult.passed
         ? oaResult.reason
-        : '权限校验通过';
+        : 'Permission granted';
 
-    // Log the decision
     await this.auditService.createLog({
       tenantId: input.tenantId,
       traceId: input.traceId,
@@ -72,20 +69,18 @@ export class PermissionService {
   private async checkPlatformPermission(
     input: PermissionCheckInput,
   ): Promise<{ passed: boolean; reason: string }> {
-    // Get user
     const user = await this.prisma.user.findFirst({
       where: { id: input.userId, tenantId: input.tenantId },
     });
 
     if (!user) {
-      return { passed: false, reason: '用户不存在' };
+      return { passed: false, reason: 'User not found' };
     }
 
     if (user.status !== 'active') {
-      return { passed: false, reason: '用户已被禁用' };
+      return { passed: false, reason: 'User is inactive' };
     }
 
-    // Get permission policies for this process
     const policies = await this.prisma.permissionPolicy.findMany({
       where: {
         tenantId: input.tenantId,
@@ -95,12 +90,10 @@ export class PermissionService {
       orderBy: { priority: 'desc' },
     });
 
-    // If no policies defined, allow by default (permissions are opt-in)
     if (policies.length === 0) {
-      return { passed: true, reason: '未配置权限策略，默认允许' };
+      return { passed: true, reason: 'No platform policy configured, allowing by default' };
     }
 
-    // Evaluate policies
     for (const policy of policies) {
       const result = this.evaluatePolicy(policy, user, input);
       if (result !== null) {
@@ -108,7 +101,7 @@ export class PermissionService {
       }
     }
 
-    return { passed: false, reason: '所有策略评估后未匹配' };
+    return { passed: false, reason: 'No permission policy matched the request' };
   }
 
   private evaluatePolicy(
@@ -119,39 +112,48 @@ export class PermissionService {
     const rule = policy.policyRule as Record<string, any>;
 
     if (policy.policyType === 'rbac') {
-      // Role-based check
       const allowedRoles = rule.roles as string[];
       const allowedActions = rule.actions as string[];
 
       if (allowedActions && !allowedActions.includes(input.action)) {
-        return null; // This policy doesn't apply to this action
+        return null;
       }
 
-      const userRoles = Array.isArray(user.roles) ? user.roles : (() => { try { return JSON.parse(user.roles as string); } catch { return []; } })();
-      if (allowedRoles && userRoles.some((r: string) => allowedRoles.includes(r))) {
-        return { passed: true, reason: `角色 ${userRoles.join(',')} 匹配策略 ${policy.id}` };
+      const userRoles = Array.isArray(user.roles)
+        ? user.roles
+        : (() => {
+            try {
+              return JSON.parse(user.roles as string);
+            } catch {
+              return [];
+            }
+          })();
+
+      if (allowedRoles && userRoles.some((role: string) => allowedRoles.includes(role))) {
+        return { passed: true, reason: `Role ${userRoles.join(',')} matched policy ${policy.id}` };
       }
 
       return null;
     }
 
     if (policy.policyType === 'abac') {
-      // Attribute-based check
       const conditions = rule.conditions as Array<{
         attribute: string;
         operator: string;
         value: any;
       }>;
 
-      if (!conditions) return null;
+      if (!conditions) {
+        return null;
+      }
 
-      const allMatch = conditions.every(cond => {
-        const attrValue = this.getAttributeValue(cond.attribute, user, input);
-        return this.evaluateCondition(attrValue, cond.operator, cond.value);
+      const allMatch = conditions.every((condition) => {
+        const attrValue = this.getAttributeValue(condition.attribute, user, input);
+        return this.evaluateCondition(attrValue, condition.operator, condition.value);
       });
 
       if (allMatch) {
-        return { passed: true, reason: `属性条件匹配策略 ${policy.id}` };
+        return { passed: true, reason: `Attributes matched policy ${policy.id}` };
       }
 
       return null;
@@ -165,24 +167,35 @@ export class PermissionService {
       const field = attribute.replace('user.', '');
       return user[field];
     }
+
     if (attribute.startsWith('context.')) {
       const field = attribute.replace('context.', '');
       return input.context?.[field];
     }
+
     return undefined;
   }
 
   private evaluateCondition(value: any, operator: string, expected: any): boolean {
     switch (operator) {
-      case 'eq': return value === expected;
-      case 'ne': return value !== expected;
-      case 'in': return Array.isArray(expected) && expected.includes(value);
-      case 'contains': return Array.isArray(value) && value.includes(expected);
-      case 'gt': return value > expected;
-      case 'gte': return value >= expected;
-      case 'lt': return value < expected;
-      case 'lte': return value <= expected;
-      default: return false;
+      case 'eq':
+        return value === expected;
+      case 'ne':
+        return value !== expected;
+      case 'in':
+        return Array.isArray(expected) && expected.includes(value);
+      case 'contains':
+        return Array.isArray(value) && value.includes(expected);
+      case 'gt':
+        return value > expected;
+      case 'gte':
+        return value >= expected;
+      case 'lt':
+        return value < expected;
+      case 'lte':
+        return value <= expected;
+      default:
+        return false;
     }
   }
 
@@ -207,7 +220,7 @@ export class PermissionService {
     });
 
     if (!template?.connector) {
-      return { passed: true, reason: 'OA实时权限校验已跳过：未找到流程连接器' };
+      return { passed: true, reason: 'OA realtime permission skipped because no connector was found' };
     }
 
     const connector = template.connector;
@@ -219,24 +232,45 @@ export class PermissionService {
 
     if (!permissionCheck.enabled) {
       if (requireRealtimePermission && connectorClaimsRealtimePerm) {
-        return { passed: false, reason: '连接器已声明支持 OA 实时权限，但未配置权限校验接口' };
+        return {
+          passed: false,
+          reason: 'Connector claims realtime OA permission support but no permission endpoint is configured',
+        };
       }
 
       return {
         passed: true,
         reason: connectorClaimsRealtimePerm
-          ? 'OA实时权限校验未配置，已跳过'
-          : '连接器未启用 OA 实时权限校验',
+          ? 'OA realtime permission support is declared but not configured'
+          : 'Connector does not enable OA realtime permission checks',
       };
     }
 
     if (!permissionCheck.endpoint) {
-      return { passed: false, reason: 'OA实时权限校验已启用，但未配置 endpoint' };
+      return { passed: false, reason: 'OA realtime permission is enabled but endpoint is missing' };
     }
 
     const onError = permissionCheck.onError === 'allow' ? 'allow' : 'deny';
     try {
-      const resolvedAuthConfig = await this.adapterRuntimeService.resolveAuthConfig(connector);
+      const authResolution = await this.integrationRuntimeService.resolveConnectorExecutionAuth({
+        connector,
+        capability: 'permission.check',
+        authScope: {
+          tenantId: input.tenantId,
+          userId: input.userId,
+        },
+      });
+
+      if (authResolution.state !== 'ready') {
+        return {
+          passed: onError === 'allow',
+          reason: onError === 'allow'
+            ? 'OA permission check skipped because no execution-scoped auth is ready'
+            : 'OA permission check requires execution-scoped auth',
+        };
+      }
+
+      const resolvedAuthConfig = authResolution.artifact?.payload || {};
       const requestPayload = this.renderTemplate(
         permissionCheck.requestTemplate || {
           userId: '{{userId}}',
@@ -270,27 +304,30 @@ export class PermissionService {
       const allowed = this.getNestedValue(response.data, allowedPath);
       const reason = this.getNestedValue(response.data, reasonPath);
       if (allowed === allowedValue) {
-        return { passed: true, reason: typeof reason === 'string' ? reason : 'OA实时权限校验通过' };
+        return {
+          passed: true,
+          reason: typeof reason === 'string' ? reason : 'OA permission granted',
+        };
       }
 
       if (allowed === undefined) {
         return {
           passed: onError === 'allow',
           reason: onError === 'allow'
-            ? 'OA权限接口未返回明确允许结果，按配置放行'
-            : 'OA权限接口未返回明确允许结果',
+            ? 'OA permission endpoint did not return an explicit decision, allowing by configuration'
+            : 'OA permission endpoint did not return an explicit decision',
         };
       }
 
       return {
         passed: false,
-        reason: typeof reason === 'string' ? reason : 'OA实时权限校验拒绝',
+        reason: typeof reason === 'string' ? reason : 'OA permission denied',
       };
     } catch (error: any) {
       if (onError === 'allow') {
-        return { passed: true, reason: `OA权限校验失败，按配置放行: ${error.message}` };
+        return { passed: true, reason: `OA permission check failed but was allowed by config: ${error.message}` };
       }
-      return { passed: false, reason: `OA权限校验失败: ${error.message}` };
+      return { passed: false, reason: `OA permission check failed: ${error.message}` };
     }
   }
 

@@ -1,14 +1,13 @@
 const { spawn } = require('child_process');
 const path = require('path');
+const { prependCorepackToPath } = require('./lib/corepack');
 
 const rootDir = path.resolve(__dirname, '..');
-const nodeDir = path.dirname(process.execPath);
-const corepackShimsDir = path.join(nodeDir, 'node_modules', 'corepack', 'shims');
 
 const env = {
   ...process.env,
   COREPACK_HOME: process.env.COREPACK_HOME || path.join(rootDir, '.corepack'),
-  PATH: [corepackShimsDir, nodeDir, process.env.PATH].filter(Boolean).join(path.delimiter),
+  PATH: prependCorepackToPath(),
 };
 
 const args = process.argv.slice(2);

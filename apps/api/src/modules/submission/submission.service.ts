@@ -21,6 +21,7 @@ import { DeliveryOrchestratorService } from '../delivery-runtime/delivery-orches
 import {
   getSubmissionStatusText,
   isActiveSubmissionStatus,
+  isUnsupportedStatusQueryResult,
   mapExternalStatusToSubmissionStatus,
 } from '../common/submission-status.util';
 
@@ -857,6 +858,9 @@ export class SubmissionService {
           const adapter = await adapterPromise;
           const previousStatus = submission.status;
           const result = await adapter.queryStatus(submission.oaSubmissionId);
+          if (isUnsupportedStatusQueryResult(result)) {
+            return;
+          }
           const mappedStatus = mapExternalStatusToSubmissionStatus(result.status, previousStatus);
           const queriedAt = new Date();
           const remoteEventId = buildStatusEventRemoteId(

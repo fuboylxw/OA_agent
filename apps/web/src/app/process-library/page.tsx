@@ -1,6 +1,6 @@
 'use client';
 
-import { useState, useEffect } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
 import { FileText, CheckCircle, Clock, AlertCircle, Search } from 'lucide-react';
@@ -37,20 +37,7 @@ export default function ProcessLibraryPage() {
   const [searchTerm, setSearchTerm] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('all');
 
-  useEffect(() => {
-    if (typeof window === 'undefined') {
-      return;
-    }
-
-    if (!hasClientSession()) {
-      router.replace('/login');
-      return;
-    }
-
-    void fetchProcesses();
-  }, []);
-
-  const fetchProcesses = async () => {
+  const fetchProcesses = useCallback(async () => {
     try {
       setError(null);
       const response = await authFetch(withBrowserApiBase('/api/v1/process-library'));
@@ -68,7 +55,20 @@ export default function ProcessLibraryPage() {
     } finally {
       setLoading(false);
     }
-  };
+  }, []);
+
+  useEffect(() => {
+    if (typeof window === 'undefined') {
+      return;
+    }
+
+    if (!hasClientSession()) {
+      router.replace('/login');
+      return;
+    }
+
+    void fetchProcesses();
+  }, [fetchProcesses, router]);
 
   const filteredProcesses = processes.filter((process) => {
     const matchesSearch =

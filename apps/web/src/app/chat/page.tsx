@@ -1,12 +1,13 @@
 'use client';
 
-import { useEffect, useRef, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { useRouter, useSearchParams } from 'next/navigation';
 import ProcessConversationCard, {
   ActionButton,
   ProcessCard,
 } from '../components/ProcessConversationCard';
 import { apiClient } from '../lib/api-client';
+import { shouldPollChatSession } from '../lib/chat-process-polling';
 import { getClientSessionToken, hasClientSession } from '../lib/client-auth';
 import { withBrowserApiBase } from '../lib/browser-api-base-url';
 
@@ -175,51 +176,16 @@ export default function ChatPage() {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages, loading]);
 
-  useEffect(() => {
-    if (!hasClientSession()) {
-      router.replace('/login');
-      return;
-    }
-
-    setAuthReady(true);
-  }, [router]);
-
-  useEffect(() => {
-    if (!authReady) {
-      return;
-    }
-
-    void loadSessions();
-  }, [authReady]);
-
-  useEffect(() => {
-    if (!authReady) {
-      return;
-    }
-    if (!flowCode) {
-      return;
-    }
-    if (flowBootstrappedRef.current === flowCode) {
-      return;
-    }
-    if (sessionId || messages.length > 0 || loading) {
-      return;
-    }
-
-    flowBootstrappedRef.current = flowCode;
-    void bootstrapFlow(flowCode);
-  }, [authReady, flowCode, loading, messages.length, sessionId]);
-
-  const ensureSession = () => {
+  const ensureSession = useCallback(() => {
     if (hasClientSession()) {
       return true;
     }
 
     router.replace('/login');
     return false;
-  };
+  }, [router]);
 
-  const loadSessions = async () => {
+  const loadSessions = useCallback(async () => {
     try {
       if (!ensureSession()) {
         return;
@@ -230,9 +196,9 @@ export default function ChatPage() {
     } catch (error) {
       console.error('Failed to load sessions:', error);
     }
-  };
+  }, [ensureSession]);
 
-  const loadSession = async (id: string) => {
+  const loadSession = useCallback(async (id: string) => {
     try {
       const response = await apiClient.get(`/assistant/sessions/${id}/messages`);
       const data = response.data || {};
@@ -246,39 +212,9 @@ export default function ChatPage() {
     } catch (error) {
       console.error('Failed to load session:', error);
     }
-  };
+  }, []);
 
-  const createNewChat = () => {
-    setMessages([]);
-    setInput('');
-    setSessionId(null);
-    setSessionState(null);
-    setPendingFiles([]);
-    setUploadError('');
-    setUploadTargetFieldKey(null);
-    setAuthorizingMessageId(null);
-    setShowHistory(false);
-    if (flowCode) {
-      flowBootstrappedRef.current = flowCode;
-    }
-  };
-
-  const bootstrapFlow = async (code: string) => {
-    try {
-      if (!ensureSession()) {
-        return;
-      }
-      const response = await apiClient.get(`/process-library/${encodeURIComponent(code)}`);
-      const processName = response.data?.processName || code;
-      setShowHistory(false);
-      await sendMessage(`我要办理${processName}`);
-    } catch {
-      setInput(`我要办理${code}`);
-      setShowHistory(false);
-    }
-  };
-
-  const sendMessage = async (
+  const sendMessage = useCallback(async (
     text?: string,
     options?: { displayText?: string; silent?: boolean },
   ) => {
@@ -289,13 +225,13 @@ export default function ChatPage() {
 
     if (!options?.silent) {
       const createdAt = new Date().toISOString();
-    const userMessage: ChatMessage = {
-      id: `user-${Date.now()}`,
-      role: 'user',
-      content: options?.displayText || messageText || `[已上传 ${pendingFiles.length} 个文件]`,
-      createdAt,
-      attachments: pendingFiles.length > 0 ? pendingFiles : undefined,
-    };
+      const userMessage: ChatMessage = {
+        id: `user-${Date.now()}`,
+        role: 'user',
+        content: options?.displayText || messageText || `[已上传 ${pendingFiles.length} 个文件]`,
+        createdAt,
+        attachments: pendingFiles.length > 0 ? pendingFiles : undefined,
+      };
 
       setMessages((prev) => [...prev, userMessage]);
     }
@@ -350,6 +286,84 @@ export default function ChatPage() {
       ]);
     } finally {
       setLoading(false);
+    }
+  }, [ensureSession, input, loadSessions, pendingFiles, sessionId]);
+
+  useEffect(() => {
+    if (!hasClientSession()) {
+      router.replace('/login');
+      return;
+    }
+
+    setAuthReady(true);
+  }, [router]);
+
+  useEffect(() => {
+    if (!authReady) {
+      return;
+    }
+
+    void loadSessions();
+  }, [authReady, loadSessions]);
+
+  useEffect(() => {
+    if (!authReady) {
+      return;
+    }
+    if (!flowCode) {
+      return;
+    }
+    if (flowBootstrappedRef.current === flowCode) {
+      return;
+    }
+    if (sessionId || messages.length > 0 || loading) {
+      return;
+    }
+
+    flowBootstrappedRef.current = flowCode;
+    void (async () => {
+      try {
+        if (!ensureSession()) {
+          return;
+        }
+        const response = await apiClient.get(`/process-library/${encodeURIComponent(flowCode)}`);
+        const processName = response.data?.processName || flowCode;
+        setShowHistory(false);
+        await sendMessage(`我要办理${processName}`);
+      } catch {
+        setInput(`我要办理${flowCode}`);
+        setShowHistory(false);
+      }
+    })();
+  }, [authReady, ensureSession, flowCode, loading, messages.length, sendMessage, sessionId]);
+
+  useEffect(() => {
+    if (!authReady || !sessionId || !shouldPollChatSession(sessionState, messages)) {
+      return;
+    }
+
+    const intervalId = window.setInterval(() => {
+      void loadSession(sessionId);
+      void loadSessions();
+    }, 3000);
+
+    return () => {
+      window.clearInterval(intervalId);
+    };
+  }, [authReady, loadSession, loadSessions, messages, sessionId, sessionState]);
+
+  const createNewChat = () => {
+    setMessages([]);
+    setInput('');
+    setSessionId(null);
+    setSessionState(null);
+    setPendingFiles([]);
+    setUploadError('');
+    setUploadTargetFieldKey(null);
+    setAuthorizingMessageId(null);
+    setShowHistory(false);
+    if (flowCode) {
+      flowBootstrappedRef.current = flowCode;
     }
   };
 
@@ -451,15 +465,15 @@ export default function ChatPage() {
     }
 
     let settled = false;
-    let pollTimer: number | undefined;
+    const pollTimer = { current: undefined as number | undefined };
 
     const cleanup = () => {
       if (settled) {
         return;
       }
       settled = true;
-      if (pollTimer) {
-        window.clearInterval(pollTimer);
+      if (pollTimer.current !== undefined) {
+        window.clearInterval(pollTimer.current);
       }
       window.removeEventListener('message', onMessage);
       setAuthorizingMessageId((current) => (current === messageId ? null : current));
@@ -493,7 +507,7 @@ export default function ChatPage() {
         if (popup.closed) {
           cleanup();
         }
-      } catch (error) {
+      } catch {
         if (popup.closed) {
           cleanup();
         }
@@ -518,7 +532,7 @@ export default function ChatPage() {
     };
 
     window.addEventListener('message', onMessage);
-    pollTimer = window.setInterval(() => {
+    pollTimer.current = window.setInterval(() => {
       void pollStatus();
     }, 1500);
   };

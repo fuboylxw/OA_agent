@@ -6,6 +6,8 @@ import { Queue } from 'bull';
 import { WorkerAvailabilityService } from './modules/bootstrap/worker-availability.service';
 import type { Response } from 'express';
 
+const DEFAULT_HEALTH_CHECK_TIMEOUT_MS = 2000;
+
 @Public()
 @Controller('health')
 export class HealthController {
@@ -27,7 +29,10 @@ export class HealthController {
     // Database
     const dbStart = Date.now();
     try {
-      await this.prisma.$queryRawUnsafe('SELECT 1');
+      await this.withTimeout(
+        this.prisma.$queryRawUnsafe('SELECT 1'),
+        'database query',
+      );
       checks.database = { status: 'ok', latencyMs: Date.now() - dbStart };
     } catch (err: any) {
       checks.database = { status: 'error', latencyMs: Date.now() - dbStart, error: err.message };
@@ -36,18 +41,34 @@ export class HealthController {
     // Redis
     const redisStart = Date.now();
     try {
-      const pong = await this.bootstrapQueue.client.ping();
+      const pong = await this.withTimeout(
+        this.bootstrapQueue.client.ping(),
+        'redis ping',
+      );
       checks.redis = { status: pong === 'PONG' ? 'ok' : 'error', latencyMs: Date.now() - redisStart };
     } catch (err: any) {
       checks.redis = { status: 'error', latencyMs: Date.now() - redisStart, error: err.message };
     }
 
     // Worker heartbeat
-    const bootstrapWorker = await this.workerAvailabilityService.getBootstrapWorkerStatus();
-    checks.worker = {
-      status: bootstrapWorker.available ? 'ok' : 'degraded',
-      ...(bootstrapWorker.reason ? { error: bootstrapWorker.reason } : {}),
-    };
+    const workerStart = Date.now();
+    try {
+      const bootstrapWorker = await this.withTimeout(
+        this.workerAvailabilityService.getBootstrapWorkerStatus(),
+        'worker availability',
+      );
+      checks.worker = {
+        status: bootstrapWorker.available ? 'ok' : 'degraded',
+        latencyMs: Date.now() - workerStart,
+        ...(bootstrapWorker.reason ? { error: bootstrapWorker.reason } : {}),
+      };
+    } catch (err: any) {
+      checks.worker = {
+        status: 'degraded',
+        latencyMs: Date.now() - workerStart,
+        error: err.message,
+      };
+    }
 
     const allOk = Object.values(checks).every(c => c.status === 'ok');
     const hasCriticalFailure = checks.database?.status === 'error' || checks.redis?.status === 'error';
@@ -69,5 +90,23 @@ export class HealthController {
   @Get()
   async check(@Res({ passthrough: true }) res: Response) {
     return this.ready(res);
+  }
+
+  private async withTimeout<T>(promise: Promise<T>, operation: string): Promise<T> {
+    let timeoutHandle: NodeJS.Timeout | undefined;
+    try {
+      return await Promise.race([
+        promise,
+        new Promise<T>((_resolve, reject) => {
+          timeoutHandle = setTimeout(() => {
+            reject(new Error(`${operation} timed out after ${DEFAULT_HEALTH_CHECK_TIMEOUT_MS}ms`));
+          }, DEFAULT_HEALTH_CHECK_TIMEOUT_MS);
+        }),
+      ]);
+    } finally {
+      if (timeoutHandle) {
+        clearTimeout(timeoutHandle);
+      }
+    }
   }
 }

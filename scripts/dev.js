@@ -10,13 +10,16 @@ const {
   updateSession,
   updateSessionService,
 } = require('./lib/log-manager');
+const {
+  assertPortsAvailable,
+  resolveRequiredPorts,
+} = require('./dev.preflight');
+const { prependCorepackToPath } = require('./lib/corepack');
 
-const nodeDir = path.dirname(process.execPath);
-const corepackShimsDir = path.join(nodeDir, 'node_modules', 'corepack', 'shims');
 const baseEnv = {
   ...process.env,
   COREPACK_HOME: process.env.COREPACK_HOME || path.join(rootDir, '.corepack'),
-  PATH: [corepackShimsDir, nodeDir, process.env.PATH].filter(Boolean).join(path.delimiter),
+  PATH: prependCorepackToPath(),
 };
 const isCodexSandbox = Boolean(process.env.CODEX_THREAD_ID || process.env.CODEX_SANDBOX_NETWORK_DISABLED);
 
@@ -350,6 +353,14 @@ async function main() {
     }
     if (isCodexSandbox && mode === 'dev' && appPackages.some((item) => item.name === 'web')) {
       console.log('[dev] Codex sandbox detected; apps/web will run with a prebuild + next start fallback (no HMR)');
+    }
+    try {
+      await assertPortsAvailable(resolveRequiredPorts(appPackages));
+    } catch (error) {
+      if (logSession.archivedCurrent.reason === 'active') {
+        error.message = `${error.message} Run "pnpm logs:stop" to stop the current session first.`;
+      }
+      throw error;
     }
     await runBuilds();
     const prebuildApps = mode === 'start'

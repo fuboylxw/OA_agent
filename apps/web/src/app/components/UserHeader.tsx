@@ -1,39 +1,37 @@
 'use client';
 
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useRef, useSyncExternalStore } from 'react';
 import { usePathname, useRouter } from 'next/navigation';
-import { clearClientAuth, hasClientSession } from '../lib/client-auth';
+import {
+  buildLoginHref,
+  clearClientAuth,
+  getClientAuthSnapshot,
+  subscribeClientAuth,
+} from '../lib/client-auth';
+import { withBrowserApiBase } from '../lib/browser-api-base-url';
+import { isOauth2AuthMode } from '../lib/auth-mode';
 
 export default function UserHeader() {
-  const [displayName, setDisplayName] = useState('');
-  const [initial, setInitial] = useState('');
-  const [roles, setRoles] = useState<string[]>([]);
   const [showMenu, setShowMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
   const router = useRouter();
-  const pathname = usePathname();
+  const pathname = usePathname() || '';
+  const snapshot = useSyncExternalStore(
+    subscribeClientAuth,
+    getClientAuthSnapshot,
+    getClientAuthSnapshot,
+  );
 
   useEffect(() => {
-    if (pathname === '/login') return;
-
-    const name = localStorage.getItem('displayName') || '';
-    const rolesStr = localStorage.getItem('roles');
-    const userId = localStorage.getItem('userId');
-
-    if (!hasClientSession()) {
-      router.replace('/login');
+    if (pathname.startsWith('/login')) {
       return;
     }
 
-    const fallbackName = userId || 'User';
-    setDisplayName(name || fallbackName);
-    setInitial((name || fallbackName).charAt(0).toUpperCase());
-    try {
-      setRoles(rolesStr ? JSON.parse(rolesStr) : ['user']);
-    } catch {
-      setRoles(['user']);
+    if (!snapshot.hasSession) {
+      router.replace(buildLoginHref(`${window.location.pathname}${window.location.search}`));
+      return;
     }
-  }, [router, pathname]);
+  }, [router, pathname, snapshot.hasSession]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {
@@ -45,12 +43,24 @@ export default function UserHeader() {
     return () => document.removeEventListener('mousedown', handleClickOutside);
   }, []);
 
-  if (pathname === '/login') {
+  if (pathname.startsWith('/login')) {
     return null;
   }
 
-  const handleLogout = () => {
+  const displayName = snapshot.displayName || snapshot.username || snapshot.userId || 'User';
+  const initial = (displayName || 'U').charAt(0).toUpperCase();
+  const roles = snapshot.roles;
+
+  const handleLogout = async () => {
+    setShowMenu(false);
+    await fetch('/api/session', {
+      method: 'DELETE',
+    }).catch(() => undefined);
     clearClientAuth();
+    if (isOauth2AuthMode()) {
+      window.location.href = withBrowserApiBase('/api/v1/auth/oauth2/logout?returnTo=%2Flogin%3FloggedOut%3D1');
+      return;
+    }
     window.location.href = '/login';
   };
 
@@ -65,7 +75,7 @@ export default function UserHeader() {
         <div className="w-8 h-8 bg-blue-100 rounded-full flex items-center justify-center">
           <span className="text-blue-600 text-sm font-medium">{initial}</span>
         </div>
-        <span className="text-gray-700 text-sm">{displayName || '加载中...'}</span>
+        <span className="text-gray-700 text-sm">{snapshot.hasProfile ? displayName : '加载中...'}</span>
         {isAdmin && (
           <span className="px-1.5 py-0.5 bg-orange-100 text-orange-600 text-xs rounded font-medium">管理员</span>
         )}

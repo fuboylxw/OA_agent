@@ -5,6 +5,7 @@ import * as request from 'supertest';
 import { ConnectorController } from '../src/modules/connector/connector.controller';
 import { ConnectorService } from '../src/modules/connector/connector.service';
 import { RequestAuthService } from '../src/modules/common/request-auth.service';
+import { AuthBindingService } from '../src/modules/auth-binding/auth-binding.service';
 
 @Module({
   controllers: [ConnectorController],
@@ -28,6 +29,14 @@ import { RequestAuthService } from '../src/modules/common/request-auth.service';
           roles: [],
           source: 'request',
         }),
+      },
+    },
+    {
+      provide: AuthBindingService,
+      useValue: {
+        beginDelegatedAuth: jest.fn(),
+        getDelegatedAuthStatus: jest.fn(),
+        completeDelegatedAuth: jest.fn(),
       },
     },
   ],

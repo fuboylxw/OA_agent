@@ -1,6 +1,6 @@
 'use client';
 
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import Link from 'next/link';
 import { useSearchParams } from 'next/navigation';
 import { apiClient } from '../lib/api-client';
@@ -423,6 +423,28 @@ export default function AuthBindingsContent() {
     return bindings.filter((binding) => binding.connectorId === selectedConnectorId);
   }, [bindings, selectedConnectorId]);
 
+  const loadBindings = useCallback(async (connectorId?: string, includeAll?: boolean) => {
+    try {
+      const response = await apiClient.get('/auth-bindings', {
+        params: {
+          connectorId: connectorId || undefined,
+          includeAllUsers: includeAll && isPrivileged ? 'true' : undefined,
+        },
+      });
+      const nextBindings = Array.isArray(response.data) ? response.data : [];
+      setBindings(nextBindings);
+      setSelectedBindingId((currentSelectedBindingId) => {
+        if (nextBindings.some((binding: AuthBindingSummary) => binding.id === currentSelectedBindingId)) {
+          return currentSelectedBindingId;
+        }
+        const preferredBinding = nextBindings.find((binding: AuthBindingSummary) => binding.isDefault) || nextBindings[0];
+        return preferredBinding?.id || '';
+      });
+    } catch (requestError: any) {
+      setError(requestError.response?.data?.message || '刷新认证绑定失败');
+    }
+  }, [isPrivileged]);
+
   useEffect(() => {
     const nextAssetType = authModeToAssetType(selectedBinding?.authMode || createForm.authMode);
     setAssetForm((prev) => ({
@@ -433,9 +455,60 @@ export default function AuthBindingsContent() {
   }, [createForm.authMode, selectedBinding?.authMode]);
 
   useEffect(() => {
+    let cancelled = false;
+
+    const loadInitialData = async () => {
+      setLoading(true);
+      setError('');
+      try {
+        const [connectorRes, bindingRes] = await Promise.all([
+          apiClient.get('/connectors'),
+          apiClient.get('/auth-bindings', {
+            params: {
+              connectorId: connectorIdFromQuery || undefined,
+              includeAllUsers: isPrivileged ? 'true' : undefined,
+            },
+          }),
+        ]);
+
+        if (cancelled) {
+          return;
+        }
+
+        const nextConnectors = Array.isArray(connectorRes.data) ? connectorRes.data : [];
+        const nextBindings = Array.isArray(bindingRes.data) ? bindingRes.data : [];
+        setConnectors(nextConnectors);
+        setBindings(nextBindings);
+
+        const nextConnectorId = connectorIdFromQuery
+          || nextBindings[0]?.connectorId
+          || nextConnectors[0]?.id
+          || '';
+        setSelectedConnectorId(nextConnectorId);
+        setCreateForm((prev) => ({
+          ...prev,
+          connectorId: prev.connectorId || nextConnectorId,
+        }));
+
+        const preferredBinding = nextBindings.find((binding: AuthBindingSummary) => binding.isDefault) || nextBindings[0];
+        setSelectedBindingId(preferredBinding?.id || '');
+      } catch (requestError: any) {
+        if (!cancelled) {
+          setError(requestError.response?.data?.message || '加载认证绑定失败');
+        }
+      } finally {
+        if (!cancelled) {
+          setLoading(false);
+        }
+      }
+    };
+
     void loadInitialData();
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, []);
+
+    return () => {
+      cancelled = true;
+    };
+  }, [connectorIdFromQuery, isPrivileged]);
 
   useEffect(() => {
     setCreateForm((prev) => ({
@@ -443,65 +516,7 @@ export default function AuthBindingsContent() {
       connectorId: selectedConnectorId || prev.connectorId,
     }));
     void loadBindings(selectedConnectorId, includeAllUsers);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedConnectorId, includeAllUsers]);
-
-  async function loadInitialData() {
-    setLoading(true);
-    setError('');
-    try {
-      const [connectorRes, bindingRes] = await Promise.all([
-        apiClient.get('/connectors'),
-        apiClient.get('/auth-bindings', {
-          params: {
-            connectorId: connectorIdFromQuery || undefined,
-            includeAllUsers: isPrivileged ? 'true' : undefined,
-          },
-        }),
-      ]);
-      const nextConnectors = Array.isArray(connectorRes.data) ? connectorRes.data : [];
-      const nextBindings = Array.isArray(bindingRes.data) ? bindingRes.data : [];
-      setConnectors(nextConnectors);
-      setBindings(nextBindings);
-
-      const nextConnectorId = connectorIdFromQuery
-        || nextBindings[0]?.connectorId
-        || nextConnectors[0]?.id
-        || '';
-      setSelectedConnectorId(nextConnectorId);
-      setCreateForm((prev) => ({
-        ...prev,
-        connectorId: prev.connectorId || nextConnectorId,
-      }));
-
-      const preferredBinding = nextBindings.find((binding: AuthBindingSummary) => binding.isDefault) || nextBindings[0];
-      setSelectedBindingId(preferredBinding?.id || '');
-    } catch (requestError: any) {
-      setError(requestError.response?.data?.message || '加载认证绑定失败');
-    } finally {
-      setLoading(false);
-    }
-  }
-
-  async function loadBindings(connectorId?: string, includeAll?: boolean) {
-    try {
-      const response = await apiClient.get('/auth-bindings', {
-        params: {
-          connectorId: connectorId || undefined,
-          includeAllUsers: includeAll && isPrivileged ? 'true' : undefined,
-        },
-      });
-      const nextBindings = Array.isArray(response.data) ? response.data : [];
-      setBindings(nextBindings);
-
-      if (!nextBindings.some((binding: AuthBindingSummary) => binding.id === selectedBindingId)) {
-        const preferredBinding = nextBindings.find((binding: AuthBindingSummary) => binding.isDefault) || nextBindings[0];
-        setSelectedBindingId(preferredBinding?.id || '');
-      }
-    } catch (requestError: any) {
-      setError(requestError.response?.data?.message || '刷新认证绑定失败');
-    }
-  }
+  }, [includeAllUsers, loadBindings, selectedConnectorId]);
 
   async function handleCreateBinding() {
     if (!createForm.connectorId) {
@@ -796,7 +811,7 @@ export default function AuthBindingsContent() {
             ) : null}
 
             <div className="rounded-xl border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-900">
-              解析顺序：个人默认绑定 -> 最近个人绑定 -> 服务绑定。
+              解析顺序：个人默认绑定 -&gt; 最近个人绑定 -&gt; 服务绑定。
             </div>
           </section>
         </div>

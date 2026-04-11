@@ -46,6 +46,25 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
         return (node?.textContent || '').replace(/\s+/g, ' ').trim();
       }
 
+      function isVisible(node: Element | null | undefined) {
+        if (!node || !(node instanceof Element)) {
+          return false;
+        }
+
+        const style = window.getComputedStyle(node);
+        if (
+          style.display === 'none'
+          || style.visibility === 'hidden'
+          || style.visibility === 'collapse'
+          || style.opacity === '0'
+        ) {
+          return false;
+        }
+
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0;
+      }
+
       function cssPath(node: Element | null): string | undefined {
         if (!node || !(node instanceof Element)) {
           return undefined;
@@ -111,22 +130,29 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
 
       function importantTexts() {
         const candidates = Array.from(document.querySelectorAll('h1, h2, h3, [role="heading"], .title, .ant-page-header-heading-title'))
+          .filter((node) => isVisible(node))
           .map((node) => textOf(node))
           .filter(Boolean);
         return Array.from(new Set(candidates)).slice(0, 20);
       }
 
       function forms() {
-        return Array.from(document.querySelectorAll('form')).slice(0, 10).map((form, index) => ({
+        return Array.from(document.querySelectorAll('form'))
+          .filter((form) => isVisible(form))
+          .slice(0, 10)
+          .map((form, index) => ({
           id: form.id || `form-${index + 1}`,
           name: form.getAttribute('name') || textOf(form.querySelector('legend, h1, h2, h3')) || `表单${index + 1}`,
-          fields: Array.from(form.querySelectorAll('input, select, textarea')).slice(0, 40).map((field) => ({
+          fields: Array.from(form.querySelectorAll('input, select, textarea'))
+            .filter((field) => isVisible(field))
+            .slice(0, 40)
+            .map((field) => ({
             label: textOf(field.closest('label') || field.parentElement?.querySelector('label') || null) || undefined,
             fieldKey: field.getAttribute('name') || field.getAttribute('id') || undefined,
             required: field.hasAttribute('required'),
             selector: cssPath(field),
-          })),
-        }));
+            })),
+          }));
       }
 
       function regions() {
@@ -141,12 +167,13 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
 
         return regionDefs.map((definition) => {
           const node = document.querySelector(definition.selector);
-          if (!node) {
+          if (!node || !isVisible(node)) {
             return null;
           }
           const interactiveChildren = Array.from(
             node.querySelectorAll('button, a, input, select, textarea, [role="button"], [role="link"], [onclick]')
           )
+            .filter((item) => isVisible(item))
             .map((item) => cssPath(item))
             .filter(Boolean);
           return {
@@ -162,6 +189,7 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
       const elements = Array.from(
         document.querySelectorAll('button, a, input, select, textarea, [role="button"], [role="link"], [onclick]')
       )
+        .filter((node) => isVisible(node))
         .slice(0, 120)
         .map((node) => {
           const selector = cssPath(node);
@@ -199,16 +227,22 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
         url: window.location.href,
         regions: regions(),
         forms: forms(),
-        dialogs: Array.from(document.querySelectorAll('dialog, [role="dialog"], .ant-modal-root, .el-dialog')).slice(0, 10).map((node, index) => ({
+        dialogs: Array.from(document.querySelectorAll('dialog, [role="dialog"], .ant-modal-root, .el-dialog'))
+          .filter((node) => isVisible(node))
+          .slice(0, 10)
+          .map((node, index) => ({
           id: node.id || `dialog-${index + 1}`,
           title: textOf(node.querySelector('h1, h2, h3, .ant-modal-title, .el-dialog__title')) || `弹窗${index + 1}`,
           summary: textOf(node).slice(0, 120) || undefined,
-        })),
-        tables: Array.from(document.querySelectorAll('table')).slice(0, 10).map((node, index) => ({
+          })),
+        tables: Array.from(document.querySelectorAll('table'))
+          .filter((node) => isVisible(node))
+          .slice(0, 10)
+          .map((node, index) => ({
           id: node.id || `table-${index + 1}`,
           name: textOf(node.querySelector('caption, thead')) || `表格${index + 1}`,
           summary: textOf(node).slice(0, 120) || undefined,
-        })),
+          })),
         importantTexts: importantTexts(),
         interactiveElements: elements,
       };
@@ -469,8 +503,17 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
     }
 
     const state = await this.ensureSession(session);
+    const prefersTextLocator = element.targetHints?.some((hint) => hint.kind === 'text') && element.text;
     if (element.selector) {
       return state.page.locator(element.selector).first();
+    }
+
+    if (prefersTextLocator) {
+      return state.page.getByText(element.text, { exact: false }).first();
+    }
+
+    if (element.fieldKey) {
+      return state.page.locator(this.buildVisibleFieldKeySelector(element.fieldKey)).first();
     }
 
     if (element.label) {
@@ -523,6 +566,11 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
 
   private escapeCssValue(value: string) {
     return value.replace(/["\\]/g, '\\$&');
+  }
+
+  private buildVisibleFieldKeySelector(fieldKey: string) {
+    const escaped = this.escapeCssValue(fieldKey);
+    return `[name="${escaped}"]:visible, [id="${escaped}"]:visible`;
   }
 
   private async tryTemplateClick(

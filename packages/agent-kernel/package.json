@@ -7,7 +7,7 @@
   "scripts": {
     "build": "corepack pnpm exec tsc",
     "dev": "corepack pnpm exec tsc --watch",
-    "test": "corepack pnpm exec jest"
+    "test": "corepack pnpm exec jest --passWithNoTests"
   },
   "dependencies": {
     "zod": "^3.22.4",

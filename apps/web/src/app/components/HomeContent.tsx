@@ -1,8 +1,10 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { apiClient } from '../lib/api-client';
+import { hasRequiredRole } from '../lib/access-control';
+import { getClientAuthSnapshot, subscribeClientAuth } from '../lib/client-auth';
 
 interface Stats {
   totalSubmissions: number;
@@ -76,6 +78,11 @@ export default function HomeContent() {
   const [stats, setStats] = useState<Stats>(DEFAULT_STATS);
   const [recentActivity, setRecentActivity] = useState<Activity[]>([]);
   const [displayName, setDisplayName] = useState('用户');
+  const snapshot = useSyncExternalStore(
+    subscribeClientAuth,
+    getClientAuthSnapshot,
+    getClientAuthSnapshot,
+  );
 
   useEffect(() => {
     apiClient.get('/dashboard/overview').then((res) => {
@@ -133,6 +140,7 @@ export default function HomeContent() {
           <div className="text-xs text-gray-500">{stats.templateCount} 个流程</div>
         </Link>
 
+        {hasRequiredRole(snapshot.roles, ['admin']) ? (
         <Link href="/bootstrap" className="bg-white rounded-xl shadow-sm p-6 border border-gray-200 hover:shadow-md transition-shadow cursor-pointer block">
           <div className="flex items-center justify-between mb-4">
             <div className="w-12 h-12 bg-orange-100 rounded-lg flex items-center justify-center">
@@ -144,6 +152,7 @@ export default function HomeContent() {
           <p className="text-gray-600 text-sm mb-4">配置OA系统和流程发现</p>
           <div className="text-xs text-gray-500">{stats.connectorCount} 个连接器</div>
         </Link>
+        ) : null}
       </div>
 
       {/* New User Guide */}

@@ -6,6 +6,7 @@ import { AdapterRuntimeService } from '../adapter-runtime/adapter-runtime.servic
 import { buildStatusEventRemoteId } from '@uniflow/shared-types';
 import {
   ACTIVE_SUBMISSION_STATUSES,
+  isUnsupportedStatusQueryResult,
   mapExternalStatusToSubmissionStatus,
 } from '../common/submission-status.util';
 
@@ -60,6 +61,9 @@ export class StatusSyncService {
       try {
         const previousStatus = submission.status;
         const result = await adapter.queryStatus(submission.oaSubmissionId);
+        if (isUnsupportedStatusQueryResult(result)) {
+          continue;
+        }
         const mappedStatus = mapExternalStatusToSubmissionStatus(result.status, previousStatus);
         const remoteEventId = buildStatusEventRemoteId(submission.oaSubmissionId, result as Record<string, any>);
 

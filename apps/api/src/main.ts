@@ -10,6 +10,17 @@ import { AllExceptionsFilter } from './modules/common/all-exceptions.filter';
 import { LoggingInterceptor } from './modules/common/logging.interceptor';
 import { getAuthSessionSecret } from './modules/common/auth-session-secret';
 
+function shouldEnableHttpsOnlyHeaders() {
+  const candidates = [
+    process.env.PUBLIC_WEB_BASE_URL,
+    process.env.PUBLIC_BASE_URL,
+    process.env.PUBLIC_API_BASE_URL,
+    process.env.API_BASE_URL,
+  ];
+
+  return candidates.some((value) => (value || '').trim().startsWith('https://'));
+}
+
 async function bootstrap() {
   const logger = new Logger('Bootstrap');
   process.env.APP_RUNTIME = 'api';
@@ -22,9 +33,20 @@ async function bootstrap() {
   const captureRawBody = (req: any, _res: any, buffer: Buffer, encoding: BufferEncoding) => {
     req.rawBody = buffer.toString(encoding || 'utf8');
   };
+  const enableHttpsOnlyHeaders = shouldEnableHttpsOnlyHeaders();
 
   // Security headers
-  app.use(helmet());
+  app.use(helmet({
+    hsts: enableHttpsOnlyHeaders,
+    contentSecurityPolicy: enableHttpsOnlyHeaders
+      ? undefined
+      : {
+          useDefaults: true,
+          directives: {
+            upgradeInsecureRequests: null,
+          },
+        },
+  }));
 
   // Response compression
   app.use(compression());

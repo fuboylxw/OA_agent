@@ -19,6 +19,7 @@
     "logs:sessions": "node scripts/logs.js sessions",
     "logs:path": "node scripts/logs.js path",
     "logs:tail": "node scripts/logs.js tail",
+    "logs:stop": "node scripts/logs.js stop",
     "logs:organize": "node scripts/logs.js archive-legacy",
     "logs:organize:dry-run": "node scripts/logs.js archive-legacy --dry-run",
     "build": "node scripts/run-turbo.js build",

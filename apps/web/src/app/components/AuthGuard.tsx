@@ -2,7 +2,11 @@
 
 import { useEffect, useSyncExternalStore } from 'react';
 import { useRouter } from 'next/navigation';
-import { hasClientSession } from '../lib/client-auth';
+import {
+  buildLoginHref,
+  getClientAuthSnapshot,
+  subscribeClientAuth,
+} from '../lib/client-auth';
 
 interface Props {
   children: React.ReactNode;
@@ -12,34 +16,48 @@ interface Props {
 type AuthState = 'checking' | 'authorized' | 'no_login' | 'no_permission';
 
 function checkAuth(allowedRoles?: string[]): AuthState {
-  if (typeof window === 'undefined') return 'no_login';
-  if (!hasClientSession()) return 'no_login';
-  if (!allowedRoles) return 'authorized';
-  try {
-    const roles: string[] = JSON.parse(localStorage.getItem('roles') || '[]');
-    return allowedRoles.some((r) => roles.includes(r)) ? 'authorized' : 'no_permission';
-  } catch {
-    return 'no_permission';
+  if (typeof window === 'undefined') {
+    return 'checking';
   }
+
+  const snapshot = getClientAuthSnapshot();
+  if (!snapshot.hasSession) {
+    return 'no_login';
+  }
+
+  if (!snapshot.hasProfile) {
+    return 'checking';
+  }
+
+  if (!allowedRoles) {
+    return 'authorized';
+  }
+
+  return allowedRoles.some((role) => snapshot.roles.includes(role))
+    ? 'authorized'
+    : 'no_permission';
 }
 
-function subscribe(cb: () => void) {
-  window.addEventListener('storage', cb);
-  return () => window.removeEventListener('storage', cb);
+function getCurrentReturnTo() {
+  if (typeof window === 'undefined') {
+    return '/';
+  }
+
+  return `${window.location.pathname}${window.location.search}`;
 }
 
 export default function AuthGuard({ children, allowedRoles }: Props) {
   const router = useRouter();
 
   const state = useSyncExternalStore(
-    subscribe,
+    subscribeClientAuth,
     () => checkAuth(allowedRoles),
     () => 'checking' as AuthState,
   );
 
   useEffect(() => {
     if (state === 'no_login') {
-      router.replace('/login');
+      router.replace(buildLoginHref(getCurrentReturnTo()));
       return;
     }
 

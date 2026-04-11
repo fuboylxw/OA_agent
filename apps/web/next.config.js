@@ -1,5 +1,6 @@
 const { existsSync, readFileSync } = require('fs');
 const { resolve } = require('path');
+const { shouldDisableWebpackBuildWorker } = require('./next.config.shared');
 
 function parseEnvFile(input) {
   const values = {};
@@ -30,6 +31,10 @@ function parseEnvFile(input) {
   return values;
 }
 
+function normalizeUrl(value) {
+  return (value || '').trim().replace(/\/+$/, '');
+}
+
 function loadWorkspaceEnv() {
   const candidates = [
     resolve(__dirname, '.env.local'),
@@ -50,18 +55,53 @@ function loadWorkspaceEnv() {
 }
 
 const workspaceEnv = loadWorkspaceEnv();
-const publicApiUrl = process.env.NEXT_PUBLIC_API_URL || workspaceEnv.NEXT_PUBLIC_API_URL || 'http://localhost:3001';
+const publicApiUrl = normalizeUrl(process.env.NEXT_PUBLIC_API_URL || workspaceEnv.NEXT_PUBLIC_API_URL || '');
+const internalApiOrigin = normalizeUrl(
+  process.env.INTERNAL_API_ORIGIN
+  || workspaceEnv.INTERNAL_API_ORIGIN
+  || publicApiUrl
+  || 'http://127.0.0.1:3001',
+);
+const publicAuthMode = (process.env.NEXT_PUBLIC_AUTH_MODE || workspaceEnv.NEXT_PUBLIC_AUTH_MODE || 'legacy').trim();
+const publicAuthProviderName = (process.env.NEXT_PUBLIC_AUTH_PROVIDER_NAME || workspaceEnv.NEXT_PUBLIC_AUTH_PROVIDER_NAME || '').trim();
 const outputMode = process.env.NEXT_OUTPUT_MODE || workspaceEnv.NEXT_OUTPUT_MODE || '';
-const disableBuildWorkerRaw = process.env.NEXT_DISABLE_BUILD_WORKER || workspaceEnv.NEXT_DISABLE_BUILD_WORKER || '';
-const disableBuildWorker = ['1', 'true', 'yes'].includes(disableBuildWorkerRaw.trim().toLowerCase());
+const distDirOverride = (process.env.NEXT_DIST_DIR || workspaceEnv.NEXT_DIST_DIR || '').trim();
 const isCodexSandbox = Boolean(process.env.CODEX_THREAD_ID || process.env.CODEX_SANDBOX_NETWORK_DISABLED);
+const disableBuildWorker = shouldDisableWebpackBuildWorker({
+  env: process.env,
+  workspaceEnv,
+  platform: process.platform,
+  nodeEnv: process.env.NODE_ENV || 'development',
+});
 
 /** @type {import('next').NextConfig} */
 const nextConfig = {
   env: {
     NEXT_PUBLIC_API_URL: publicApiUrl,
+    NEXT_PUBLIC_AUTH_MODE: publicAuthMode,
+    NEXT_PUBLIC_AUTH_PROVIDER_NAME: publicAuthProviderName,
+  },
+  async rewrites() {
+    return [
+      {
+        source: '/api/v1/:path*',
+        destination: `${internalApiOrigin}/api/v1/:path*`,
+      },
+      {
+        source: '/api/docs',
+        destination: `${internalApiOrigin}/api/docs`,
+      },
+      {
+        source: '/api/docs/:path*',
+        destination: `${internalApiOrigin}/api/docs/:path*`,
+      },
+    ];
   },
 };
+
+if (distDirOverride) {
+  nextConfig.distDir = distDirOverride;
+}
 
 if (disableBuildWorker || isCodexSandbox) {
   nextConfig.experimental = {

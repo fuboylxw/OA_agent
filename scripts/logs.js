@@ -12,7 +12,10 @@ const {
   resolveCurrentSession,
   rootDir,
   toRelativePath,
+  updateSession,
+  updateSessionService,
 } = require('./lib/log-manager');
+const { stopSessionProcesses } = require('./session-control');
 
 function print(message = '') {
   process.stdout.write(`${message}\n`);
@@ -27,6 +30,7 @@ function printUsage() {
   print('  path <service|diagnostics>  Print absolute log path for the current session');
   print('  tail <service|diagnostics> [stdout|stderr] [lines]');
   print('                              Print the last lines from the current session');
+  print('  stop                        Stop the current dev session and free its ports');
   print('  archive-legacy [--dry-run]  Move loose root-level .logs files into archive/');
 }
 
@@ -169,6 +173,44 @@ function printArchiveSummary(result) {
   }
 }
 
+function stopCurrentSession() {
+  const sessionInfo = resolveCurrentSession();
+  if (!sessionInfo || sessionInfo.type !== 'current') {
+    print('No current session is running.');
+    return;
+  }
+
+  const stopRequestedAt = new Date().toISOString();
+  const result = stopSessionProcesses(sessionInfo.session);
+
+  updateSession(sessionInfo.sessionDir, (session) => ({
+    ...session,
+    stopRequestedAt,
+    updatedAt: stopRequestedAt,
+  }));
+
+  for (const target of result.targets) {
+    if (target.type !== 'service') {
+      continue;
+    }
+
+    updateSessionService(sessionInfo.sessionDir, target.name, {
+      status: 'stopped',
+      endedAt: stopRequestedAt,
+    });
+  }
+
+  if (result.targets.length === 0) {
+    print(`Current session "${sessionInfo.session.sessionId || 'unknown'}" has no active runner or service processes.`);
+    return;
+  }
+
+  const summary = result.targets
+    .map((target) => `${target.name}(${target.pid})`)
+    .join(', ');
+  print(`Stop requested for current session "${sessionInfo.session.sessionId || 'unknown'}": ${summary}`);
+}
+
 function main() {
   const args = process.argv.slice(2);
   const command = (args[0] || 'summary').toLowerCase();
@@ -185,6 +227,9 @@ function main() {
       return;
     case 'tail':
       printTail(args[1], args[2], args[3]);
+      return;
+    case 'stop':
+      stopCurrentSession();
       return;
     case 'archive-legacy':
       printArchiveSummary(archiveLegacyRootLogs({ dryRun: args.includes('--dry-run') }));

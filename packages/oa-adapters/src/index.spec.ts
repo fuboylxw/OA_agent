@@ -129,13 +129,13 @@ describe('OA Adapters', () => {
       expect(adapter).toBeInstanceOf(CookieSessionAdapter);
     });
 
-    it('should create TokenHeaderAdapter for token-header vendor', () => {
+    it('should create TokenHeaderAdapter for token-header auth config', () => {
       const adapter = AdapterFactory.createAdapter({
         oaVendor: 'O2OA',
         oaType: 'hybrid',
         baseUrl: 'http://localhost:20020',
         authType: 'apikey',
-        authConfig: { token: 'test-token' },
+        authConfig: { headerName: 'x-token', apiKey: 'test-token' },
       });
       expect(adapter).toBeInstanceOf(TokenHeaderAdapter);
     });
@@ -229,12 +229,13 @@ describe('OA Adapters', () => {
       registry.register(SoapXmlDescriptor);
       registry.register(MockDescriptor);
 
-      // Token header vendor → token-header (score 90)
+      // Token header auth config → token-header (score 70)
       const tokenMatch = registry.resolve({
         oaVendor: 'O2OA',
         oaType: 'hybrid',
         baseUrl: 'http://localhost:20020',
         authType: 'apikey',
+        authConfig: { headerName: 'x-token', apiKey: 'test-token' },
       });
       expect(tokenMatch?.id).toBe('token-header');
 
@@ -294,7 +295,7 @@ describe('OA Adapters', () => {
         oaType: 'hybrid',
         baseUrl: 'http://localhost:20020',
         authType: 'apikey',
-        authConfig: { token: 'test' },
+        authConfig: { headerName: 'x-token', apiKey: 'test' },
       });
       expect(adapter).toBeInstanceOf(TokenHeaderAdapter);
     });

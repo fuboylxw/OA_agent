@@ -1,8 +1,8 @@
+import axios from 'axios';
 import { PermissionService } from './permission.service';
 import { PrismaService } from '../common/prisma.service';
 import { AuditService } from '../audit/audit.service';
-import { AdapterRuntimeService } from '../adapter-runtime/adapter-runtime.service';
-import axios from 'axios';
+import { IntegrationRuntimeService } from '../integration-runtime/integration-runtime.service';
 
 jest.mock('axios');
 
@@ -14,7 +14,7 @@ describe('PermissionService', () => {
     processTemplate: { findFirst: jest.Mock };
   };
   let auditService: { createLog: jest.Mock };
-  let adapterRuntimeService: { resolveAuthConfig: jest.Mock };
+  let integrationRuntimeService: { resolveConnectorExecutionAuth: jest.Mock };
 
   beforeEach(() => {
     jest.clearAllMocks();
@@ -28,14 +28,14 @@ describe('PermissionService', () => {
     auditService = {
       createLog: jest.fn(),
     };
-    adapterRuntimeService = {
-      resolveAuthConfig: jest.fn(),
+    integrationRuntimeService = {
+      resolveConnectorExecutionAuth: jest.fn(),
     };
 
     service = new PermissionService(
       prisma as unknown as PrismaService,
       auditService as unknown as AuditService,
-      adapterRuntimeService as unknown as AdapterRuntimeService,
+      integrationRuntimeService as unknown as IntegrationRuntimeService,
     );
 
     prisma.user.findFirst.mockResolvedValue({
@@ -59,12 +59,13 @@ describe('PermissionService', () => {
     });
 
     expect(result.allowed).toBe(true);
-    expect(result.oaCheck.reason).toContain('已跳过');
+    expect(result.oaCheck.reason).toContain('skipped');
   });
 
-  it('calls configured OA permission endpoint when available', async () => {
+  it('calls configured OA permission endpoint with execution-scoped auth when available', async () => {
     prisma.processTemplate.findFirst.mockResolvedValue({
       connector: {
+        id: 'connector-1',
         baseUrl: 'https://oa.example.com',
         authType: 'apikey',
         authConfig: {
@@ -80,15 +81,25 @@ describe('PermissionService', () => {
             allowedPath: 'data.allowed',
             reasonPath: 'data.reason',
           },
+          delegatedAuth: {
+            enabled: true,
+            provider: 'sso',
+          },
         },
         capability: {
           supportsRealtimePerm: true,
         },
+        secretRef: null,
       },
     });
-    adapterRuntimeService.resolveAuthConfig.mockResolvedValue({
-      headerName: 'x-token',
-      token: 'secret-token',
+    integrationRuntimeService.resolveConnectorExecutionAuth.mockResolvedValue({
+      state: 'ready',
+      artifact: {
+        payload: {
+          headerName: 'x-token',
+          token: 'user-scoped-token',
+        },
+      },
     });
     (axios as unknown as jest.Mock).mockResolvedValue({
       data: {
@@ -109,11 +120,20 @@ describe('PermissionService', () => {
 
     expect(result.allowed).toBe(true);
     expect(result.oaCheck.reason).toBe('OA permission granted');
+    expect(integrationRuntimeService.resolveConnectorExecutionAuth).toHaveBeenCalledWith(
+      expect.objectContaining({
+        capability: 'permission.check',
+        authScope: {
+          tenantId: 'tenant-1',
+          userId: 'user-1',
+        },
+      }),
+    );
     expect(axios).toHaveBeenCalledWith(expect.objectContaining({
       method: 'POST',
       url: 'https://oa.example.com/permission/check',
       headers: expect.objectContaining({
-        'x-token': 'secret-token',
+        'x-token': 'user-scoped-token',
       }),
       data: {
         uid: 'user-1',
@@ -127,12 +147,14 @@ describe('PermissionService', () => {
     process.env.REQUIRE_OA_PERMISSION_CHECK = 'true';
     prisma.processTemplate.findFirst.mockResolvedValue({
       connector: {
+        id: 'connector-1',
         baseUrl: 'https://oa.example.com',
         authType: 'apikey',
         authConfig: {},
         capability: {
           supportsRealtimePerm: true,
         },
+        secretRef: null,
       },
     });
 
@@ -145,6 +167,6 @@ describe('PermissionService', () => {
     });
 
     expect(result.allowed).toBe(false);
-    expect(result.oaCheck.reason).toContain('未配置权限校验接口');
+    expect(result.oaCheck.reason).toContain('no permission endpoint is configured');
   });
 });

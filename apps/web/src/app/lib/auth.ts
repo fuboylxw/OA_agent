@@ -87,7 +87,9 @@ function resolveSessionSecret() {
 
 async function resolveServerApiUrl() {
   const configured = (
-    getServerEnv('NEXT_PUBLIC_API_URL')
+    getServerEnv('INTERNAL_API_ORIGIN')
+    || getServerEnv('INTERNAL_API_BASE_URL')
+    || getServerEnv('NEXT_PUBLIC_API_URL')
     || getServerEnv('PUBLIC_API_BASE_URL')
     || getServerEnv('API_BASE_URL')
   ).trim();
@@ -103,7 +105,7 @@ async function resolveServerApiUrl() {
     return `${proto}://${host}`;
   }
 
-  return 'http://localhost:3001';
+  return 'http://127.0.0.1:3001';
 }
 
 function verifyServerSessionToken(token: string, secret: string): AuthSessionClaims | null {
@@ -172,7 +174,13 @@ export async function getServerAuth() {
 }
 
 export function getApiUrl() {
-  return getServerEnv('NEXT_PUBLIC_API_URL') || getServerEnv('PUBLIC_API_BASE_URL') || getServerEnv('API_BASE_URL');
+  return (
+    getServerEnv('INTERNAL_API_ORIGIN')
+    || getServerEnv('INTERNAL_API_BASE_URL')
+    || getServerEnv('NEXT_PUBLIC_API_URL')
+    || getServerEnv('PUBLIC_API_BASE_URL')
+    || getServerEnv('API_BASE_URL')
+  );
 }
 
 export async function fetchApi(path: string, init?: RequestInit) {

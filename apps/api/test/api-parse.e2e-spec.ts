@@ -244,7 +244,7 @@ describe('ApiParse HTTP E2E', () => {
     );
   });
 
-  it('keeps webhook sync open without request auth', async () => {
+  it('routes webhook sync through request auth before delegating to sync service', async () => {
     syncService.handleWebhook.mockResolvedValue({
       processed: true,
       submissionId: 'submission-1',
@@ -255,7 +255,9 @@ describe('ApiParse HTTP E2E', () => {
       .send({ id: 'oa-100' })
       .expect(200);
 
+    expect(requestAuth.resolveUser).toHaveBeenCalledWith(expect.anything(), {
+      requireUser: true,
+    });
     expect(syncService.handleWebhook).toHaveBeenCalledWith('connector-1', { id: 'oa-100' });
-    expect(requestAuth.resolveUser).not.toHaveBeenCalled();
   });
 });

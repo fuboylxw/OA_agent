@@ -1,6 +1,11 @@
 import axios from 'axios';
 import { getBrowserApiBaseUrl } from './browser-api-base-url';
-import { buildClientAuthHeaders, clearClientAuth, requireClientSessionToken } from './client-auth';
+import {
+  buildClientAuthHeaders,
+  buildLoginHref,
+  clearClientAuth,
+  requireClientSessionToken,
+} from './client-auth';
 
 export const API_URL = getBrowserApiBaseUrl();
 
@@ -38,7 +43,7 @@ apiClient.interceptors.response.use(
       !window.location.pathname.startsWith('/login')
     ) {
       clearClientAuth();
-      window.location.href = '/login';
+      window.location.href = buildLoginHref(`${window.location.pathname}${window.location.search}`);
       return new Promise(() => {}); // never resolves — page is navigating
     }
     return Promise.reject(error);

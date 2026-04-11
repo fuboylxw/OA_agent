@@ -5,6 +5,7 @@ import { Upload, FileText, CheckCircle, XCircle, Loader2 } from 'lucide-react';
 import { authFetch } from '../lib/api-client';
 import { withBrowserApiBase } from '../lib/browser-api-base-url';
 import { getClientUserInfo, hasClientSession } from '../lib/client-auth';
+import AuthGuard from '../components/AuthGuard';
 
 interface ConnectorOption {
   id: string;
@@ -144,7 +145,7 @@ function formatScore(score?: number | null) {
   return `${Math.round(score * 100)}%`;
 }
 
-export default function ApiUploadPage() {
+function ApiUploadContent() {
   const [file, setFile] = useState<File | null>(null);
   const [tenantId, setTenantId] = useState('');
   const [connectorId, setConnectorId] = useState('');
@@ -764,5 +765,13 @@ export default function ApiUploadPage() {
         </div>
       )}
     </div>
+  );
+}
+
+export default function ApiUploadPage() {
+  return (
+    <AuthGuard allowedRoles={['admin', 'flow_manager']}>
+      <ApiUploadContent />
+    </AuthGuard>
   );
 }

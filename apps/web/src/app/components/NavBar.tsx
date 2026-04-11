@@ -1,8 +1,9 @@
 'use client';
 
-import { useEffect, useState } from 'react';
+import { useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
+import { getClientAuthSnapshot, subscribeClientAuth } from '../lib/client-auth';
 
 const NAV_ITEMS = [
   { href: '/', label: '首页' },
@@ -14,24 +15,20 @@ const NAV_ITEMS = [
 ];
 
 export default function NavBar() {
-  const pathname = usePathname();
-  const [roles, setRoles] = useState<string[]>([]);
+  const pathname = usePathname() || '';
+  const snapshot = useSyncExternalStore(
+    subscribeClientAuth,
+    getClientAuthSnapshot,
+    getClientAuthSnapshot,
+  );
 
-  useEffect(() => {
-    try {
-      setRoles(JSON.parse(localStorage.getItem('roles') || '[]'));
-    } catch {
-      setRoles([]);
-    }
-  }, []);
-
-  if (pathname === '/login') {
+  if (pathname.startsWith('/login')) {
     return null;
   }
 
   const visibleItems = NAV_ITEMS.filter((item) => {
     if (!item.roles) return true;
-    return item.roles.some((role) => roles.includes(role));
+    return item.roles.some((role) => snapshot.roles.includes(role));
   });
 
   return (

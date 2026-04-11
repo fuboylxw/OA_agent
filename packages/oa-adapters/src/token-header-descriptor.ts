@@ -6,8 +6,8 @@ import { TokenHeaderAdapter } from './token-header-adapter';
  * TokenHeader Descriptor — 匹配使用自定义 header 传 token 的系统
  *
  * 匹配规则：
- *   - authConfig.headerName 是非标准值（非 Authorization） → 70
- *   - authType='apikey' 且有 token 且有 headerName          → 20
+ *   - authConfig.headerName 是非标准值（非 Authorization）且有 token/apiKey → 70
+ *   - authType='apikey' 且有 token/apiKey 且有 headerName                  → 20
  */
 export const TokenHeaderDescriptor: AdapterDescriptor = {
   id: 'token-header',
@@ -29,9 +29,10 @@ export const TokenHeaderDescriptor: AdapterDescriptor = {
   match(config: AdapterConnectionConfig): number {
     const authConfig = config.authConfig || {};
     const headerName = String(authConfig.headerName || '').toLowerCase();
+    const token = authConfig.token || authConfig.apiKey;
 
-    if (headerName && headerName !== 'authorization' && authConfig.token) return 70;
-    if (config.authType === 'apikey' && authConfig.token && headerName) return 20;
+    if (headerName && headerName !== 'authorization' && token) return 70;
+    if (config.authType === 'apikey' && token && headerName) return 20;
     return 0;
   },
 

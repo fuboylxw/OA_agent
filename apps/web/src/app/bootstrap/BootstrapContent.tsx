@@ -17,24 +17,23 @@ const TERMINAL_STATUSES = ['PUBLISHED', 'FAILED', 'VALIDATION_FAILED', 'PARTIALL
 const ACCESS_MODE_META = {
   backend_api: {
     label: '接口接入',
-    description: '有接口或接口文档时使用。',
+    description: '手里有接口文档文件时，直接上传文件即可。',
     badge: '接口接入',
   },
   direct_link: {
     label: '链接直达接入',
-    description: '有入口链接或跳转链接，直接上传页面流程 JSON。',
+    description: '有系统入口链接和流程文件时使用。',
     badge: '链接直达接入',
   },
   text_guide: {
     label: '文字示教接入',
-    description: '只描述点击和输入步骤，系统自动生成流程。',
+    description: '不会写流程也没关系，把平时怎么操作写下来就行。',
     badge: '文字示教接入',
   },
 } as const;
 
 type AccessMode = keyof typeof ACCESS_MODE_META;
 type ReactivateMode = 'reuse' | 'new';
-type DocInputTab = 'upload' | 'link' | 'paste';
 type ExecutorMode = 'local' | 'browser' | 'http' | 'stub';
 type ApiDocType = 'openapi' | 'swagger' | 'custom';
 type FormSetter = Dispatch<SetStateAction<BootstrapFormState>>;
@@ -94,154 +93,26 @@ const AUTH_NOTICE = '认证信息可选。不要把用户真实密码交给模�
 const TEXT_GUIDE_FILE_ACCEPT = '.txt,.md,.markdown,.text,.log';
 const DIRECT_LINK_FILE_ACCEPT = '.json,.txt';
 const TEXT_GUIDE_TEMPLATE_DOWNLOAD_URL = '/examples/text-guide-example.txt';
-const TEXT_GUIDE_EXAMPLES = [
-  {
-    title: '推荐格式',
-    description: '一行一步，字段和值尽量写完整，最适合稳定解析。',
-    content: [
-      '输入 用户名 为 alice',
-      '输入 密码 为 alice123',
-      '点击 登录工作台',
-      '点击 申请中心',
-      '选择 请假类型 为 年假',
-      '输入 开始日期 为 2026-04-01',
-      '输入 结束日期 为 2026-04-02',
-      '输入 原因 为 家中有事',
-      '点击 提交',
-      '看到 已提交 就结束',
-    ].join('\n'),
-  },
-  {
-    title: '编号 / Markdown 格式',
-    description: '支持编号、短横线、Markdown 列表，系统会忽略这些列表前缀。',
-    content: [
-      '1. 打开 https://oa.example.com',
-      '2. 点击 新建申请',
-      '3. 选择 请假类型 为 事假',
-      '4. 输入 请假原因: 家中有事',
-      '5. 上传 附件',
-      '6. 等待 2 秒',
-      '7. 点击 提交',
-      '8. 看到 提交成功 就结束',
-    ].join('\n'),
-  },
-  {
-    title: '多流程模板',
-    description: '一个 OA 有多个办事流程时，用“流程:”分段；全局和共享步骤只写一次。',
-    content: [
-      '# 全局',
-      '入口链接: https://oa.example.com/workbench',
-      '执行方式: browser',
-      '# 共享步骤',
-      '输入 用户名 为 alice',
-      '输入 密码 为 alice123',
-      '点击 登录工作台',
-      '## 流程: 请假申请',
-      '流程编码: leave_request',
-      '步骤:',
-      '点击 申请中心',
-      '点击 请假申请',
-      '输入 原因 为 家中有事',
-      '点击 提交',
-      '看到 已提交 就结束',
-      '## 流程: 报销申请',
-      '流程编码: expense_submit',
-      '步骤:',
-      '点击 申请中心',
-      '点击 报销申请',
-      '输入 金额 为 1200',
-      '点击 提交',
-      '看到 提交成功 就结束',
-    ].join('\n'),
-  },
-] as const;
-
-void TEXT_GUIDE_EXAMPLES;
-
-const TEXT_GUIDE_EXAMPLES_V2 = [
-  {
-    title: '推荐模板',
-    description: '把参数定义、操作步骤、测试样例分开写。初始化只注册流程和字段，真实提交时再用用户输入覆盖。',
-    content: [
-      '## 流程: 请假申请',
-      '流程编码: leave_request',
-      '参数:',
-      '- 开始日期 | date | 必填',
-      '- 结束日期 | date | 必填',
-      '- 请假原因 | textarea | 必填',
-      '步骤:',
-      '- 点击 申请中心',
-      '- 点击 请假申请',
-      '- 输入 开始日期',
-      '- 输入 结束日期',
-      '- 输入 请假原因',
-      '- 点击 提交',
-      '- 看到 已提交 就结束',
-      '测试样例:',
-      '- 开始日期: 2026-04-01',
-      '- 结束日期: 2026-04-02',
-      '- 请假原因: 家中有事',
-    ].join('\n'),
-  },
-  {
-    title: '简洁步骤格式',
-    description: '旧格式继续兼容。只写步骤也可以，系统会自动从步骤里推断字段。',
-    content: [
-      '1. 打开 https://oa.example.com',
-      '2. 点击 新建申请',
-      '3. 选择 请假类型',
-      '4. 输入 请假原因',
-      '5. 上传 附件',
-      '6. 等待 2 秒',
-      '7. 点击 提交',
-      '8. 看到 提交成功 就结束',
-    ].join('\n'),
-  },
-  {
-    title: '多流程模板',
-    description: '一个 OA 有多个办事流程时，用“流程:”分段；每个流程都可以单独声明参数和测试样例。',
-    content: [
-      '# 全局',
-      '入口链接: https://oa.example.com/workbench',
-      '执行方式: browser',
-      '# 共享步骤',
-      '点击 登录工作台',
-      '## 流程: 请假申请',
-      '流程编码: leave_request',
-      '参数:',
-      '- 开始日期 | date | 必填',
-      '- 结束日期 | date | 必填',
-      '- 请假原因 | textarea | 必填',
-      '步骤:',
-      '- 点击 申请中心',
-      '- 点击 请假申请',
-      '- 输入 开始日期',
-      '- 输入 结束日期',
-      '- 输入 请假原因',
-      '- 点击 提交',
-      '- 看到 已提交 就结束',
-      '测试样例:',
-      '- 开始日期: 2026-04-01',
-      '- 结束日期: 2026-04-02',
-      '- 请假原因: 家中有事',
-      '## 流程: 报销申请',
-      '流程编码: expense_submit',
-      '参数:',
-      '- 金额 | number | 必填',
-      '- 说明 | textarea | 必填',
-      '步骤:',
-      '- 点击 申请中心',
-      '- 点击 报销申请',
-      '- 输入 金额',
-      '- 输入 说明',
-      '- 点击 提交',
-      '- 看到 提交成功 就结束',
-      '测试样例:',
-      '- 金额: 1200',
-      '- 说明: 客户拜访交通费',
-    ].join('\n'),
-  },
-] as const;
+const TEXT_GUIDE_PLACEHOLDER = [
+  '流程: 请假申请',
+  '打开 OA 首页',
+  '输入 用户名',
+  '输入 密码',
+  '点击 登录',
+  '点击 请假申请',
+  '输入 开始日期',
+  '输入 结束日期',
+  '输入 请假原因',
+  '点击 提交',
+  '看到 提交成功 就结束',
+  '',
+  '如果还有别的流程，请继续写：',
+  '流程: 报销申请',
+  '点击 报销申请',
+  '输入 金额',
+  '输入 说明',
+  '点击 提交',
+].join('\n');
 
 function normalizeAuthConfig(value: Record<string, any> | null | undefined) {
   return Object.fromEntries(Object.entries(value || {}).filter(([key, val]) => !key.startsWith('_') && val !== ''));
@@ -266,7 +137,7 @@ function resolveAccessModeFromJob(job: BootstrapJob): AccessMode {
 function getBootstrapValidationMessage(
   value: Pick<BootstrapFormState, 'accessMode' | 'apiDocContent' | 'apiDocUrl' | 'rpaFlowContent'>,
 ) {
-  const hasApi = Boolean(value.apiDocContent.trim() || value.apiDocUrl.trim());
+  const hasApi = Boolean(value.apiDocContent.trim());
   const hasRpa = Boolean(value.rpaFlowContent.trim());
 
   if (value.accessMode === 'backend_api' && !hasApi) return '接口接入必须提供接口文档。';
@@ -289,7 +160,6 @@ function buildPayload(formData: BootstrapFormState) {
   if (formData.accessMode === 'backend_api') {
     payload.apiDocType = formData.apiDocType;
     if (formData.apiDocContent.trim()) payload.apiDocContent = formData.apiDocContent.trim();
-    if (formData.apiDocUrl.trim()) payload.apiDocUrl = formData.apiDocUrl.trim();
     return payload;
   }
 
@@ -326,7 +196,7 @@ function ModeCards({ value, onChange }: { value: AccessMode; onChange: (mode: Ac
     <section className="space-y-3 rounded-xl border border-gray-200 p-4">
       <div>
         <h3 className="text-sm font-semibold text-gray-900">接入方式</h3>
-        <p className="mt-1 text-xs text-gray-500">先选你手里拿到的材料，再补对应内容。</p>
+        <p className="mt-1 text-xs text-gray-500">选最接近你手头材料的一种方式，然后按提示上传即可。</p>
       </div>
       <div className="grid grid-cols-1 gap-3 md:grid-cols-3">
         {(Object.keys(ACCESS_MODE_META) as AccessMode[]).map((mode) => (
@@ -349,13 +219,13 @@ function BasicFields({ state, onChange }: { state: BootstrapFormState; onChange:
   return (
     <section className="grid grid-cols-1 gap-4 rounded-xl border border-gray-200 p-4 sm:grid-cols-2">
       <div>
-        <label className="mb-1 block text-sm font-medium text-gray-700">连接器名称</label>
-        <input className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" value={state.name} onChange={(e) => onChange((prev) => ({ ...prev, name: e.target.value }))} />
+        <label className="mb-1 block text-sm font-medium text-gray-700">任务名称（选填）</label>
+        <input className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" value={state.name} onChange={(e) => onChange((prev) => ({ ...prev, name: e.target.value }))} placeholder="例如：财务 OA 初始化" />
       </div>
       <div>
-        <label className="mb-1 block text-sm font-medium text-gray-700">OA 地址</label>
+        <label className="mb-1 block text-sm font-medium text-gray-700">系统网址（选填）</label>
         <input className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" value={state.oaUrl} onChange={(e) => onChange((prev) => ({ ...prev, oaUrl: e.target.value }))} placeholder="https://oa.example.com" />
-        <p className="mt-1 text-xs text-gray-500">可选。作为默认入口页；不填也可以在步骤或文字示教里直接写 URL。</p>
+        <p className="mt-1 text-xs text-gray-500">不知道也可以先不填；后面在步骤里写网址也能识别。</p>
       </div>
     </section>
   );
@@ -437,59 +307,33 @@ function AdvancedFields({
 }
 
 function ApiDocFields({
-  state,
-  onChange,
-  docInputTab,
-  onTabChange,
   uploadFileName,
   onFileUpload,
 }: {
-  state: BootstrapFormState;
-  onChange: FormSetter;
-  docInputTab: DocInputTab;
-  onTabChange: (tab: DocInputTab) => void;
   uploadFileName: string;
   onFileUpload: (event: ChangeEvent<HTMLInputElement>) => void;
 }) {
   return (
     <section className="space-y-4 rounded-xl border border-gray-200 p-4">
-      <div className="flex items-center justify-between gap-4">
+      <div>
         <div>
-          <h3 className="text-sm font-semibold text-gray-900">接口文档</h3>
-          <p className="mt-1 text-xs text-gray-500">适用于后端接口接入。</p>
-        </div>
-        <div className="w-full max-w-[180px]">
-          <label className="mb-1 block text-xs font-medium text-gray-500">文档类型</label>
-          <select className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" value={state.apiDocType} onChange={(e) => onChange((prev) => ({ ...prev, apiDocType: e.target.value as ApiDocType }))}>
-            <option value="openapi">OpenAPI 文档</option>
-            <option value="swagger">Swagger 文档</option>
-            <option value="custom">自定义文档</option>
-          </select>
+          <h3 className="text-sm font-semibold text-gray-900">上传接口文档</h3>
+          <p className="mt-1 text-xs text-gray-500">只需要上传接口文档文件即可，系统会自动读取内容。</p>
         </div>
       </div>
 
-      <div className="flex rounded-lg border border-gray-200 bg-gray-50 p-1">
-        {(['upload', 'link', 'paste'] as DocInputTab[]).map((tab) => (
-          <button key={tab} type="button" onClick={() => onTabChange(tab)} className={`flex-1 rounded-md px-3 py-2 text-sm font-medium ${docInputTab === tab ? 'bg-white text-blue-600 shadow-sm' : 'text-gray-500 hover:text-gray-700'}`}>
-            {tab === 'upload' ? '上传文件' : tab === 'link' ? '文档链接' : '粘贴内容'}
-          </button>
-        ))}
+      <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4">
+        <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+          <div>
+            <div className="text-sm font-medium text-gray-900">接口文档文件</div>
+            <p className="mt-1 text-xs leading-5 text-gray-500">支持 .json / .yaml / .yml / .txt，上传后系统会自动填充初始化内容。</p>
+          </div>
+          <label className="inline-flex cursor-pointer items-center justify-center rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 hover:border-blue-400 hover:bg-blue-50">
+            <input type="file" className="hidden" accept=".json,.yaml,.yml,.txt" onChange={onFileUpload} />
+            {uploadFileName || '选择接口文档文件'}
+          </label>
+        </div>
       </div>
-
-      {docInputTab === 'upload' && (
-        <label className="flex cursor-pointer items-center justify-center rounded-lg border-2 border-dashed border-gray-300 px-4 py-8 text-sm text-gray-600 hover:border-blue-400 hover:bg-blue-50/50">
-          <input type="file" className="hidden" accept=".json,.yaml,.yml,.txt" onChange={onFileUpload} />
-          {uploadFileName || '选择接口文档'}
-        </label>
-      )}
-
-      {docInputTab === 'link' && (
-        <input className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" value={state.apiDocUrl} onChange={(e) => onChange((prev) => ({ ...prev, apiDocUrl: e.target.value }))} placeholder="请输入接口文档链接" />
-      )}
-
-      {docInputTab === 'paste' && (
-        <textarea rows={10} className="w-full rounded-lg border border-gray-300 px-3 py-2.5 font-mono text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" value={state.apiDocContent} onChange={(e) => onChange((prev) => ({ ...prev, apiDocContent: e.target.value }))} placeholder="请粘贴接口文档内容" />
-      )}
     </section>
   );
 }
@@ -507,7 +351,7 @@ function FlowFields({
 }) {
   const isTextGuide = state.accessMode === 'text_guide';
   const placeholder = isTextGuide
-    ? TEXT_GUIDE_EXAMPLES_V2[0].content
+    ? TEXT_GUIDE_PLACEHOLDER
     : JSON.stringify({ flows: [{ processCode: 'expense_submit', processName: '费用报销', actions: { submit: { steps: [{ type: 'goto', value: 'https://oa.example.com/expense' }, { type: 'click', target: { kind: 'text', value: '新建申请' } }, { type: 'click', target: { kind: 'text', value: '提交' } }] } } }] }, null, 2);
 
   return (
@@ -515,17 +359,17 @@ function FlowFields({
       <div>
         <h3 className="text-sm font-semibold text-gray-900">{isTextGuide ? '文字示教步骤' : '页面流程定义'}</h3>
         <p className="mt-1 text-xs text-gray-500">
-          {isTextGuide ? '支持直接粘贴文本，也支持上传常见文本文件；推荐按“参数 / 步骤 / 测试样例”组织内容。多个流程时请按“流程:”分段。' : '填写可执行的页面流程 JSON，也可以先上传文件再继续编辑。'}
+          {isTextGuide ? '不会写流程也没关系，把平时怎么点、怎么填、最后看到什么结果，按顺序写下来就行。' : '填写可执行的页面流程 JSON，也可以先上传文件再继续编辑。'}
         </p>
       </div>
 
       <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4">
         <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
           <div>
-            <div className="text-sm font-medium text-gray-900">{isTextGuide ? '上传文本步骤文件' : '上传流程文件'}</div>
+            <div className="text-sm font-medium text-gray-900">{isTextGuide ? '上传步骤说明' : '上传流程文件'}</div>
             <p className="mt-1 text-xs leading-5 text-gray-500">
               {isTextGuide
-                ? '支持 .txt / .md / .markdown / .text / .log，上传后会自动填入下方文本框，你还可以继续修改。'
+                ? '支持 .txt / .md / .markdown / .text / .log。上传后会自动填入下方输入框，你还能继续改。'
                 : '支持 .json / .txt，上传后会自动填入下方文本框。'}
             </p>
           </div>
@@ -536,17 +380,17 @@ function FlowFields({
               accept={isTextGuide ? TEXT_GUIDE_FILE_ACCEPT : DIRECT_LINK_FILE_ACCEPT}
               onChange={onFileUpload}
             />
-            {uploadFileName || (isTextGuide ? '选择文本文件' : '选择流程文件')}
+            {uploadFileName || (isTextGuide ? '选择步骤文件' : '选择流程文件')}
           </label>
         </div>
       </div>
 
       {isTextGuide && (
-        <div className="space-y-3 rounded-xl border border-blue-100 bg-blue-50/60 p-4">
+        <div className="rounded-xl border border-blue-100 bg-blue-50/60 p-4">
           <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
             <div>
-              <h4 className="text-sm font-semibold text-gray-900">推荐示例格式</h4>
-              <p className="mt-1 text-xs leading-5 text-gray-500">推荐把“参数”“步骤”“测试样例”拆开写。测试样例只用于初始化测试和字段校验，实际运行时会优先使用用户本次提交的表单数据。</p>
+              <h4 className="text-sm font-semibold text-gray-900">不会写也没关系</h4>
+              <p className="mt-1 text-xs leading-5 text-gray-500">先下载模板，把你平时怎么办这件事按顺序写进去，再上传或粘贴到下面即可。看不懂“流程编码、参数、测试样例”也没关系，先按自然语言把步骤写清楚就行。</p>
             </div>
             <a
               href={TEXT_GUIDE_TEMPLATE_DOWNLOAD_URL}
@@ -554,28 +398,8 @@ function FlowFields({
               className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-white px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50"
             >
               <i className="fas fa-download" />
-              下载多流程模板
+              下载模板
             </a>
-          </div>
-          <div className="grid grid-cols-1 gap-3 xl:grid-cols-2">
-            {TEXT_GUIDE_EXAMPLES_V2.map((example) => (
-              <div key={example.title} className="rounded-xl border border-white bg-white p-4 shadow-sm">
-                <div className="flex items-start justify-between gap-3">
-                  <div>
-                    <div className="text-sm font-medium text-gray-900">{example.title}</div>
-                    <p className="mt-1 text-xs leading-5 text-gray-500">{example.description}</p>
-                  </div>
-                  <button
-                    type="button"
-                    onClick={() => onChange((prev) => ({ ...prev, rpaFlowContent: example.content }))}
-                    className="rounded-lg border border-blue-200 px-3 py-1.5 text-xs font-medium text-blue-700 hover:bg-blue-50"
-                  >
-                    填入示例
-                  </button>
-                </div>
-                <pre className="mt-3 whitespace-pre-wrap rounded-lg bg-slate-950 px-3 py-3 font-mono text-xs leading-6 text-slate-100">{example.content}</pre>
-              </div>
-            ))}
           </div>
         </div>
       )}
@@ -587,7 +411,7 @@ function FlowFields({
         onChange={(e) => onChange((prev) => ({ ...prev, rpaFlowContent: e.target.value }))}
         placeholder={placeholder}
       />
-      <p className="text-xs text-gray-500">默认会使用 OA 地址或步骤里的 URL 作为起点。需要覆盖入口、调整执行方式或配置票据跳转时，再到“高级设置”填写。</p>
+      <p className="text-xs text-gray-500">{isTextGuide ? '先把步骤写出来就行，大多数情况下不用管下面的高级设置。' : '默认会使用 OA 地址或流程里的 URL 作为起点。需要覆盖入口或调整执行方式时，再到“高级设置”填写。'}</p>
 
       <div className="hidden grid-cols-1 gap-4 sm:grid-cols-2">
         <div>
@@ -624,7 +448,6 @@ export default function BootstrapContent({ initialJobs }: { initialJobs: Bootstr
   const [jobs, setJobs] = useState<BootstrapJob[]>(initialJobs);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [formData, setFormData] = useState(createEmptyFormState());
-  const [docInputTab, setDocInputTab] = useState<DocInputTab>('upload');
   const [uploadFileName, setUploadFileName] = useState('');
   const [flowUploadFileName, setFlowUploadFileName] = useState('');
   const [creating, setCreating] = useState(false);
@@ -633,7 +456,6 @@ export default function BootstrapContent({ initialJobs }: { initialJobs: Bootstr
   const [reactivateJob, setReactivateJob] = useState<BootstrapJob | null>(null);
   const [reactivateMode, setReactivateMode] = useState<ReactivateMode>('reuse');
   const [reactivateDoc, setReactivateDoc] = useState(createEmptyFormState());
-  const [reactivateDocInputTab, setReactivateDocInputTab] = useState<DocInputTab>('upload');
   const [reactivateFileName, setReactivateFileName] = useState('');
   const [reactivateFlowFileName, setReactivateFlowFileName] = useState('');
   const [reactivateError, setReactivateError] = useState('');
@@ -677,14 +499,12 @@ export default function BootstrapContent({ initialJobs }: { initialJobs: Bootstr
     setCreateError('');
     setUploadFileName('');
     setFlowUploadFileName('');
-    setDocInputTab('upload');
   };
 
   const closeReactivateModal = () => {
     setReactivateJob(null);
     setReactivateMode('reuse');
     setReactivateDoc(createEmptyFormState());
-    setReactivateDocInputTab('upload');
     setReactivateFileName('');
     setReactivateFlowFileName('');
     setReactivateError('');
@@ -733,12 +553,10 @@ export default function BootstrapContent({ initialJobs }: { initialJobs: Bootstr
     setReactivateError('');
     setReactivateFileName('');
     setReactivateFlowFileName('');
-    setReactivateDocInputTab(job.openApiUrl ? 'link' : 'upload');
     setReactivateDoc({
       ...createEmptyFormState(),
       accessMode: resolveAccessModeFromJob(job),
       oaUrl: job.oaUrl || '',
-      apiDocUrl: job.openApiUrl || '',
       platformConfig: { ...createEmptyFormState().platformConfig, ...normalizePlatformConfig(job?.authConfig?.platformConfig) },
       authConfig: {},
     });
@@ -780,7 +598,7 @@ export default function BootstrapContent({ initialJobs }: { initialJobs: Bootstr
         <div className="mb-5 flex items-center justify-between">
           <div>
             <h1 className="mb-1 text-xl font-bold text-gray-900">初始化中心</h1>
-            <p className="text-sm text-gray-600">按接口接入、链接直达接入、文字示教接入三种方式管理初始化任务。</p>
+            <p className="text-sm text-gray-600">按接口文件、网页链接、文字步骤三种方式管理初始化任务。</p>
           </div>
           <button onClick={() => setShowCreateModal(true)} className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-5 py-2.5 text-sm font-medium text-white hover:bg-blue-700"><i className="fas fa-plus"></i>新建任务</button>
         </div>
@@ -817,9 +635,9 @@ export default function BootstrapContent({ initialJobs }: { initialJobs: Bootstr
           </table>
         </div>
 
-        {showCreateModal && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"><div className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-2xl bg-white shadow-xl"><div className="flex items-center justify-between border-b border-gray-200 px-8 py-5"><div><h2 className="text-xl font-bold text-gray-900">新建初始化任务</h2><p className="mt-0.5 text-sm text-gray-500">先选接入方式，再补对应的初始化材料。</p></div><button onClick={closeCreateModal} className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-gray-100"><i className="fas fa-times text-gray-500"></i></button></div><div className="flex-1 space-y-6 overflow-y-auto px-8 py-6">{createError && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">{createError}</div>}<ModeCards value={formData.accessMode} onChange={(accessMode) => setFormData((prev) => ({ ...prev, accessMode }))} /><BasicFields state={formData} onChange={setFormData} />{formData.accessMode === 'backend_api' ? <ApiDocFields state={formData} onChange={setFormData} docInputTab={docInputTab} onTabChange={setDocInputTab} uploadFileName={uploadFileName} onFileUpload={(event) => handleFileUpload(event, setFormData, 'apiDocContent', setUploadFileName)} /> : <FlowFields state={formData} onChange={setFormData} uploadFileName={flowUploadFileName} onFileUpload={(event) => handleFileUpload(event, setFormData, 'rpaFlowContent', setFlowUploadFileName)} />}<AdvancedFields state={formData} onChange={setFormData} showPlatformFields={formData.accessMode !== 'backend_api'} /></div><div className="flex items-center gap-3 border-t border-gray-200 bg-gray-50 px-8 py-5"><button onClick={closeCreateModal} className="rounded-lg border border-gray-300 px-5 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-100">取消</button><div className="flex-1">{createValidationMessage && <p className="text-xs text-amber-700">{createValidationMessage}</p>}</div><button onClick={createJob} disabled={creating || Boolean(createValidationMessage)} title={createValidationMessage || undefined} className="rounded-lg bg-blue-600 px-6 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">{creating ? '创建中...' : '创建任务'}</button></div></div></div>}
+        {showCreateModal && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"><div className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-2xl bg-white shadow-xl"><div className="flex items-center justify-between border-b border-gray-200 px-8 py-5"><div><h2 className="text-xl font-bold text-gray-900">新建初始化任务</h2><p className="mt-0.5 text-sm text-gray-500">选择一种最接近你手头材料的方式，然后按提示上传即可。</p></div><button onClick={closeCreateModal} className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-gray-100"><i className="fas fa-times text-gray-500"></i></button></div><div className="flex-1 space-y-6 overflow-y-auto px-8 py-6">{createError && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">{createError}</div>}<ModeCards value={formData.accessMode} onChange={(accessMode) => setFormData((prev) => ({ ...prev, accessMode }))} /><BasicFields state={formData} onChange={setFormData} />{formData.accessMode === 'backend_api' ? <ApiDocFields uploadFileName={uploadFileName} onFileUpload={(event) => handleFileUpload(event, setFormData, 'apiDocContent', setUploadFileName)} /> : <FlowFields state={formData} onChange={setFormData} uploadFileName={flowUploadFileName} onFileUpload={(event) => handleFileUpload(event, setFormData, 'rpaFlowContent', setFlowUploadFileName)} />}<AdvancedFields state={formData} onChange={setFormData} showPlatformFields={formData.accessMode !== 'backend_api'} /></div><div className="flex items-center gap-3 border-t border-gray-200 bg-gray-50 px-8 py-5"><button onClick={closeCreateModal} className="rounded-lg border border-gray-300 px-5 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-100">取消</button><div className="flex-1">{createValidationMessage && <p className="text-xs text-amber-700">{createValidationMessage}</p>}</div><button onClick={createJob} disabled={creating || Boolean(createValidationMessage)} title={createValidationMessage || undefined} className="rounded-lg bg-blue-600 px-6 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">{creating ? '创建中...' : '创建任务'}</button></div></div></div>}
 
-        {reactivateJob && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"><div className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-2xl bg-white shadow-xl"><div className="flex items-center justify-between border-b border-gray-200 px-8 py-5"><div><h2 className="text-xl font-bold text-gray-900">重新激活初始化任务</h2><p className="mt-0.5 text-sm text-gray-500">{reactivateJob.name || `任务 #${reactivateJob.id.substring(0, 8)}`}</p></div><button onClick={closeReactivateModal} className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-gray-100"><i className="fas fa-times text-gray-500"></i></button></div><div className="flex-1 space-y-6 overflow-y-auto px-8 py-6">{reactivateError && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">{reactivateError}</div>}<div className="space-y-3"><label className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 ${reactivateMode === 'reuse' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}`} onClick={() => setReactivateMode('reuse')}><input type="radio" checked={reactivateMode === 'reuse'} readOnly className="mt-0.5" /><div><p className="text-sm font-medium text-gray-900">复用历史材料</p><p className="mt-0.5 text-xs text-gray-500">沿用上次的初始化材料重新执行。</p></div></label><label className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 ${reactivateMode === 'new' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}`} onClick={() => setReactivateMode('new')}><input type="radio" checked={reactivateMode === 'new'} readOnly className="mt-0.5" /><div><p className="text-sm font-medium text-gray-900">换新材料</p><p className="mt-0.5 text-xs text-gray-500">切换接入方式或重新上传新的初始化内容。</p></div></label></div><ModeCards value={reactivateDoc.accessMode} onChange={(accessMode) => setReactivateDoc((prev) => ({ ...prev, accessMode }))} /><BasicFields state={reactivateDoc} onChange={setReactivateDoc} />{reactivateMode === 'new' && (reactivateDoc.accessMode === 'backend_api' ? <ApiDocFields state={reactivateDoc} onChange={setReactivateDoc} docInputTab={reactivateDocInputTab} onTabChange={setReactivateDocInputTab} uploadFileName={reactivateFileName} onFileUpload={(event) => handleFileUpload(event, setReactivateDoc, 'apiDocContent', setReactivateFileName)} /> : <FlowFields state={reactivateDoc} onChange={setReactivateDoc} uploadFileName={reactivateFlowFileName} onFileUpload={(event) => handleFileUpload(event, setReactivateDoc, 'rpaFlowContent', setReactivateFlowFileName)} />)}<AdvancedFields state={reactivateDoc} onChange={setReactivateDoc} showPlatformFields={reactivateDoc.accessMode !== 'backend_api'} /></div><div className="flex items-center gap-3 border-t border-gray-200 bg-gray-50 px-8 py-5"><button onClick={closeReactivateModal} className="rounded-lg border border-gray-300 px-5 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-100">取消</button><div className="flex-1">{reactivateValidationMessage && <p className="text-xs text-amber-700">{reactivateValidationMessage}</p>}</div><button onClick={handleReactivate} disabled={reactivating || (reactivateMode === 'new' && Boolean(reactivateValidationMessage))} title={reactivateValidationMessage || undefined} className="rounded-lg bg-blue-600 px-6 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">{reactivating ? '处理中...' : '重新激活'}</button></div></div></div>}
+        {reactivateJob && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"><div className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-2xl bg-white shadow-xl"><div className="flex items-center justify-between border-b border-gray-200 px-8 py-5"><div><h2 className="text-xl font-bold text-gray-900">重新激活初始化任务</h2><p className="mt-0.5 text-sm text-gray-500">{reactivateJob.name || `任务 #${reactivateJob.id.substring(0, 8)}`}</p></div><button onClick={closeReactivateModal} className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-gray-100"><i className="fas fa-times text-gray-500"></i></button></div><div className="flex-1 space-y-6 overflow-y-auto px-8 py-6">{reactivateError && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">{reactivateError}</div>}<div className="space-y-3"><label className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 ${reactivateMode === 'reuse' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}`} onClick={() => setReactivateMode('reuse')}><input type="radio" checked={reactivateMode === 'reuse'} readOnly className="mt-0.5" /><div><p className="text-sm font-medium text-gray-900">复用历史材料</p><p className="mt-0.5 text-xs text-gray-500">沿用上次的初始化材料重新执行。</p></div></label><label className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 ${reactivateMode === 'new' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}`} onClick={() => setReactivateMode('new')}><input type="radio" checked={reactivateMode === 'new'} readOnly className="mt-0.5" /><div><p className="text-sm font-medium text-gray-900">换新材料</p><p className="mt-0.5 text-xs text-gray-500">切换接入方式或重新上传新的初始化内容。</p></div></label></div><ModeCards value={reactivateDoc.accessMode} onChange={(accessMode) => setReactivateDoc((prev) => ({ ...prev, accessMode }))} /><BasicFields state={reactivateDoc} onChange={setReactivateDoc} />{reactivateMode === 'new' && (reactivateDoc.accessMode === 'backend_api' ? <ApiDocFields uploadFileName={reactivateFileName} onFileUpload={(event) => handleFileUpload(event, setReactivateDoc, 'apiDocContent', setReactivateFileName)} /> : <FlowFields state={reactivateDoc} onChange={setReactivateDoc} uploadFileName={reactivateFlowFileName} onFileUpload={(event) => handleFileUpload(event, setReactivateDoc, 'rpaFlowContent', setReactivateFlowFileName)} />)}<AdvancedFields state={reactivateDoc} onChange={setReactivateDoc} showPlatformFields={reactivateDoc.accessMode !== 'backend_api'} /></div><div className="flex items-center gap-3 border-t border-gray-200 bg-gray-50 px-8 py-5"><button onClick={closeReactivateModal} className="rounded-lg border border-gray-300 px-5 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-100">取消</button><div className="flex-1">{reactivateValidationMessage && <p className="text-xs text-amber-700">{reactivateValidationMessage}</p>}</div><button onClick={handleReactivate} disabled={reactivating || (reactivateMode === 'new' && Boolean(reactivateValidationMessage))} title={reactivateValidationMessage || undefined} className="rounded-lg bg-blue-600 px-6 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">{reactivating ? '处理中...' : '重新激活'}</button></div></div></div>}
 
         {deleteConfirm && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"><div className="w-full max-w-sm rounded-2xl bg-white shadow-xl"><div className="px-6 py-5"><h3 className="text-base font-bold text-gray-900">删除初始化任务</h3><p className="mt-2 text-sm text-gray-600">这会永久删除当前任务及其相关产物。</p></div><div className="flex gap-3 border-t border-gray-200 px-6 py-4"><button onClick={() => setDeleteConfirm(null)} className="flex-1 rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50">取消</button><button onClick={async () => { if (!deleteConfirm) return; setDeleting(true); try { await apiClient.delete(`/bootstrap/jobs/${deleteConfirm.id}`); setDeleteConfirm(null); await loadJobs(); } catch { /* deletion failed — keep dialog open so user can retry */ } finally { setDeleting(false); } }} disabled={deleting} className="flex-1 rounded-lg bg-red-600 py-2.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50">{deleting ? '删除中...' : '删除'}</button></div></div></div>}
       </div>
