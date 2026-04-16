@@ -8,7 +8,6 @@ coverage
 *.pid
 .logs/
 apps/*/.logs/
-.claude/
 .corepack/
 .idea/
 .npm-cache/
