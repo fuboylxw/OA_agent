@@ -134,7 +134,7 @@ ProcessTemplate                 - 流程模板表
    ↓
 6. 调用LLM解析业务流程
    ├── 构建解析提示词
-   ├── 调用Claude Opus 4.6
+   ├── 调用大模型
    └── 提取JSON结果
    ↓
 7. 验证和标准化结果
@@ -280,7 +280,7 @@ curl -X POST "http://localhost:3000/api/v1/bootstrap/jobs/job-123/confirm-parse"
 - **置信度评估**：为每个提取结果标注置信度
 
 ### 2. 准确性
-- **LLM驱动**：使用Claude Opus 4.6，准确率高
+- **LLM驱动**：使用大模型，准确率高
 - **多轮验证**：预处理、解析、验证多层保障
 - **人工审核**：低置信度结果需要人工确认
 

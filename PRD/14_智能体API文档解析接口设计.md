@@ -940,7 +940,7 @@ DOCUMENT_STORAGE_PATH=/data/documents
 A: MVP阶段支持OpenAPI 3.0，后续支持Swagger 2.0、Postman Collection、HAR文件。
 
 **Q2: 解析准确率如何保证？**
-A: 使用Claude Opus 4.6模型，准确率≥85%。低置信度结果会标记为需要人工审核。
+A: 使用大模型，准确率≥85%。低置信度结果会标记为需要人工审核。
 
 **Q3: 解析一个文档需要多长时间？**
 A: 平均2分钟，取决于文档大小和API端点数量。
