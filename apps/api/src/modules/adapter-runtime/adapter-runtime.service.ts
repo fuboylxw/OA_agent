@@ -19,6 +19,7 @@ import { RpaAdapter } from './rpa-adapter';
 import { CapabilityRoutedAdapter } from './capability-routed-adapter';
 import { LocalRpaExecutor } from './local-rpa-executor';
 import { BrowserRpaExecutor } from './browser-rpa-executor';
+import { OaBackendLoginService } from './oa-backend-login.service';
 
 const SENSITIVE_AUTH_KEYS = new Set([
   'password',
@@ -49,6 +50,7 @@ export class AdapterRuntimeService {
     private readonly prisma: PrismaService,
     private readonly delegatedCredentialService: DelegatedCredentialService,
     private readonly authBindingService: AuthBindingService,
+    private readonly oaBackendLoginService: OaBackendLoginService,
   ) {
     this.endpointLoader = new PrismaEndpointLoader(prisma);
     this.rpaFlowLoader = new PrismaRpaFlowLoader(prisma);
@@ -145,6 +147,7 @@ export class AdapterRuntimeService {
           baseUrl: connector.baseUrl,
           authType: connector.authType,
           authConfig,
+          authScope,
           oaVendor: connector.oaVendor || undefined,
           oaVersion: connector.oaVersion || undefined,
           oaType: connector.oaType as 'openapi' | 'form-page' | 'hybrid',
@@ -153,6 +156,7 @@ export class AdapterRuntimeService {
         this.platformTicketBroker,
         this.localRpaExecutor,
         this.browserRpaExecutor,
+        this.oaBackendLoginService,
       );
       if (hasLifecycle(rpaAdapter) && rpaAdapter.init) {
         await rpaAdapter.init();
@@ -259,6 +263,7 @@ export class AdapterRuntimeService {
         baseUrl: connector.baseUrl,
         authType: connector.authType,
         authConfig,
+        authScope,
         oaVendor: connector.oaVendor || undefined,
         oaVersion: connector.oaVersion || undefined,
         oaType: connector.oaType as 'openapi' | 'form-page' | 'hybrid',
@@ -267,6 +272,7 @@ export class AdapterRuntimeService {
       this.platformTicketBroker,
       this.localRpaExecutor,
       this.browserRpaExecutor,
+      this.oaBackendLoginService,
     );
     await rpaAdapter.init();
     return rpaAdapter;
@@ -367,7 +373,20 @@ export class AdapterRuntimeService {
     });
 
     if (!delegated?.authConfig) {
-      return baseConfig;
+      if (!this.oaBackendLoginService) {
+        return baseConfig;
+      }
+
+      const backendLogin = await this.oaBackendLoginService.resolveExecutionAuthConfig({
+        connectorId: connector.id,
+        authType: connector.authType,
+        authConfig: baseConfig,
+        authScope,
+      });
+
+      return backendLogin?.authConfig
+        ? this.mergeAuthConfig(baseConfig, backendLogin.authConfig)
+        : baseConfig;
     }
 
     return this.mergeAuthConfig(baseConfig, delegated.authConfig);

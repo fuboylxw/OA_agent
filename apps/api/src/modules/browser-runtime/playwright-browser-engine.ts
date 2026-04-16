@@ -14,6 +14,215 @@ interface PlaywrightSessionState {
   page: any;
 }
 
+const CAPTURE_PAGE_SCRIPT = String.raw`
+(() => {
+  function textOf(node) {
+    return (node && node.textContent ? node.textContent : '').replace(/\s+/g, ' ').trim();
+  }
+
+  function isVisible(node) {
+    if (!node || !(node instanceof Element)) {
+      return false;
+    }
+
+    const style = window.getComputedStyle(node);
+    if (
+      style.display === 'none'
+      || style.visibility === 'hidden'
+      || style.visibility === 'collapse'
+      || style.opacity === '0'
+    ) {
+      return false;
+    }
+
+    const rect = node.getBoundingClientRect();
+    return rect.width > 0 && rect.height > 0;
+  }
+
+  function cssPath(node) {
+    if (!node || !(node instanceof Element)) {
+      return undefined;
+    }
+
+    if (node.id) {
+      return '#' + node.id;
+    }
+
+    const parts = [];
+    let current = node;
+    while (current && parts.length < 5) {
+      let selector = current.tagName.toLowerCase();
+      if (current.classList.length > 0) {
+        selector += '.' + Array.from(current.classList).slice(0, 2).join('.');
+      } else if (current.parentElement) {
+        const siblings = Array.from(current.parentElement.children).filter((item) => item.tagName === current.tagName);
+        const index = siblings.indexOf(current) + 1;
+        selector += ':nth-of-type(' + index + ')';
+      }
+      parts.unshift(selector);
+      current = current.parentElement;
+    }
+    return parts.join(' > ');
+  }
+
+  function roleOf(node) {
+    const tag = node.tagName.toLowerCase();
+    const role = node.getAttribute('role') || '';
+    if (tag === 'button' || role === 'button') return 'button';
+    if (tag === 'a' || role === 'link') return 'link';
+    if (tag === 'select') return 'select';
+    if (tag === 'textarea') return 'textarea';
+    if (tag === 'input') {
+      const type = (node.getAttribute('type') || 'text').toLowerCase();
+      if (type === 'checkbox') return 'checkbox';
+      if (type === 'radio') return 'radio';
+      if (type === 'file') return 'upload';
+      return 'input';
+    }
+    return 'unknown';
+  }
+
+  function imageHints(node) {
+    const directImage = node.tagName.toLowerCase() === 'img'
+      ? node
+      : node.querySelector('img');
+
+    if (!directImage) {
+      return [];
+    }
+
+    const src = (directImage.getAttribute('src') || '').trim();
+    const filename = src.split('/').pop() || src;
+    const alt = (directImage.getAttribute('alt') || directImage.getAttribute('title') || '').trim();
+    return [{
+      kind: 'image',
+      value: filename || alt || 'image-target',
+      label: alt || undefined,
+      imageUrl: src || undefined,
+    }];
+  }
+
+  function importantTexts() {
+    const candidates = Array.from(document.querySelectorAll('h1, h2, h3, [role="heading"], .title, .ant-page-header-heading-title'))
+      .filter((node) => isVisible(node))
+      .map((node) => textOf(node))
+      .filter(Boolean);
+    return Array.from(new Set(candidates)).slice(0, 20);
+  }
+
+  function forms() {
+    return Array.from(document.querySelectorAll('form'))
+      .filter((form) => isVisible(form))
+      .slice(0, 10)
+      .map((form, index) => ({
+        id: form.id || 'form-' + (index + 1),
+        name: form.getAttribute('name') || textOf(form.querySelector('legend, h1, h2, h3')) || '表单' + (index + 1),
+        fields: Array.from(form.querySelectorAll('input, select, textarea'))
+          .filter((field) => isVisible(field))
+          .slice(0, 40)
+          .map((field) => ({
+            label: textOf(field.closest('label') || (field.parentElement ? field.parentElement.querySelector('label') : null)) || undefined,
+            fieldKey: field.getAttribute('name') || field.getAttribute('id') || undefined,
+            required: field.hasAttribute('required'),
+            selector: cssPath(field),
+          })),
+      }));
+  }
+
+  function regions() {
+    const regionDefs = [
+      { selector: 'header', id: 'header', role: 'header', name: 'Header' },
+      { selector: 'nav, [role="navigation"]', id: 'navigation', role: 'navigation', name: 'Navigation' },
+      { selector: 'main, [role="main"]', id: 'main', role: 'main', name: 'Main' },
+      { selector: 'aside', id: 'sidebar', role: 'sidebar', name: 'Sidebar' },
+      { selector: 'footer', id: 'footer', role: 'footer', name: 'Footer' },
+      { selector: 'dialog, [role="dialog"], .ant-modal-root, .el-dialog', id: 'dialog', role: 'dialog', name: 'Dialog' },
+    ];
+
+    return regionDefs.map((definition) => {
+      const node = document.querySelector(definition.selector);
+      if (!node || !isVisible(node)) {
+        return null;
+      }
+      const interactiveChildren = Array.from(
+        node.querySelectorAll('button, a, input, select, textarea, [role="button"], [role="link"], [onclick]')
+      )
+        .filter((item) => isVisible(item))
+        .map((item) => cssPath(item))
+        .filter(Boolean);
+      return {
+        id: definition.id,
+        role: definition.role,
+        name: definition.name,
+        summary: textOf(node).slice(0, 120) || undefined,
+        elementSelectors: interactiveChildren,
+      };
+    }).filter(Boolean);
+  }
+
+  const elements = Array.from(
+    document.querySelectorAll('button, a, input, select, textarea, [role="button"], [role="link"], [onclick]')
+  )
+    .filter((node) => isVisible(node))
+    .slice(0, 120)
+    .map((node) => {
+      const selector = cssPath(node);
+      const tag = node.tagName.toLowerCase();
+      const label = textOf(node.closest('label') || (node.parentElement ? node.parentElement.querySelector('label') : null))
+        || node.getAttribute('aria-label')
+        || node.getAttribute('title')
+        || undefined;
+      const text = textOf(node) || undefined;
+      const href = tag === 'a' ? (node.getAttribute('href') || undefined) : undefined;
+      const fieldKey = node.getAttribute('name') || node.getAttribute('id') || undefined;
+      const rect = node.getBoundingClientRect();
+      return {
+        role: roleOf(node),
+        text,
+        label,
+        fieldKey,
+        selector,
+        href,
+        required: node.hasAttribute('required'),
+        disabled: Boolean(node.disabled) || node.getAttribute('aria-disabled') === 'true',
+        value: 'value' in node ? String(node.value || '') : undefined,
+        bounds: {
+          x: Math.round(rect.x),
+          y: Math.round(rect.y),
+          width: Math.round(rect.width),
+          height: Math.round(rect.height),
+        },
+        targetHints: imageHints(node),
+      };
+    });
+
+  return {
+    title: document.title,
+    url: window.location.href,
+    regions: regions(),
+    forms: forms(),
+    dialogs: Array.from(document.querySelectorAll('dialog, [role="dialog"], .ant-modal-root, .el-dialog'))
+      .filter((node) => isVisible(node))
+      .slice(0, 10)
+      .map((node, index) => ({
+        id: node.id || 'dialog-' + (index + 1),
+        title: textOf(node.querySelector('h1, h2, h3, .ant-modal-title, .el-dialog__title')) || '弹窗' + (index + 1),
+        summary: textOf(node).slice(0, 120) || undefined,
+      })),
+    tables: Array.from(document.querySelectorAll('table'))
+      .filter((node) => isVisible(node))
+      .slice(0, 10)
+      .map((node, index) => ({
+        id: node.id || 'table-' + (index + 1),
+        name: textOf(node.querySelector('caption, thead')) || '表格' + (index + 1),
+        summary: textOf(node).slice(0, 120) || undefined,
+      })),
+    importantTexts: importantTexts(),
+    interactiveElements: elements,
+  };
+})()
+`;
+
 export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
   readonly provider = 'playwright';
   private readonly sessions = new Map<string, PlaywrightSessionState>();
@@ -23,8 +232,7 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
     const state = await this.ensureSession(session);
     if (tab.url && tab.url !== 'about:blank') {
       await state.page.goto(tab.url, { waitUntil: 'domcontentloaded' });
-      tab.url = state.page.url();
-      tab.title = await state.page.title();
+      await this.syncPageState(state, tab);
     }
   }
 
@@ -41,231 +249,20 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
 
   async capturePage(session: BrowserSessionRecord, _tab: BrowserTabRecord): Promise<BrowserPageCapture | undefined> {
     const state = await this.ensureSession(session);
-    const capture = await state.page.evaluate(() => {
-      function textOf(node: Element | null | undefined) {
-        return (node?.textContent || '').replace(/\s+/g, ' ').trim();
-      }
-
-      function isVisible(node: Element | null | undefined) {
-        if (!node || !(node instanceof Element)) {
-          return false;
-        }
-
-        const style = window.getComputedStyle(node);
-        if (
-          style.display === 'none'
-          || style.visibility === 'hidden'
-          || style.visibility === 'collapse'
-          || style.opacity === '0'
-        ) {
-          return false;
-        }
-
-        const rect = node.getBoundingClientRect();
-        return rect.width > 0 && rect.height > 0;
-      }
-
-      function cssPath(node: Element | null): string | undefined {
-        if (!node || !(node instanceof Element)) {
-          return undefined;
-        }
-
-        if (node.id) {
-          return `#${node.id}`;
-        }
-
-        const parts: string[] = [];
-        let current: Element | null = node;
-        while (current && parts.length < 5) {
-          let selector = current.tagName.toLowerCase();
-          if (current.classList.length > 0) {
-            selector += `.${Array.from(current.classList).slice(0, 2).join('.')}`;
-          } else if (current.parentElement) {
-            const siblings = Array.from(current.parentElement.children).filter((item) => item.tagName === current?.tagName);
-            const index = siblings.indexOf(current) + 1;
-            selector += `:nth-of-type(${index})`;
-          }
-          parts.unshift(selector);
-          current = current.parentElement;
-        }
-        return parts.join(' > ');
-      }
-
-      function roleOf(node: Element): string {
-        const tag = node.tagName.toLowerCase();
-        const role = node.getAttribute('role') || '';
-        if (tag === 'button' || role === 'button') return 'button';
-        if (tag === 'a' || role === 'link') return 'link';
-        if (tag === 'select') return 'select';
-        if (tag === 'textarea') return 'textarea';
-        if (tag === 'input') {
-          const type = (node.getAttribute('type') || 'text').toLowerCase();
-          if (type === 'checkbox') return 'checkbox';
-          if (type === 'radio') return 'radio';
-          if (type === 'file') return 'upload';
-          return 'input';
-        }
-        return 'unknown';
-      }
-
-      function imageHints(node: Element): Array<RpaTargetDefinition> {
-        const directImage = node.tagName.toLowerCase() === 'img'
-          ? node as HTMLImageElement
-          : node.querySelector('img');
-
-        if (!directImage) {
-          return [];
-        }
-
-        const src = (directImage.getAttribute('src') || '').trim();
-        const filename = src.split('/').pop() || src;
-        const alt = (directImage.getAttribute('alt') || directImage.getAttribute('title') || '').trim();
-        return [{
-          kind: 'image',
-          value: filename || alt || 'image-target',
-          label: alt || undefined,
-          imageUrl: src || undefined,
-        }];
-      }
-
-      function importantTexts() {
-        const candidates = Array.from(document.querySelectorAll('h1, h2, h3, [role="heading"], .title, .ant-page-header-heading-title'))
-          .filter((node) => isVisible(node))
-          .map((node) => textOf(node))
-          .filter(Boolean);
-        return Array.from(new Set(candidates)).slice(0, 20);
-      }
-
-      function forms() {
-        return Array.from(document.querySelectorAll('form'))
-          .filter((form) => isVisible(form))
-          .slice(0, 10)
-          .map((form, index) => ({
-          id: form.id || `form-${index + 1}`,
-          name: form.getAttribute('name') || textOf(form.querySelector('legend, h1, h2, h3')) || `表单${index + 1}`,
-          fields: Array.from(form.querySelectorAll('input, select, textarea'))
-            .filter((field) => isVisible(field))
-            .slice(0, 40)
-            .map((field) => ({
-            label: textOf(field.closest('label') || field.parentElement?.querySelector('label') || null) || undefined,
-            fieldKey: field.getAttribute('name') || field.getAttribute('id') || undefined,
-            required: field.hasAttribute('required'),
-            selector: cssPath(field),
-            })),
-          }));
-      }
-
-      function regions() {
-        const regionDefs = [
-          { selector: 'header', id: 'header', role: 'header', name: 'Header' },
-          { selector: 'nav, [role="navigation"]', id: 'navigation', role: 'navigation', name: 'Navigation' },
-          { selector: 'main, [role="main"]', id: 'main', role: 'main', name: 'Main' },
-          { selector: 'aside', id: 'sidebar', role: 'sidebar', name: 'Sidebar' },
-          { selector: 'footer', id: 'footer', role: 'footer', name: 'Footer' },
-          { selector: 'dialog, [role="dialog"], .ant-modal-root, .el-dialog', id: 'dialog', role: 'dialog', name: 'Dialog' },
-        ];
-
-        return regionDefs.map((definition) => {
-          const node = document.querySelector(definition.selector);
-          if (!node || !isVisible(node)) {
-            return null;
-          }
-          const interactiveChildren = Array.from(
-            node.querySelectorAll('button, a, input, select, textarea, [role="button"], [role="link"], [onclick]')
-          )
-            .filter((item) => isVisible(item))
-            .map((item) => cssPath(item))
-            .filter(Boolean);
-          return {
-            id: definition.id,
-            role: definition.role,
-            name: definition.name,
-            summary: textOf(node).slice(0, 120) || undefined,
-            elementSelectors: interactiveChildren,
-          };
-        }).filter(Boolean);
-      }
-
-      const elements = Array.from(
-        document.querySelectorAll('button, a, input, select, textarea, [role="button"], [role="link"], [onclick]')
-      )
-        .filter((node) => isVisible(node))
-        .slice(0, 120)
-        .map((node) => {
-          const selector = cssPath(node);
-          const tag = node.tagName.toLowerCase();
-          const label = textOf(node.closest('label') || node.parentElement?.querySelector('label') || null)
-            || node.getAttribute('aria-label')
-            || node.getAttribute('title')
-            || undefined;
-          const text = textOf(node) || undefined;
-          const href = tag === 'a' ? (node.getAttribute('href') || undefined) : undefined;
-          const fieldKey = node.getAttribute('name') || node.getAttribute('id') || undefined;
-          const rect = node.getBoundingClientRect();
-          return {
-            role: roleOf(node),
-            text,
-            label,
-            fieldKey,
-            selector,
-            href,
-            required: node.hasAttribute('required'),
-            disabled: (node as HTMLInputElement).disabled || node.getAttribute('aria-disabled') === 'true',
-            value: 'value' in (node as any) ? String((node as any).value || '') : undefined,
-            bounds: {
-              x: Math.round(rect.x),
-              y: Math.round(rect.y),
-              width: Math.round(rect.width),
-              height: Math.round(rect.height),
-            },
-            targetHints: imageHints(node),
-          };
-        });
-
-      return {
-        title: document.title,
-        url: window.location.href,
-        regions: regions(),
-        forms: forms(),
-        dialogs: Array.from(document.querySelectorAll('dialog, [role="dialog"], .ant-modal-root, .el-dialog'))
-          .filter((node) => isVisible(node))
-          .slice(0, 10)
-          .map((node, index) => ({
-          id: node.id || `dialog-${index + 1}`,
-          title: textOf(node.querySelector('h1, h2, h3, .ant-modal-title, .el-dialog__title')) || `弹窗${index + 1}`,
-          summary: textOf(node).slice(0, 120) || undefined,
-          })),
-        tables: Array.from(document.querySelectorAll('table'))
-          .filter((node) => isVisible(node))
-          .slice(0, 10)
-          .map((node, index) => ({
-          id: node.id || `table-${index + 1}`,
-          name: textOf(node.querySelector('caption, thead')) || `表格${index + 1}`,
-          summary: textOf(node).slice(0, 120) || undefined,
-          })),
-        importantTexts: importantTexts(),
-        interactiveElements: elements,
-      };
-    });
+    const capture = await state.page.evaluate(CAPTURE_PAGE_SCRIPT);
 
     return capture as BrowserPageCapture;
   }
 
   async stabilize(session: BrowserSessionRecord, tab: BrowserTabRecord, timeoutMs?: number) {
     const state = await this.ensureSession(session);
-    const timeout = timeoutMs || 5000;
-    await state.page.waitForLoadState('domcontentloaded', { timeout }).catch(() => undefined);
-    await state.page.waitForLoadState('networkidle', { timeout }).catch(() => undefined);
-    tab.url = state.page.url();
-    tab.title = await state.page.title().catch(() => tab.title);
+    await this.syncPageState(state, tab, timeoutMs);
   }
 
   async navigate(session: BrowserSessionRecord, tab: BrowserTabRecord, url: string) {
     const state = await this.ensureSession(session);
     await state.page.goto(url, { waitUntil: 'domcontentloaded' });
-    tab.url = state.page.url();
-    tab.title = await state.page.title();
-    tab.history.push(tab.url);
+    await this.syncPageState(state, tab, undefined, true);
     tab.pageVersion += 1;
   }
 
@@ -335,13 +332,61 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
 
   async extract(session: BrowserSessionRecord, tab: BrowserTabRecord, element: BrowserSnapshotElement | undefined) {
     const locator = await this.resolveLocator(session, element);
-    const tagName = await locator.evaluate((node: Element) => node.tagName.toLowerCase()).catch(() => '');
-    const value = tagName === 'input' || tagName === 'textarea' || tagName === 'select'
-      ? await locator.inputValue().catch(() => '')
-      : await locator.textContent().catch(() => '');
+    const value = await locator.evaluate((node: Element) => {
+      const tagName = node.tagName.toLowerCase();
+      const readAttr = (name: string) => node.getAttribute(name) || '';
+
+      if (tagName === 'meta') {
+        return readAttr('content');
+      }
+
+      if (tagName === 'input' || tagName === 'textarea' || tagName === 'select') {
+        const htmlNode = node as HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement;
+        return htmlNode.value
+          || readAttr('value')
+          || readAttr('content')
+          || node.textContent
+          || '';
+      }
+
+      return readAttr('value')
+        || readAttr('content')
+        || readAttr('href')
+        || readAttr('src')
+        || node.textContent
+        || '';
+    }).catch(() => '');
     if (element?.fieldKey) {
       tab.extractedValues[element.fieldKey] = value;
     }
+    return value;
+  }
+
+  async evaluate(
+    session: BrowserSessionRecord,
+    tab: BrowserTabRecord,
+    script: string,
+    context: Record<string, any> = {},
+  ) {
+    const state = await this.ensureSession(session);
+    const value = await state.page.evaluate(async ({ scriptSource, executionContext }: any) => {
+      const evaluator = new Function(
+        'context',
+        `
+          const scope = typeof window !== 'undefined' ? window : globalThis;
+          return (async function () {
+            ${scriptSource}
+          }).call(scope);
+        `,
+      );
+      return await evaluator(executionContext);
+    }, {
+      scriptSource: String(script || ''),
+      executionContext: context,
+    });
+
+    tab.artifacts.lastEvaluatedScript = String(script || '').slice(0, 2000);
+    tab.artifacts.lastEvaluatedValue = value;
     return value;
   }
 
@@ -383,11 +428,125 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
       headless: session.headless,
       executablePath: session.browserExecutablePath || process.env.PLAYWRIGHT_CHROMIUM_EXECUTABLE_PATH || undefined,
     });
-    const context = await browser.newContext();
+    const contextOptions: Record<string, any> = {};
+    const storageState = this.parseStorageState(session.storageState);
+    if (storageState) {
+      contextOptions.storageState = storageState;
+    }
+    const context = await browser.newContext(contextOptions);
+    const bootstrapCookies = storageState?.cookies?.length
+      ? [] as Array<Record<string, any>>
+      : this.normalizeBootstrapCookies(session);
+    if (bootstrapCookies.length > 0) {
+      await context.addCookies(bootstrapCookies);
+    }
     const page = await context.newPage();
     const created = { browser, context, page };
     this.sessions.set(session.sessionId, created);
     return created;
+  }
+
+  private async syncPageState(
+    state: PlaywrightSessionState,
+    tab: BrowserTabRecord,
+    timeoutMs?: number,
+    appendHistory = false,
+  ) {
+    const timeout = timeoutMs || 5000;
+    await state.page.waitForLoadState('domcontentloaded', { timeout }).catch(() => undefined);
+    await state.page.waitForLoadState('networkidle', { timeout }).catch(() => undefined);
+    const nextUrl = state.page.url();
+    tab.url = nextUrl;
+    tab.title = await this.readPageTitle(state.page, tab.title);
+    if (appendHistory && tab.history[tab.history.length - 1] !== nextUrl) {
+      tab.history.push(nextUrl);
+    }
+  }
+
+  private async readPageTitle(page: any, fallbackTitle = '') {
+    try {
+      return await page.title();
+    } catch {
+      return fallbackTitle;
+    }
+  }
+
+  private parseStorageState(value: BrowserSessionRecord['storageState']) {
+    if (!value) {
+      return undefined;
+    }
+
+    if (typeof value === 'string') {
+      try {
+        return JSON.parse(value);
+      } catch {
+        return undefined;
+      }
+    }
+
+    if (typeof value !== 'object' || Array.isArray(value)) {
+      return undefined;
+    }
+
+    return value;
+  }
+
+  private normalizeBootstrapCookies(session: BrowserSessionRecord) {
+    if (Array.isArray(session.cookies) && session.cookies.length > 0) {
+      return session.cookies
+        .map((cookie) => this.normalizeCookie(cookie, session.cookieOrigin))
+        .filter(Boolean) as Array<Record<string, any>>;
+    }
+
+    if (!session.cookieHeader) {
+      return [];
+    }
+
+    return session.cookieHeader
+      .split(';')
+      .map((segment) => segment.trim())
+      .filter(Boolean)
+      .map((segment) => {
+        const separatorIndex = segment.indexOf('=');
+        if (separatorIndex <= 0) {
+          return undefined;
+        }
+
+        return this.normalizeCookie({
+          name: segment.slice(0, separatorIndex).trim(),
+          value: segment.slice(separatorIndex + 1).trim(),
+          path: '/',
+        }, session.cookieOrigin);
+      })
+      .filter(Boolean) as Array<Record<string, any>>;
+  }
+
+  private normalizeCookie(cookie: any, cookieOrigin?: string) {
+    if (!cookie || typeof cookie !== 'object' || !cookie.name) {
+      return undefined;
+    }
+
+    const normalized: Record<string, any> = {
+      name: String(cookie.name),
+      value: String(cookie.value || ''),
+      path: String(cookie.path || '/'),
+    };
+
+    if (cookie.domain) {
+      normalized.domain = String(cookie.domain);
+    } else if (cookie.url) {
+      normalized.url = String(cookie.url);
+    } else if (cookieOrigin) {
+      normalized.url = cookieOrigin;
+    } else {
+      return undefined;
+    }
+
+    if (cookie.expires !== undefined) normalized.expires = cookie.expires;
+    if (cookie.httpOnly !== undefined) normalized.httpOnly = Boolean(cookie.httpOnly);
+    if (cookie.secure !== undefined) normalized.secure = Boolean(cookie.secure);
+    if (cookie.sameSite !== undefined) normalized.sameSite = cookie.sameSite;
+    return normalized;
   }
 
   private async selectOptionWithFallback(locator: any, rawValue: string) {

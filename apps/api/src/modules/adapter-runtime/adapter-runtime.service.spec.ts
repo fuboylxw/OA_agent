@@ -12,6 +12,9 @@ describe('AdapterRuntimeService', () => {
   const authBindingService = {
     resolveExecutionAuthConfig: jest.fn(),
   };
+  const oaBackendLoginService = {
+    resolveExecutionAuthConfig: jest.fn(),
+  };
 
   let service: AdapterRuntimeService;
 
@@ -23,6 +26,7 @@ describe('AdapterRuntimeService', () => {
       prisma as any,
       delegatedCredentialService as any,
       authBindingService as any,
+      oaBackendLoginService as any,
     );
   });
 
@@ -143,6 +147,75 @@ describe('AdapterRuntimeService', () => {
       platformConfig: {
         entryUrl: 'https://portal.example.com',
         serviceToken: 'delegated-service-token',
+      },
+    });
+  });
+
+  it('falls back to OA backend login when no binding or delegated credential is available', async () => {
+    delegatedCredentialService.resolveExecutionAuthConfig.mockResolvedValue(null);
+    oaBackendLoginService.resolveExecutionAuthConfig.mockResolvedValue({
+      authConfig: {
+        cookie: 'XPU-SESSION=backend-login',
+        platformConfig: {
+          storageState: {
+            cookies: [{
+              name: 'XPU-SESSION',
+              value: 'backend-login',
+              url: 'https://sz.xpu.edu.cn',
+            }],
+            origins: [],
+          },
+        },
+      },
+    });
+
+    const result = await service.resolveAuthConfigForExecution({
+      id: 'connector-1',
+      authType: 'cookie',
+      authConfig: {
+        platformConfig: {
+          entryUrl: 'https://sz.xpu.edu.cn/',
+          oaBackendLogin: {
+            enabled: true,
+          },
+        },
+      },
+    }, {
+      tenantId: 'tenant-1',
+      userId: 'user-1',
+    });
+
+    expect(oaBackendLoginService.resolveExecutionAuthConfig).toHaveBeenCalledWith({
+      connectorId: 'connector-1',
+      authType: 'cookie',
+      authConfig: {
+        platformConfig: {
+          entryUrl: 'https://sz.xpu.edu.cn/',
+          oaBackendLogin: {
+            enabled: true,
+          },
+        },
+      },
+      authScope: {
+        tenantId: 'tenant-1',
+        userId: 'user-1',
+      },
+    });
+    expect(result).toEqual({
+      cookie: 'XPU-SESSION=backend-login',
+      platformConfig: {
+        entryUrl: 'https://sz.xpu.edu.cn/',
+        oaBackendLogin: {
+          enabled: true,
+        },
+        storageState: {
+          cookies: [{
+            name: 'XPU-SESSION',
+            value: 'backend-login',
+            url: 'https://sz.xpu.edu.cn',
+          }],
+          origins: [],
+        },
       },
     });
   });

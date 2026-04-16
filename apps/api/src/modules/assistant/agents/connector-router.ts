@@ -36,8 +36,9 @@ const CONNECTOR_ROUTE_SYSTEM_PROMPT = `你是一个 OA 系统路由助手。
 ## 规则
 1. 如果只有一个系统，直接选它
 2. 如果用户消息中明确提到了某个系统的名称或关键词，选那个系统
-3. 如果无法判断，返回 needsSelection=true，列出可选系统让用户选择
-4. 不要猜测，宁可让用户选择也不要选错
+3. 如果当前候选系统已经是某个已识别流程的候选范围，只能在这些系统里选择
+4. 如果无法判断，返回 needsSelection=true，列出可选系统让用户选择
+5. 不要猜测，宁可让用户选择也不要选错
 
 ## 输出格式（JSON）
 确定系统：
@@ -67,13 +68,16 @@ export class ConnectorRouter {
     userId: string,
     message: string,
     sessionConnectorId?: string | null,
+    candidateConnectors?: ConnectorInfo[],
   ): Promise<ConnectorRouteResult> {
     // 获取租户下所有 active connector
-    const connectors = await this.prisma.connector.findMany({
-      where: { tenantId, status: 'active' },
-      select: { id: true, name: true, oaVendor: true, oaType: true },
-      orderBy: { createdAt: 'asc' },
-    });
+    const connectors = candidateConnectors && candidateConnectors.length > 0
+      ? candidateConnectors
+      : await this.prisma.connector.findMany({
+        where: { tenantId, status: 'active' },
+        select: { id: true, name: true, oaVendor: true, oaType: true },
+        orderBy: { createdAt: 'asc' },
+      });
 
     if (connectors.length === 0) {
       return {
@@ -176,21 +180,22 @@ export class ConnectorRouter {
         { role: 'system', content: CONNECTOR_ROUTE_SYSTEM_PROMPT },
         {
           role: 'user',
-          content: `可用 OA 系统：\n${connectorList}\n\n用户消息："${message}"\n\n请判断用户想使用哪个系统，返回 JSON。`,
+          content: `可用 OA 系统：\n${connectorList}\n\n用户消息："${message}"\n\n如果这些系统已经是某个已识别流程的候选系统范围，请只在这些系统中判断。请判断用户想使用哪个系统，返回 JSON。`,
         },
       ];
 
       const response = await this.llmClient.chat(messages, {
-        trace: {
-          scope: 'assistant.connector.route',
-          tenantId: context.tenantId,
-          userId: context.userId,
-          metadata: {
-            connectorCount: connectors.length,
-            sessionConnectorId: context.sessionConnectorId || null,
-          },
+      trace: {
+        scope: 'assistant.connector.route',
+        tenantId: context.tenantId,
+        userId: context.userId,
+        metadata: {
+          connectorCount: connectors.length,
+          sessionConnectorId: context.sessionConnectorId || null,
+          connectorCandidates: connectors.map((connector) => connector.id),
         },
-      });
+      },
+    });
 
       let jsonStr = response.content.trim();
       if (jsonStr.startsWith('```')) {

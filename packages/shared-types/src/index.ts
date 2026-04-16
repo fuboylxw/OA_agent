@@ -369,6 +369,7 @@ export type RpaStepActionType =
   | 'select'
   | 'upload'
   | 'extract'
+  | 'evaluate'
   | 'download'
   | 'screenshot';
 
@@ -410,6 +411,9 @@ export interface RpaStepDefinition {
   selector?: string;
   fieldKey?: string;
   value?: string;
+  script?: string;
+  builtin?: string;
+  options?: Record<string, any>;
   description?: string;
   timeoutMs?: number;
   target?: RpaTargetDefinition;
@@ -435,13 +439,26 @@ export interface RpaActionDefinition {
 
 export interface RpaPlatformDefinition {
   entryUrl?: string;
+  businessBaseUrl?: string;
+  targetBaseUrl?: string;
   targetSystem?: string;
   ticketBrokerUrl?: string;
   jumpUrlTemplate?: string;
+  portalSsoBridge?: RpaPortalSsoBridgeDefinition;
   ticketHeaderName?: string;
   ticketHeaderValue?: string;
   serviceToken?: string;
   timeoutMs?: number;
+}
+
+export interface RpaPortalSsoBridgeDefinition {
+  enabled?: boolean;
+  mode?: 'oa_info';
+  portalUrl?: string;
+  oaInfoUrl?: string;
+  sourcePath?: string;
+  targetPathTemplate?: string;
+  required?: boolean;
 }
 
 export interface RpaRuntimeDefinition {
@@ -451,12 +468,39 @@ export interface RpaRuntimeDefinition {
   headless?: boolean;
   submitEndpoint?: string;
   statusEndpoint?: string;
+  preflight?: RpaActionDefinition;
+  networkSubmit?: RpaNetworkRequestDefinition;
+  networkStatus?: RpaNetworkRequestDefinition;
   timeoutMs?: number;
   stabilityTimeoutMs?: number;
   maxSteps?: number;
   maxRetries?: number;
   snapshotMode?: 'structured-text';
   headers?: Record<string, string>;
+}
+
+export interface RpaNetworkMappingRule {
+  source?: string;
+  default?: any;
+  transform?: 'toString' | 'toNumber' | 'toBoolean' | 'toUpperCase' | 'toLowerCase' | 'json';
+}
+
+export interface RpaNetworkRequestDefinition {
+  url: string;
+  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  successMode?: 'submissionId' | 'http2xx';
+  completionKind?: 'draft' | 'submitted';
+  query?: Record<string, string | RpaNetworkMappingRule>;
+  headers?: Record<string, string | RpaNetworkMappingRule>;
+  body?: any;
+  bodyMode?: 'json' | 'form';
+  responseMapping?: {
+    successPath?: string;
+    successValue?: string | number | boolean;
+    submissionIdPath?: string;
+    statusPath?: string;
+    messagePath?: string;
+  };
 }
 
 export const API_DELIVERY_PATH = 'api';

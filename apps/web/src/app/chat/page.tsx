@@ -18,6 +18,8 @@ const QUICK_ACTIONS = [
   { label: '查看进度', icon: 'fa-chart-bar', color: 'text-slate-700 bg-slate-100', message: '查看我的申请进度' },
 ];
 
+const CHAT_REQUEST_TIMEOUT_MS = 90000;
+
 interface ChatAttachment {
   attachmentId: string;
   fileId: string;
@@ -246,11 +248,19 @@ export default function ChatPage() {
         setLoading(false);
         return;
       }
-      const response = await apiClient.post('/assistant/chat', {
-        sessionId,
-        message: messageText || '已上传文件',
-        attachments: filesToSend.length > 0 ? filesToSend : undefined,
-      });
+      const response = await apiClient.post(
+        '/assistant/chat',
+        {
+          sessionId,
+          message: messageText || '已上传文件',
+          attachments: filesToSend.length > 0 ? filesToSend : undefined,
+        },
+        {
+          // Chat turns can include LLM reasoning and server-side orchestration,
+          // so they need a higher timeout than ordinary CRUD endpoints.
+          timeout: CHAT_REQUEST_TIMEOUT_MS,
+        },
+      );
 
       const data = response.data || {};
       setSessionId(data.sessionId || null);

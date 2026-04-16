@@ -88,6 +88,26 @@ export class BootstrapService {
     if (!tenantId) {
       throw new BadRequestException('缺少租户标识');
     }
+    const selectedConnector = dto.connectorId
+      ? await this.prisma.connector.findFirst({
+          where: {
+            id: dto.connectorId,
+            tenantId,
+          },
+          select: {
+            id: true,
+            name: true,
+            baseUrl: true,
+            authConfig: true,
+          },
+        })
+      : null;
+    if (dto.connectorId && !selectedConnector) {
+      throw new NotFoundException('所属连接器不存在');
+    }
+
+    const effectiveName = (selectedConnector?.name || dto.name || '').trim() || undefined;
+    const effectiveOaUrl = (selectedConnector?.baseUrl || dto.oaUrl || '').trim() || undefined;
     const now = new Date();
     const accessMode = this.resolveAccessMode({
       accessMode: dto.accessMode,
@@ -96,8 +116,8 @@ export class BootstrapService {
     const normalizedRpaContent = dto.rpaFlowContent
       ? await this.preparePageAutomationSource(dto.rpaFlowContent, {
           accessMode,
-          connectorName: dto.name,
-          oaUrl: dto.oaUrl,
+          connectorName: effectiveName,
+          oaUrl: effectiveOaUrl,
           platformConfig: dto.platformConfig,
         })
       : null;
@@ -132,11 +152,18 @@ export class BootstrapService {
       hasRpaSource: hasDeclaredRpaSource,
     });
 
-    if (!apiDocContent && !dto.oaUrl && !normalizedRpaContent?.content) {
+    if (!apiDocContent && !effectiveOaUrl && !normalizedRpaContent?.content) {
       throw new BadRequestException('请提供接口文档、OA 地址或页面流程内容');
     }
 
-    const normalizedAuthConfig = this.normalizeAuthConfig(dto.authConfig);
+    const inheritedAuthConfig = selectedConnector?.authConfig
+      && typeof selectedConnector.authConfig === 'object'
+      && !Array.isArray(selectedConnector.authConfig)
+      ? (selectedConnector.authConfig as Record<string, any>)
+      : undefined;
+    const normalizedAuthConfig = dto.authConfig !== undefined
+      ? this.normalizeAuthConfig(dto.authConfig)
+      : this.normalizeAuthConfig(inheritedAuthConfig);
     const runtimeConfig = {
       ...(normalizedAuthConfig || {}),
       ...(dto.platformConfig ? { platformConfig: dto.platformConfig } : {}),
@@ -150,23 +177,24 @@ export class BootstrapService {
     const job = await this.prisma.bootstrapJob.create({
       data: {
         tenantId,
-        name: dto.name,
+        connectorId: selectedConnector?.id,
+        name: effectiveName,
         status: 'CREATED',
         currentStage: 'CREATED',
         stageStartedAt: now,
         lastHeartbeatAt: now,
-        oaUrl: dto.oaUrl,
+        oaUrl: effectiveOaUrl,
         openApiUrl: dto.apiDocUrl,
         authConfig: authConfig ?? undefined,
       },
     });
 
-    if (dto.oaUrl) {
+    if (effectiveOaUrl) {
       await this.prisma.bootstrapSource.create({
         data: {
           bootstrapJobId: job.id,
           sourceType: 'oa_url',
-          sourceUrl: dto.oaUrl,
+          sourceUrl: effectiveOaUrl,
         },
       });
     }
@@ -1784,8 +1812,8 @@ export class BootstrapService {
 
     if (!job) throw new NotFoundException('初始化任务不存在');
 
-    if (job.connectorId) {
-      await this.prisma.connector.delete({ where: { id: job.connectorId } });
+    if (job.connectorId && ['PUBLISHED', 'PARTIALLY_PUBLISHED'].includes(job.status)) {
+      throw new BadRequestException('已发布并绑定连接器的初始化任务不可删除');
     }
 
     await this.prisma.bootstrapJob.delete({ where: { id: jobId } });

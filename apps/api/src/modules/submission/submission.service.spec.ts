@@ -133,4 +133,13 @@ describe('SubmissionService', () => {
     expect(prisma.submission.update).not.toHaveBeenCalled();
     expect(chatSessionProcessService.syncSubmissionStatusToSession).not.toHaveBeenCalled();
   });
+
+  it('filters internal synthetic submission ids when normalizing OA submission ids', async () => {
+    const { service } = createService();
+
+    expect((service as any).normalizeOaSubmissionId('VISION-LEAVE_REQUEST-123')).toBeUndefined();
+    expect((service as any).normalizeOaSubmissionId('RPA-LEAVE_REQUEST-123')).toBeUndefined();
+    expect((service as any).normalizeOaSubmissionId('OA-REAL-123')).toBe('OA-REAL-123');
+    expect((service as any).normalizeOaSubmissionId(10086)).toBe('10086');
+  });
 });

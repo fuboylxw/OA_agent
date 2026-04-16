@@ -65,8 +65,8 @@ export class BrowserTaskRuntime {
           );
           executedSteps.push(execution.stepResult);
 
-          if (execution.extractedValue) {
-            tab.extractedValues[execution.extractedValue.key] = execution.extractedValue.value;
+          if (execution.extractedValues) {
+            Object.assign(tab.extractedValues, execution.extractedValues);
           }
 
           if (execution.refreshSnapshot) {

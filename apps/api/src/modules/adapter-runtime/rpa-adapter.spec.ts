@@ -20,9 +20,13 @@ describe('RpaAdapter', () => {
   const ticketBroker = {
     issueTicket: jest.fn(),
   };
+  const oaBackendLoginService = {
+    resolveExecutionAuthConfig: jest.fn(),
+  };
 
   beforeEach(() => {
     jest.clearAllMocks();
+    oaBackendLoginService.resolveExecutionAuthConfig.mockResolvedValue(null);
   });
 
   it('falls back to the local executor for submit when no HTTP executor is configured', async () => {
@@ -44,6 +48,7 @@ describe('RpaAdapter', () => {
       ticketBroker as any,
       new LocalRpaExecutor(),
       new BrowserRpaExecutor(),
+      oaBackendLoginService as any,
     );
     await adapter.init();
 
@@ -88,6 +93,7 @@ describe('RpaAdapter', () => {
       ticketBroker as any,
       new LocalRpaExecutor(),
       new BrowserRpaExecutor(),
+      oaBackendLoginService as any,
     );
     await adapter.init();
 
@@ -121,6 +127,7 @@ describe('RpaAdapter', () => {
       ticketBroker as any,
       new LocalRpaExecutor(),
       new BrowserRpaExecutor(),
+      oaBackendLoginService as any,
     );
     await adapter.init();
 
@@ -161,6 +168,7 @@ describe('RpaAdapter', () => {
       ticketBroker as any,
       new LocalRpaExecutor(),
       new BrowserRpaExecutor(),
+      oaBackendLoginService as any,
     );
     await adapter.init();
 
@@ -203,6 +211,194 @@ describe('RpaAdapter', () => {
         elementRef: 'e1',
       }),
     ]);
+  });
+
+  it('resolves OA backend login auth before browser execution when configured', async () => {
+    ticketBroker.issueTicket.mockResolvedValue({
+      jumpUrl: 'https://portal.example.com/jump/browser',
+      metadata: { source: 'template' },
+    });
+    oaBackendLoginService.resolveExecutionAuthConfig.mockResolvedValue({
+      authConfig: {
+        cookie: 'XPU-SESSION=session-value',
+        platformConfig: {
+          storageState: {
+            cookies: [{
+              name: 'XPU-SESSION',
+              value: 'session-value',
+              url: 'https://sz.xpu.edu.cn',
+            }],
+            origins: [],
+          },
+        },
+      },
+    });
+
+    const browserExecutor = {
+      execute: jest.fn().mockResolvedValue({
+        success: true,
+        submissionId: 'RPA-BROWSER-EXPENSE_SUBMIT-browser001',
+        status: 'submitted',
+        message: 'ok',
+        executedSteps: [],
+        snapshots: [],
+        recoveryAttempts: [],
+        finalSnapshot: undefined,
+        session: {
+          executor: 'browser',
+          provider: 'playwright',
+          requestedProvider: 'playwright',
+          jumpUrl: 'https://portal.example.com/jump/browser',
+          headless: true,
+        },
+      }),
+    };
+
+    const adapter = new RpaAdapter(
+      {
+        ...config,
+        authScope: {
+          tenantId: 'tenant-1',
+          userId: 'user-1',
+        },
+        authConfig: {
+          platformConfig: {
+            oaBackendLogin: {
+              enabled: true,
+            },
+          },
+        },
+      },
+      [buildLoadedFlow({
+        runtime: {
+          executorMode: 'browser',
+          browserProvider: 'playwright',
+          headless: true,
+        },
+      })],
+      ticketBroker as any,
+      new LocalRpaExecutor(),
+      browserExecutor as any,
+      oaBackendLoginService as any,
+    );
+    await adapter.init();
+
+    await adapter.submit({
+      flowCode: 'expense_submit',
+      formData: { amount: 88 },
+      idempotencyKey: 'req-browser-auth-001',
+    });
+
+    expect(oaBackendLoginService.resolveExecutionAuthConfig).toHaveBeenCalledWith(expect.objectContaining({
+      connectorId: 'connector-1',
+      authType: 'oauth2',
+      authScope: {
+        tenantId: 'tenant-1',
+        userId: 'user-1',
+      },
+    }));
+    expect(browserExecutor.execute).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({
+        auth: expect.objectContaining({
+          cookie: 'XPU-SESSION=session-value',
+          platformConfig: expect.objectContaining({
+            storageState: expect.objectContaining({
+              cookies: [expect.objectContaining({
+                name: 'XPU-SESSION',
+              })],
+            }),
+          }),
+        }),
+      }),
+    }));
+  });
+
+  it('reuses existing browser session bootstrap without refreshing backend login again', async () => {
+    ticketBroker.issueTicket.mockResolvedValue({
+      jumpUrl: 'https://portal.example.com/jump/browser',
+      metadata: { source: 'template' },
+    });
+
+    const browserExecutor = {
+      execute: jest.fn().mockResolvedValue({
+        success: true,
+        submissionId: 'RPA-BROWSER-EXPENSE_SUBMIT-existing001',
+        status: 'submitted',
+        message: 'ok',
+        executedSteps: [],
+        snapshots: [],
+        recoveryAttempts: [],
+        finalSnapshot: undefined,
+        session: {
+          executor: 'browser',
+          provider: 'playwright',
+          requestedProvider: 'playwright',
+          jumpUrl: 'https://portal.example.com/jump/browser',
+          headless: true,
+        },
+      }),
+    };
+
+    const adapter = new RpaAdapter(
+      {
+        ...config,
+        authScope: {
+          tenantId: 'tenant-1',
+          userId: 'user-1',
+        },
+        authConfig: {
+          cookie: 'XPU-SESSION=existing-session',
+          platformConfig: {
+            storageState: {
+              cookies: [{
+                name: 'XPU-SESSION',
+                value: 'existing-session',
+                url: 'https://sz.xpu.edu.cn',
+              }],
+              origins: [],
+            },
+            oaBackendLogin: {
+              enabled: true,
+            },
+          },
+        },
+      },
+      [buildLoadedFlow({
+        runtime: {
+          executorMode: 'browser',
+          browserProvider: 'playwright',
+          headless: true,
+        },
+      })],
+      ticketBroker as any,
+      new LocalRpaExecutor(),
+      browserExecutor as any,
+      oaBackendLoginService as any,
+    );
+    await adapter.init();
+
+    await adapter.submit({
+      flowCode: 'expense_submit',
+      formData: { amount: 99 },
+      idempotencyKey: 'req-browser-existing-001',
+    });
+
+    expect(oaBackendLoginService.resolveExecutionAuthConfig).not.toHaveBeenCalled();
+    expect(browserExecutor.execute).toHaveBeenCalledWith(expect.objectContaining({
+      payload: expect.objectContaining({
+        auth: expect.objectContaining({
+          cookie: 'XPU-SESSION=existing-session',
+          platformConfig: expect.objectContaining({
+            storageState: expect.objectContaining({
+              cookies: [expect.objectContaining({
+                name: 'XPU-SESSION',
+                value: 'existing-session',
+              })],
+            }),
+          }),
+        }),
+      }),
+    }));
   });
 });
 

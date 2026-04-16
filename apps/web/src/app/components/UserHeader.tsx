@@ -1,9 +1,9 @@
 'use client';
 
 import { useState, useEffect, useRef, useSyncExternalStore } from 'react';
-import { usePathname, useRouter } from 'next/navigation';
+import { usePathname } from 'next/navigation';
 import {
-  buildLoginHref,
+  getClientAuthServerSnapshot,
   clearClientAuth,
   getClientAuthSnapshot,
   subscribeClientAuth,
@@ -14,24 +14,12 @@ import { isOauth2AuthMode } from '../lib/auth-mode';
 export default function UserHeader() {
   const [showMenu, setShowMenu] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
-  const router = useRouter();
   const pathname = usePathname() || '';
   const snapshot = useSyncExternalStore(
     subscribeClientAuth,
     getClientAuthSnapshot,
-    getClientAuthSnapshot,
+    getClientAuthServerSnapshot,
   );
-
-  useEffect(() => {
-    if (pathname.startsWith('/login')) {
-      return;
-    }
-
-    if (!snapshot.hasSession) {
-      router.replace(buildLoginHref(`${window.location.pathname}${window.location.search}`));
-      return;
-    }
-  }, [router, pathname, snapshot.hasSession]);
 
   useEffect(() => {
     const handleClickOutside = (e: MouseEvent) => {

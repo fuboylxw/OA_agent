@@ -37,15 +37,18 @@ export class DeliveryCapabilityRouter {
     const executionModes = (uiHints.executionModes as Record<string, any> | undefined) || {};
     const rpaDefinition = uiHints.rpaDefinition as RpaFlowDefinition | undefined;
     const endpoints = Array.isArray(uiHints.endpoints) ? uiHints.endpoints : [];
+    const runtime = rpaDefinition?.runtime;
     const hasApiSubmit = this.includesMode(executionModes.submit, 'api')
       || endpoints.some((endpoint) => endpoint?.category === 'submit' && String(endpoint?.method || '').toUpperCase() !== 'RPA');
     const hasApiQuery = this.includesMode(executionModes.queryStatus, 'api')
       || endpoints.some((endpoint) => ['query', 'status_query'].includes(endpoint?.category) && String(endpoint?.method || '').toUpperCase() !== 'RPA');
     const hasRpaSubmit = !!rpaDefinition?.actions?.submit;
     const hasRpaQuery = !!rpaDefinition?.actions?.queryStatus;
+    const hasUrlSubmit = hasRpaSubmit || this.hasNetworkRequest(runtime?.networkSubmit);
+    const hasUrlQuery = hasRpaQuery || this.hasNetworkRequest(runtime?.networkStatus);
     const hasVisionTargets = this.hasImageTargets(rpaDefinition);
     const hasUrlEntry = !!(rpaDefinition?.platform?.entryUrl || rpaDefinition?.platform?.jumpUrlTemplate || rpaDefinition?.platform?.ticketBrokerUrl);
-    const hasUrlCapability = (hasRpaSubmit || hasRpaQuery) && hasUrlEntry;
+    const hasUrlCapability = (hasUrlSubmit || hasUrlQuery) && hasUrlEntry;
     const hasVisionCapability = hasRpaSubmit || hasRpaQuery;
 
     const apiHealth = this.resolveApiHealth(template.connector, hasApiSubmit || hasApiQuery);
@@ -62,13 +65,13 @@ export class DeliveryCapabilityRouter {
       },
       url: {
         available: hasUrlCapability,
-        submitEnabled: hasRpaSubmit,
-        queryEnabled: hasRpaQuery,
+        submitEnabled: hasUrlSubmit,
+        queryEnabled: hasUrlQuery,
         health: urlHealth,
         entryUrl: rpaDefinition?.platform?.entryUrl,
         jumpUrlTemplate: rpaDefinition?.platform?.jumpUrlTemplate,
         ticketBrokerUrl: rpaDefinition?.platform?.ticketBrokerUrl,
-        executorMode: this.normalizeExecutorMode(rpaDefinition?.runtime?.executorMode),
+        executorMode: this.resolveUrlExecutorMode(runtime),
       },
       vision: {
         available: hasVisionCapability,
@@ -216,6 +219,29 @@ export class DeliveryCapabilityRouter {
     if (normalized === 'browser' || normalized === 'local' || normalized === 'http' || normalized === 'stub') {
       return normalized as DeliveryCapabilitySummary['url']['executorMode'];
     }
+    return undefined;
+  }
+
+  private hasNetworkRequest(value: unknown) {
+    return Boolean(
+      value
+      && typeof value === 'object'
+      && !Array.isArray(value)
+      && typeof (value as Record<string, any>).url === 'string'
+      && (value as Record<string, any>).url.trim(),
+    );
+  }
+
+  private resolveUrlExecutorMode(runtime: RpaFlowDefinition['runtime']) {
+    const explicit = this.normalizeExecutorMode(runtime?.executorMode);
+    if (explicit) {
+      return explicit;
+    }
+
+    if (this.hasNetworkRequest(runtime?.networkSubmit) || this.hasNetworkRequest(runtime?.networkStatus)) {
+      return 'http';
+    }
+
     return undefined;
   }
 

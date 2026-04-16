@@ -163,6 +163,10 @@ export class VisionTargetResolver {
         score += 95;
       }
 
+      if (score === 0) {
+        continue;
+      }
+
       score += this.roleBonus(element.role, preferredRoles);
       if (score > best.score) {
         best = {
@@ -211,6 +215,10 @@ export class VisionTargetResolver {
         } else if (this.tokenOverlap(candidate, normalizedText) > 0) {
           score = Math.max(score, 65);
         }
+      }
+
+      if (score === 0) {
+        continue;
       }
 
       score += this.roleBonus(element.role, preferredRoles);

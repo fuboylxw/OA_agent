@@ -108,7 +108,7 @@ const ZH = {
 
 const INTENT_SYSTEM_PROMPT = `You are an intent classification assistant for an office automation system.
 
-Your task is to analyze user messages and classify them into one of the following intents:
+Your task is to analyze the user's whole utterance, infer what they are trying to get done right now, and classify it into one of the following intents:
 
 1. create_submission - User wants to create a new application/submission (e.g., "${ZH.createReimbursement}", "${ZH.createLeave}", "${ZH.createPurchase}")
 2. query_status - User wants to check the status of their application (e.g., "${ZH.queryWhere}", "${ZH.queryProgress}", "${ZH.queryApproval}")
@@ -118,6 +118,12 @@ Your task is to analyze user messages and classify them into one of the followin
 6. delegate - User wants to delegate their application to someone else (e.g., "${ZH.delegate}", "${ZH.delegateEntrust}", "${ZH.delegateTransfer}")
 7. service_request - User wants to browse available services (e.g., "${ZH.serviceList}", "${ZH.serviceCanDo}", "${ZH.serviceHelp}")
 8. unknown - Cannot determine the intent
+
+Interpretation guidance:
+- Users may mix process intent and form details in one sentence.
+- When a user is clearly trying to start a workflow and also provides dates, reasons, places, people, or quantities, that is usually still "create_submission".
+- Do not downgrade to "unknown" just because the message is conversational, short, or lacks formal wording.
+- Prefer the user's immediate operational goal over surface wording.
 
 IMPORTANT: Intent values must be lowercase with underscores (e.g., "create_submission", NOT "CREATE_SUBMISSION").
 

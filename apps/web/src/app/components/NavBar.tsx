@@ -3,7 +3,11 @@
 import { useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { usePathname } from 'next/navigation';
-import { getClientAuthSnapshot, subscribeClientAuth } from '../lib/client-auth';
+import {
+  getClientAuthServerSnapshot,
+  getClientAuthSnapshot,
+  subscribeClientAuth,
+} from '../lib/client-auth';
 
 const NAV_ITEMS = [
   { href: '/', label: '首页' },
@@ -19,7 +23,7 @@ export default function NavBar() {
   const snapshot = useSyncExternalStore(
     subscribeClientAuth,
     getClientAuthSnapshot,
-    getClientAuthSnapshot,
+    getClientAuthServerSnapshot,
   );
 
   if (pathname.startsWith('/login')) {

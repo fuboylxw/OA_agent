@@ -109,7 +109,7 @@ interface BeginDelegatedAuthResult {
   connectorName: string;
 }
 
-interface DelegatedAuthStatusResult {
+export interface DelegatedAuthStatusResult {
   connectorId: string;
   connectorName: string;
   status: 'bound' | 'pending' | 'expired' | 'failed' | 'not_bound';

@@ -19,6 +19,7 @@ export interface UrlDeliveryExecutionContext {
     entryUrl?: string;
     jumpUrlTemplate?: string;
     ticketBrokerUrl?: string;
+    portalUrl?: string;
   };
 }
 

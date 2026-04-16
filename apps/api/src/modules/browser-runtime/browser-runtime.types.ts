@@ -86,6 +86,10 @@ export interface BrowserSessionRecord {
   provider: string;
   requestedProvider: string;
   browserExecutablePath?: string;
+  storageState?: Record<string, any> | string;
+  cookies?: Array<Record<string, any>>;
+  cookieHeader?: string;
+  cookieOrigin?: string;
   headless: boolean;
   createdAt: string;
   activeTabId: string;

@@ -34,6 +34,9 @@ describe('BootstrapService', () => {
         {
           provide: PrismaService,
           useValue: {
+            connector: {
+              findFirst: jest.fn(),
+            },
             bootstrapJob: {
               create: jest.fn(),
               findFirst: jest.fn(),
@@ -149,6 +152,131 @@ describe('BootstrapService', () => {
           }),
         }),
       }));
+    });
+
+    it('binds the bootstrap job to an existing source system when connectorId is provided', async () => {
+      const mockJob = {
+        id: 'existing-connector-job-id',
+        tenantId: 'default-tenant',
+        status: 'CREATED',
+      };
+
+      jest.spyOn((prisma as any).connector, 'findFirst').mockResolvedValue({
+        id: 'connector-1',
+        name: '统一办公',
+        baseUrl: 'https://oa.example.com',
+        authConfig: {
+          authType: 'oauth2',
+          accessMode: 'direct_link',
+          bootstrapMode: 'rpa_only',
+          delegatedAuth: {
+            enabled: true,
+            mode: 'mock',
+          },
+          username: 'hidden-user',
+        },
+      } as any);
+      jest.spyOn(prisma.bootstrapJob, 'create').mockResolvedValue(mockJob as any);
+      jest.spyOn(prisma.bootstrapJob, 'findUnique').mockResolvedValue({
+        ...mockJob,
+        queueJobId: 'queue-job-id',
+        connectorId: 'connector-1',
+        name: '统一办公',
+        oaUrl: 'https://oa.example.com',
+        authConfig: {
+          authType: 'oauth2',
+          accessMode: 'direct_link',
+          bootstrapMode: 'rpa_only',
+          delegatedAuth: {
+            enabled: true,
+            mode: 'mock',
+          },
+          username: 'hidden-user',
+        },
+      } as any);
+
+      const result = await service.createJob({
+        tenantId: 'default-tenant',
+        connectorId: 'connector-1',
+        accessMode: 'direct_link',
+        rpaFlowContent: JSON.stringify({
+          flows: [{
+            processCode: 'expense_submit',
+            processName: 'Expense Submit',
+            actions: {
+              submit: {
+                steps: [
+                  { type: 'goto', value: 'https://oa.example.com/expense' },
+                  { type: 'click', target: { kind: 'text', value: '提交' } },
+                ],
+              },
+            },
+          }],
+        }),
+      });
+
+      expect((prisma as any).connector.findFirst).toHaveBeenCalledWith({
+        where: {
+          id: 'connector-1',
+          tenantId: 'default-tenant',
+        },
+        select: {
+          id: true,
+          name: true,
+          baseUrl: true,
+          authConfig: true,
+        },
+      });
+      expect(prisma.bootstrapJob.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          connectorId: 'connector-1',
+          name: '统一办公',
+          oaUrl: 'https://oa.example.com',
+          authConfig: expect.objectContaining({
+            authType: 'oauth2',
+            accessMode: 'direct_link',
+            bootstrapMode: 'rpa_only',
+            delegatedAuth: {
+              enabled: true,
+              mode: 'mock',
+            },
+            username: 'hidden-user',
+          }),
+        }),
+      }));
+      expect(prisma.bootstrapSource.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          bootstrapJobId: mockJob.id,
+          sourceType: 'oa_url',
+          sourceUrl: 'https://oa.example.com',
+        }),
+      }));
+      expect(prisma.bootstrapSource.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          bootstrapJobId: mockJob.id,
+          sourceType: 'manual_rpa',
+          metadata: expect.objectContaining({
+            accessMode: 'direct_link',
+            sourceType: 'direct_link',
+          }),
+        }),
+      }));
+      expect(result).toEqual(expect.objectContaining({
+        queueJobId: 'queue-job-id',
+        connectorId: 'connector-1',
+        name: '统一办公',
+        oaUrl: 'https://oa.example.com',
+        authConfig: expect.objectContaining({
+          authType: 'oauth2',
+          accessMode: 'direct_link',
+          bootstrapMode: 'rpa_only',
+          delegatedAuth: {
+            enabled: true,
+            mode: 'mock',
+          },
+        }),
+      }));
+      expect((result as any).authConfig.username).toBeUndefined();
     });
 
     it('preserves delegated auth settings while sanitizing sensitive runtime secrets', async () => {
@@ -653,6 +781,38 @@ describe('BootstrapService', () => {
         }),
       }));
       expect(mockQueue.add).toHaveBeenCalled();
+    });
+  });
+
+  describe('deleteJob', () => {
+    it('blocks deleting a published bootstrap job while its connector still exists', async () => {
+      jest.spyOn(prisma.bootstrapJob, 'findFirst').mockResolvedValue({
+        id: 'job-1',
+        tenantId: 'default-tenant',
+        status: 'PUBLISHED',
+        connectorId: 'connector-1',
+      } as any);
+
+      await expect(service.deleteJob('job-1', 'default-tenant')).rejects.toThrow(
+        '已发布并绑定连接器的初始化任务不可删除',
+      );
+    });
+
+    it('allows deleting a published bootstrap job after its connector has been removed', async () => {
+      (prisma.bootstrapJob as any).delete = jest.fn().mockResolvedValue({ id: 'job-1' });
+      jest.spyOn(prisma.bootstrapJob, 'findFirst').mockResolvedValue({
+        id: 'job-1',
+        tenantId: 'default-tenant',
+        status: 'PUBLISHED',
+        connectorId: null,
+      } as any);
+
+      const result = await service.deleteJob('job-1', 'default-tenant');
+
+      expect((prisma.bootstrapJob as any).delete).toHaveBeenCalledWith({
+        where: { id: 'job-1' },
+      });
+      expect(result).toEqual({ deleted: true, jobId: 'job-1' });
     });
   });
 

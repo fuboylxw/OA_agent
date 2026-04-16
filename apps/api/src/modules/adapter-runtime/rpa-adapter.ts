@@ -20,12 +20,17 @@ import type { LoadedRpaFlow } from './prisma-rpa-flow-loader';
 import { PlatformTicketBroker } from './platform-ticket-broker';
 import { LocalRpaExecutor } from './local-rpa-executor';
 import { BrowserRpaExecutor } from './browser-rpa-executor';
+import { OaBackendLoginService } from './oa-backend-login.service';
 
 export interface RpaAdapterConfig {
   connectorId: string;
   baseUrl: string;
   authType: string;
   authConfig: Record<string, any>;
+  authScope?: {
+    tenantId?: string;
+    userId?: string;
+  };
   oaVendor?: string;
   oaVersion?: string;
   oaType: 'openapi' | 'form-page' | 'hybrid';
@@ -41,6 +46,7 @@ export class RpaAdapter implements OAAdapter, AdapterLifecycle {
     private readonly ticketBroker: PlatformTicketBroker,
     private readonly localExecutor: LocalRpaExecutor,
     private readonly browserExecutor: BrowserRpaExecutor,
+    private readonly oaBackendLoginService?: OaBackendLoginService,
   ) {
     this.client = axios.create({
       timeout: 30000,
@@ -164,11 +170,16 @@ export class RpaAdapter implements OAAdapter, AdapterLifecycle {
   ): Promise<SubmitResult> {
     const definition = flow.rpaDefinition;
     const runtime = definition.runtime || {};
+    const endpoint = action === 'submit' ? runtime.submitEndpoint : runtime.statusEndpoint;
+    const executionAuthConfig = await this.resolveExecutionAuthConfig(
+      definition,
+      !endpoint && runtime.executorMode !== 'stub',
+    );
     const ticket = await this.ticketBroker.issueTicket({
       connectorId: this.config.connectorId,
       processCode: flow.processCode,
       action,
-      authConfig: this.config.authConfig,
+      authConfig: executionAuthConfig,
       flow: definition,
     });
 
@@ -189,7 +200,6 @@ export class RpaAdapter implements OAAdapter, AdapterLifecycle {
       };
     }
 
-    const endpoint = action === 'submit' ? runtime.submitEndpoint : runtime.statusEndpoint;
     if (endpoint) {
       try {
         const response = await this.client.post(
@@ -250,7 +260,7 @@ export class RpaAdapter implements OAAdapter, AdapterLifecycle {
       runtime,
       payload: {
         ...payload,
-        auth: this.config.authConfig,
+        auth: executionAuthConfig,
       },
       ticket,
     });
@@ -276,5 +286,70 @@ export class RpaAdapter implements OAAdapter, AdapterLifecycle {
       ...(flow.actions?.queryStatus?.steps || []),
     ];
     return steps.some((step) => step.target?.kind === 'image') ? 'vision' : 'url';
+  }
+
+  private async resolveExecutionAuthConfig(definition: RpaFlowDefinition, shouldRefreshBackendLogin: boolean) {
+    let authConfig = this.config.authConfig;
+    if (
+      !shouldRefreshBackendLogin
+      || !this.oaBackendLoginService
+      || this.hasSessionBootstrap(authConfig)
+    ) {
+      return authConfig;
+    }
+
+    const resolved = await this.oaBackendLoginService.resolveExecutionAuthConfig({
+      connectorId: this.config.connectorId,
+      authType: this.config.authType,
+      authConfig,
+      authScope: this.config.authScope,
+      flow: definition,
+    });
+    if (!resolved?.authConfig) {
+      return authConfig;
+    }
+
+    authConfig = this.mergeAuthConfig(authConfig, resolved.authConfig);
+    return authConfig;
+  }
+
+  private hasSessionBootstrap(authConfig: Record<string, any>) {
+    const platformConfig = this.asRecord(authConfig.platformConfig);
+    const storageState = this.asRecord(platformConfig.storageState);
+    return Boolean(
+      (typeof authConfig.cookie === 'string' && authConfig.cookie.trim())
+      || (typeof authConfig.sessionCookie === 'string' && authConfig.sessionCookie.trim())
+      || (Array.isArray(storageState.cookies) && storageState.cookies.length > 0)
+      || (Array.isArray(platformConfig.cookies) && platformConfig.cookies.length > 0)
+    );
+  }
+
+  private asRecord(value: unknown): Record<string, any> {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return {};
+    }
+
+    return value as Record<string, any>;
+  }
+
+  private mergeAuthConfig(baseConfig: Record<string, any>, resolvedConfig: Record<string, any>) {
+    const merged = {
+      ...baseConfig,
+      ...resolvedConfig,
+    };
+
+    const basePlatformConfig = baseConfig.platformConfig;
+    const resolvedPlatformConfig = resolvedConfig.platformConfig;
+    if (
+      (basePlatformConfig && typeof basePlatformConfig === 'object' && !Array.isArray(basePlatformConfig))
+      || (resolvedPlatformConfig && typeof resolvedPlatformConfig === 'object' && !Array.isArray(resolvedPlatformConfig))
+    ) {
+      merged.platformConfig = {
+        ...((basePlatformConfig as Record<string, any> | undefined) || {}),
+        ...((resolvedPlatformConfig as Record<string, any> | undefined) || {}),
+      };
+    }
+
+    return merged;
   }
 }

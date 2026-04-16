@@ -159,6 +159,71 @@ describe('BootstrapProcessor RPA publishing', () => {
     );
   });
 
+  it('prefers the final business jump URL over the portal entry URL when resolving connector baseUrl', () => {
+    const { prisma } = createTxMocks();
+    const processor = new BootstrapProcessor(prisma as any);
+
+    const baseUrl = (processor as any).resolveBaseUrl({
+      oaUrl: 'https://sz.xpu.edu.cn',
+      openApiUrl: null,
+      authConfig: {
+        platformConfig: {
+          entryUrl: 'https://sz.xpu.edu.cn/#/home?component=thirdScreen',
+        },
+      },
+      sources: [
+        {
+          sourceType: 'manual_rpa',
+          sourceContent: JSON.stringify({
+            flows: [{
+              ...createRpaDefinition(),
+              platform: {
+                entryUrl: 'https://sz.xpu.edu.cn/#/home?component=thirdScreen',
+                jumpUrlTemplate: 'https://oa2023.xpu.edu.cn/seeyon/collaboration/collaboration.do?method=newColl',
+              },
+            }],
+          }),
+          metadata: {},
+        },
+      ],
+    });
+
+    expect(baseUrl).toBe('https://oa2023.xpu.edu.cn');
+  });
+
+  it('uses explicit businessBaseUrl before any portal or jump URL hints', () => {
+    const { prisma } = createTxMocks();
+    const processor = new BootstrapProcessor(prisma as any);
+
+    const baseUrl = (processor as any).resolveBaseUrl({
+      oaUrl: 'https://sz.xpu.edu.cn',
+      openApiUrl: null,
+      authConfig: {
+        platformConfig: {
+          entryUrl: 'https://sz.xpu.edu.cn/#/home?component=thirdScreen',
+          businessBaseUrl: 'https://oa2023.xpu.edu.cn',
+        },
+      },
+      sources: [
+        {
+          sourceType: 'manual_rpa',
+          sourceContent: JSON.stringify({
+            flows: [{
+              ...createRpaDefinition(),
+              platform: {
+                entryUrl: 'https://sz.xpu.edu.cn/#/home?component=thirdScreen',
+                jumpUrlTemplate: 'https://other.example.com/workflow/new',
+              },
+            }],
+          }),
+          metadata: {},
+        },
+      ],
+    });
+
+    expect(baseUrl).toBe('https://oa2023.xpu.edu.cn');
+  });
+
   it('publishes form-page connectors and rpa execution modes for RPA-only jobs', async () => {
     const { prisma, connectorUpsert, processTemplateCreate, tx } = createTxMocks();
     const processor = new BootstrapProcessor(prisma as any);

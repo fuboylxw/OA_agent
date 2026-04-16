@@ -43,6 +43,12 @@ export interface BrowserEngineAdapter {
     tab: BrowserTabRecord,
     element: BrowserSnapshotElement | undefined,
   ): Promise<any>;
+  evaluate(
+    session: BrowserSessionRecord,
+    tab: BrowserTabRecord,
+    script: string,
+    context?: Record<string, any>,
+  ): Promise<any>;
   download(
     session: BrowserSessionRecord,
     tab: BrowserTabRecord,
@@ -185,6 +191,16 @@ class StubBrowserEngineAdapter implements BrowserEngineAdapter {
     }
 
     return element?.text || element?.label || '';
+  }
+
+  async evaluate(
+    _session: BrowserSessionRecord,
+    tab: BrowserTabRecord,
+    script: string,
+    _context?: Record<string, any>,
+  ) {
+    tab.artifacts.lastEvaluatedScript = String(script || '').slice(0, 2000);
+    return undefined;
   }
 
   async download(

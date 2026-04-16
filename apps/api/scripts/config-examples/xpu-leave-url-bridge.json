@@ -1,0 +1,145 @@
+{
+  "oaVendor": "xpu",
+  "processCode": "leave_request",
+  "processName": "请假申请",
+  "processCategory": "人事",
+  "description": "XPU OA URL 直达请假流程",
+  "sourceVersion": "xpu-url-bridge-v1",
+  "schema": {
+    "fields": [
+      {
+        "key": "reason",
+        "label": "请假事由",
+        "type": "textarea",
+        "required": true
+      },
+      {
+        "key": "startDate",
+        "label": "开始日期",
+        "type": "date",
+        "required": true
+      },
+      {
+        "key": "endDate",
+        "label": "结束日期",
+        "type": "date",
+        "required": true
+      },
+      {
+        "key": "location",
+        "label": "外出地点",
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "contactPhone",
+        "label": "联系电话",
+        "type": "text",
+        "required": true
+      },
+      {
+        "key": "returnDate",
+        "label": "销假日期",
+        "type": "date",
+        "required": false
+      }
+    ]
+  },
+  "platform": {
+    "entryUrl": "https://sz.xpu.edu.cn/#/home?component=thirdScreen",
+    "businessBaseUrl": "https://oa2023.xpu.edu.cn",
+    "targetBaseUrl": "https://oa2023.xpu.edu.cn",
+    "jumpUrlTemplate": "https://oa2023.xpu.edu.cn/seeyon/collaboration/collaboration.do?method=newColl&from=templateNewColl&templateId=-4191060420802230640&showTab=true",
+    "portalSsoBridge": {
+      "enabled": true,
+      "mode": "oa_info",
+      "portalUrl": "https://sz.xpu.edu.cn/#/home?component=thirdScreen",
+      "oaInfoUrl": "https://sz.xpu.edu.cn/gate/lobby/api/oa/info",
+      "sourcePath": "coordinateUrl",
+      "targetPathTemplate": "/seeyon/collaboration/collaboration.do?method=newColl&from=templateNewColl&templateId=-4191060420802230640&showTab=true",
+      "required": true
+    }
+  },
+  "runtime": {
+    "executorMode": "browser",
+    "browserProvider": "playwright",
+    "preflight": {
+      "steps": [
+        {
+          "type": "evaluate",
+          "builtin": "capture_form_submit",
+          "description": "通过通用表单提交捕获插件填充页面并提取保存待发载荷",
+          "options": {
+            "frame": {
+              "name": "zwIframe"
+            },
+            "fieldMappings": [
+              {
+                "target": { "id": "field0004" },
+                "sources": ["reason", "leaveReason", "content", "description"]
+              },
+              {
+                "target": { "id": "field0005" },
+                "sources": ["startDate", "startTime", "leaveStart", "beginDate"]
+              },
+              {
+                "target": { "id": "field0006" },
+                "sources": ["endDate", "endTime", "leaveEnd", "finishDate"]
+              },
+              {
+                "target": { "id": "field0007" },
+                "sources": ["location", "destination", "place"]
+              },
+              {
+                "target": { "id": "field0008" },
+                "sources": ["contact", "contactPhone", "phone", "mobile"]
+              },
+              {
+                "target": { "id": "field0012" },
+                "sources": ["returnDate", "cancelDate", "销假日期"]
+              }
+            ],
+            "trigger": {
+              "text": "保存待发",
+              "exact": true,
+              "scope": "root"
+            },
+            "capture": {
+              "actionPattern": "collaboration\\.do\\?method=saveDraft",
+              "timeoutMs": 10000
+            },
+            "output": {
+              "captureKey": "saveDraft",
+              "fieldsKey": "saveDraftFields",
+              "csrfKey": "csrfToken",
+              "filledFieldsKey": "filledFields",
+              "captureEventCountKey": "captureEventCount"
+            }
+          }
+        }
+      ]
+    },
+    "networkSubmit": {
+      "url": "{{preflight.saveDraft.action}}",
+      "method": "POST",
+      "bodyMode": "form",
+      "successMode": "http2xx",
+      "completionKind": "draft",
+      "headers": {
+        "Origin": "https://oa2023.xpu.edu.cn",
+        "Referer": "{{jumpUrl}}"
+      },
+      "body": {
+        "CSRFTOKEN": { "source": "preflight.csrfToken", "default": "" },
+        "_json_params": { "source": "preflight.saveDraft.fields._json_params" }
+      },
+      "responseMapping": {
+        "messagePath": "msg"
+      }
+    }
+  },
+  "executionModes": {
+    "submit": ["url"],
+    "queryStatus": ["url"]
+  }
+}

@@ -11,6 +11,7 @@ import {
 import type { StatusResult, SubmitResult } from '@uniflow/oa-adapters';
 import type { DeliveryStatusExecutionResult, DeliverySubmitExecutionResult } from './delivery-agent.types';
 import type { VisionDeliveryExecutionContext } from './delivery-bootstrap.types';
+import { confirmRpaSubmit } from './rpa-submit-confirmation.util';
 import { VisionTaskRuntime } from './vision-task-runtime';
 
 interface BaseVisionExecutionInput {
@@ -62,9 +63,15 @@ export class VisionDeliveryService {
       ticket,
     });
 
-    const submissionId = result.success
-      ? this.resolveSubmissionId(input.processCode, input.idempotencyKey, result.extractedValues)
-      : undefined;
+    const confirmation = result.success
+      ? confirmRpaSubmit({
+          actionDefinition,
+          extractedValues: result.extractedValues,
+          finalSnapshot: result.finalSnapshot,
+          fallbackMessage: this.resolveMessage(result.extractedValues),
+        })
+      : null;
+    const submissionId = confirmation?.submissionId;
     const message = this.resolveMessage(result.extractedValues);
     const metadata = sanitizeStructuredData({
       connectorId: input.connectorId,
@@ -78,6 +85,7 @@ export class VisionDeliveryService {
       finalSnapshotId: result.finalSnapshot?.snapshotId,
       warnings: result.warnings,
       observation: input.context.observation,
+      submitConfirmation: confirmation,
       session: {
         executor: 'browser',
         provider: result.provider,
@@ -90,7 +98,7 @@ export class VisionDeliveryService {
       message,
     });
 
-    const submitResult: SubmitResult = result.success
+    const submitResult: SubmitResult = result.success && confirmation?.confirmed
       ? {
           success: true,
           submissionId,
@@ -98,7 +106,9 @@ export class VisionDeliveryService {
         }
       : {
           success: false,
-          errorMessage: result.errorMessage || `${input.processName} vision submit failed`,
+          errorMessage: result.errorMessage
+            || confirmation?.failureReason
+            || `${input.processName} vision submit failed`,
           metadata,
         };
 
@@ -298,22 +308,6 @@ export class VisionDeliveryService {
     return action === 'submit'
       ? flow?.actions?.submit
       : flow?.actions?.queryStatus;
-  }
-
-  private resolveSubmissionId(
-    processCode: string,
-    idempotencyKey: string,
-    extractedValues: Record<string, any>,
-  ) {
-    const explicit = extractedValues.submissionId || extractedValues.submission_id || extractedValues.billNo;
-    if (explicit) {
-      return String(explicit);
-    }
-
-    const suffix = String(idempotencyKey || 'vision')
-      .replace(/[^a-zA-Z0-9]/g, '')
-      .slice(-10) || Date.now().toString();
-    return `VISION-${processCode.toUpperCase()}-${suffix}`;
   }
 
   private resolveStatus(submissionId: string | undefined, extractedValues: Record<string, any>) {

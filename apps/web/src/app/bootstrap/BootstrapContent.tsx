@@ -11,31 +11,17 @@ import {
 } from 'react';
 import Link from 'next/link';
 import { apiClient } from '../lib/api-client';
+import {
+  ACCESS_MODE_META,
+  type AccessModeKey as AccessMode,
+  resolveAccessModeFromAuthConfig,
+} from '../lib/connector-access-mode';
 
 const TERMINAL_STATUSES = ['PUBLISHED', 'FAILED', 'VALIDATION_FAILED', 'PARTIALLY_PUBLISHED', 'MANUAL_REVIEW'];
-
-const ACCESS_MODE_META = {
-  backend_api: {
-    label: '接口接入',
-    description: '手里有接口文档文件时，直接上传文件即可。',
-    badge: '接口接入',
-  },
-  direct_link: {
-    label: '链接直达接入',
-    description: '有系统入口链接和流程文件时使用。',
-    badge: '链接直达接入',
-  },
-  text_guide: {
-    label: '文字示教接入',
-    description: '不会写流程也没关系，把平时怎么操作写下来就行。',
-    badge: '文字示教接入',
-  },
-} as const;
-
-type AccessMode = keyof typeof ACCESS_MODE_META;
 type ReactivateMode = 'reuse' | 'new';
 type ExecutorMode = 'local' | 'browser' | 'http' | 'stub';
 type ApiDocType = 'openapi' | 'swagger' | 'custom';
+type ConnectorMode = 'new' | 'existing';
 type FormSetter = Dispatch<SetStateAction<BootstrapFormState>>;
 
 type PlatformConfig = {
@@ -47,6 +33,8 @@ type PlatformConfig = {
 };
 
 type BootstrapFormState = {
+  connectorMode: ConnectorMode;
+  connectorId: string;
   name: string;
   oaUrl: string;
   accessMode: AccessMode;
@@ -69,8 +57,17 @@ type BootstrapJob = {
   authConfig?: Record<string, any> | null;
 };
 
+type ConnectorOption = {
+  id: string;
+  name: string;
+  baseUrl?: string | null;
+  oaType?: string | null;
+};
+
 function createEmptyFormState(): BootstrapFormState {
   return {
+    connectorMode: 'new',
+    connectorId: '',
     name: '',
     oaUrl: '',
     accessMode: 'backend_api',
@@ -127,16 +124,14 @@ function toLegacyBootstrapMode(accessMode: AccessMode) {
 }
 
 function resolveAccessModeFromJob(job: BootstrapJob): AccessMode {
-  const accessMode = job?.authConfig?.accessMode;
-  if (accessMode === 'backend_api' || accessMode === 'direct_link' || accessMode === 'text_guide') {
-    return accessMode;
-  }
-  return job?.authConfig?.bootstrapMode === 'rpa_only' ? 'direct_link' : 'backend_api';
+  return resolveAccessModeFromAuthConfig(job?.authConfig) || 'backend_api';
 }
 
 function getBootstrapValidationMessage(
-  value: Pick<BootstrapFormState, 'accessMode' | 'apiDocContent' | 'apiDocUrl' | 'rpaFlowContent'>,
+  value: Pick<BootstrapFormState, 'connectorMode' | 'connectorId' | 'accessMode' | 'apiDocContent' | 'apiDocUrl' | 'rpaFlowContent'>,
 ) {
+  if (value.connectorMode === 'existing' && !value.connectorId) return '请选择要导入的连接器。';
+
   const hasApi = Boolean(value.apiDocContent.trim());
   const hasRpa = Boolean(value.rpaFlowContent.trim());
 
@@ -151,8 +146,12 @@ function buildPayload(formData: BootstrapFormState) {
     accessMode: formData.accessMode,
     bootstrapMode: toLegacyBootstrapMode(formData.accessMode),
   };
-  if (formData.name.trim()) payload.name = formData.name.trim();
-  if (formData.oaUrl.trim()) payload.oaUrl = formData.oaUrl.trim();
+  if (formData.connectorMode === 'existing') {
+    if (formData.connectorId) payload.connectorId = formData.connectorId;
+  } else {
+    if (formData.name.trim()) payload.name = formData.name.trim();
+    if (formData.oaUrl.trim()) payload.oaUrl = formData.oaUrl.trim();
+  }
 
   const authConfig = normalizeAuthConfig(formData.authConfig);
   if (Object.keys(authConfig).length > 0) payload.authConfig = authConfig;
@@ -219,14 +218,86 @@ function BasicFields({ state, onChange }: { state: BootstrapFormState; onChange:
   return (
     <section className="grid grid-cols-1 gap-4 rounded-xl border border-gray-200 p-4 sm:grid-cols-2">
       <div>
-        <label className="mb-1 block text-sm font-medium text-gray-700">任务名称（选填）</label>
-        <input className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" value={state.name} onChange={(e) => onChange((prev) => ({ ...prev, name: e.target.value }))} placeholder="例如：财务 OA 初始化" />
+        <label className="mb-1 block text-sm font-medium text-gray-700">系统名称（选填）</label>
+        <input disabled={state.connectorMode === 'existing'} className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-500" value={state.name} onChange={(e) => onChange((prev) => ({ ...prev, name: e.target.value }))} placeholder="例如：财务 OA" />
       </div>
       <div>
         <label className="mb-1 block text-sm font-medium text-gray-700">系统网址（选填）</label>
-        <input className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" value={state.oaUrl} onChange={(e) => onChange((prev) => ({ ...prev, oaUrl: e.target.value }))} placeholder="https://oa.example.com" />
-        <p className="mt-1 text-xs text-gray-500">不知道也可以先不填；后面在步骤里写网址也能识别。</p>
+        <input disabled={state.connectorMode === 'existing'} className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-500" value={state.oaUrl} onChange={(e) => onChange((prev) => ({ ...prev, oaUrl: e.target.value }))} placeholder="https://oa.example.com" />
+        <p className="mt-1 text-xs text-gray-500">{state.connectorMode === 'existing' ? '已有连接器的名称和地址由连接器管理维护。' : '不知道也可以先不填；后面在步骤里写网址也能识别。'}</p>
       </div>
+    </section>
+  );
+}
+
+function SourceSystemFields({
+  connectors,
+  state,
+  onChange,
+}: {
+  connectors: ConnectorOption[];
+  state: BootstrapFormState;
+  onChange: FormSetter;
+}) {
+  const selectedConnector = connectors.find((connector) => connector.id === state.connectorId);
+
+  return (
+    <section className="space-y-3 rounded-xl border border-gray-200 p-4">
+      <div>
+        <h3 className="text-sm font-semibold text-gray-900">所属连接器</h3>
+        <p className="mt-1 text-xs text-gray-500">初始化中心用于批量导入流程。先选择已有连接器；如果没有，就创建一个新的连接器。</p>
+      </div>
+      <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+        <button
+          type="button"
+          onClick={() => onChange((prev) => ({ ...prev, connectorMode: 'existing' }))}
+          className={`rounded-xl border p-4 text-left ${state.connectorMode === 'existing' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}
+        >
+          <div className="text-sm font-semibold text-gray-900">导入到已有连接器</div>
+          <p className="mt-1 text-xs leading-5 text-gray-600">适合同一个 OA 连接器继续批量添加新流程。</p>
+        </button>
+        <button
+          type="button"
+          onClick={() => onChange((prev) => ({ ...prev, connectorMode: 'new', connectorId: '' }))}
+          className={`rounded-xl border p-4 text-left ${state.connectorMode === 'new' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}
+        >
+          <div className="text-sm font-semibold text-gray-900">创建新连接器</div>
+          <p className="mt-1 text-xs leading-5 text-gray-600">适合还没有初始化过的新 OA 系统。</p>
+        </button>
+      </div>
+
+      {state.connectorMode === 'existing' && (
+        <div>
+          <label className="mb-1 block text-sm font-medium text-gray-700">选择连接器</label>
+          <select
+            className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
+            value={state.connectorId}
+            onChange={(event) => {
+              const connector = connectors.find((item) => item.id === event.target.value);
+              onChange((prev) => ({
+                ...prev,
+                connectorId: event.target.value,
+                name: connector?.name || '',
+                oaUrl: connector?.baseUrl || '',
+              }));
+            }}
+          >
+            <option value="">请选择连接器</option>
+            {connectors.map((connector) => (
+              <option key={connector.id} value={connector.id}>
+                {connector.name}
+                {connector.baseUrl ? ` - ${connector.baseUrl}` : ''}
+              </option>
+            ))}
+          </select>
+          {selectedConnector && (
+            <p className="mt-1 text-xs text-gray-500">将把本次批量解析出的流程发布到连接器：{selectedConnector.name}</p>
+          )}
+          {connectors.length === 0 && (
+            <p className="mt-1 text-xs text-amber-700">当前还没有连接器，请选择“创建新连接器”。</p>
+          )}
+        </div>
+      )}
     </section>
   );
 }
@@ -446,6 +517,7 @@ function FlowFields({
 
 export default function BootstrapContent({ initialJobs }: { initialJobs: BootstrapJob[] }) {
   const [jobs, setJobs] = useState<BootstrapJob[]>(initialJobs);
+  const [connectors, setConnectors] = useState<ConnectorOption[]>([]);
   const [showCreateModal, setShowCreateModal] = useState(false);
   const [formData, setFormData] = useState(createEmptyFormState());
   const [uploadFileName, setUploadFileName] = useState('');
@@ -473,9 +545,20 @@ export default function BootstrapContent({ initialJobs }: { initialJobs: Bootstr
     }
   }, []);
 
+  const loadConnectors = useCallback(async () => {
+    try {
+      const response = await apiClient.get('/connectors');
+      setConnectors(response.data || []);
+    } catch (error) {
+      console.error('Failed to load connectors:', error);
+      setConnectors([]);
+    }
+  }, []);
+
   useEffect(() => {
     void loadJobs();
-  }, [loadJobs]);
+    void loadConnectors();
+  }, [loadJobs, loadConnectors]);
 
   useEffect(() => {
     if (!jobs.some((job) => !TERMINAL_STATUSES.includes(job.status))) return undefined;
@@ -620,7 +703,8 @@ export default function BootstrapContent({ initialJobs }: { initialJobs: Bootstr
                 const status = getStatusMeta(job);
                 const accessMode = resolveAccessModeFromJob(job);
                 const canReactivate = ['FAILED', 'VALIDATION_FAILED', 'PARTIALLY_PUBLISHED', 'MANUAL_REVIEW', 'CONNECTOR_DELETED'].includes(status.code);
-                const canDelete = ['FAILED', 'VALIDATION_FAILED', 'MANUAL_REVIEW', 'CONNECTOR_DELETED'].includes(status.code);
+                const canDelete = ['FAILED', 'VALIDATION_FAILED', 'MANUAL_REVIEW', 'CONNECTOR_DELETED'].includes(status.code)
+                  || (['PUBLISHED', 'PARTIALLY_PUBLISHED'].includes(status.code) && !job.connectorId);
                 return (
                   <tr key={job.id}>
                     <td className="px-4 py-3"><div className="text-sm font-medium text-gray-900">{job.name || `任务 #${job.id.substring(0, 8)}`}</div><div className="text-xs text-gray-500">{job.oaUrl || job.openApiUrl || '-'}</div></td>
@@ -635,11 +719,11 @@ export default function BootstrapContent({ initialJobs }: { initialJobs: Bootstr
           </table>
         </div>
 
-        {showCreateModal && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"><div className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-2xl bg-white shadow-xl"><div className="flex items-center justify-between border-b border-gray-200 px-8 py-5"><div><h2 className="text-xl font-bold text-gray-900">新建初始化任务</h2><p className="mt-0.5 text-sm text-gray-500">选择一种最接近你手头材料的方式，然后按提示上传即可。</p></div><button onClick={closeCreateModal} className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-gray-100"><i className="fas fa-times text-gray-500"></i></button></div><div className="flex-1 space-y-6 overflow-y-auto px-8 py-6">{createError && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">{createError}</div>}<ModeCards value={formData.accessMode} onChange={(accessMode) => setFormData((prev) => ({ ...prev, accessMode }))} /><BasicFields state={formData} onChange={setFormData} />{formData.accessMode === 'backend_api' ? <ApiDocFields uploadFileName={uploadFileName} onFileUpload={(event) => handleFileUpload(event, setFormData, 'apiDocContent', setUploadFileName)} /> : <FlowFields state={formData} onChange={setFormData} uploadFileName={flowUploadFileName} onFileUpload={(event) => handleFileUpload(event, setFormData, 'rpaFlowContent', setFlowUploadFileName)} />}<AdvancedFields state={formData} onChange={setFormData} showPlatformFields={formData.accessMode !== 'backend_api'} /></div><div className="flex items-center gap-3 border-t border-gray-200 bg-gray-50 px-8 py-5"><button onClick={closeCreateModal} className="rounded-lg border border-gray-300 px-5 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-100">取消</button><div className="flex-1">{createValidationMessage && <p className="text-xs text-amber-700">{createValidationMessage}</p>}</div><button onClick={createJob} disabled={creating || Boolean(createValidationMessage)} title={createValidationMessage || undefined} className="rounded-lg bg-blue-600 px-6 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">{creating ? '创建中...' : '创建任务'}</button></div></div></div>}
+        {showCreateModal && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"><div className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-2xl bg-white shadow-xl"><div className="flex items-center justify-between border-b border-gray-200 px-8 py-5"><div><h2 className="text-xl font-bold text-gray-900">新建初始化任务</h2><p className="mt-0.5 text-sm text-gray-500">初始化中心用于批量导入流程，并在需要时创建新的连接器。</p></div><button onClick={closeCreateModal} className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-gray-100"><i className="fas fa-times text-gray-500"></i></button></div><div className="flex-1 space-y-6 overflow-y-auto px-8 py-6">{createError && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">{createError}</div>}<SourceSystemFields connectors={connectors} state={formData} onChange={setFormData} /><ModeCards value={formData.accessMode} onChange={(accessMode) => setFormData((prev) => ({ ...prev, accessMode }))} /><BasicFields state={formData} onChange={setFormData} />{formData.accessMode === 'backend_api' ? <ApiDocFields uploadFileName={uploadFileName} onFileUpload={(event) => handleFileUpload(event, setFormData, 'apiDocContent', setUploadFileName)} /> : <FlowFields state={formData} onChange={setFormData} uploadFileName={flowUploadFileName} onFileUpload={(event) => handleFileUpload(event, setFormData, 'rpaFlowContent', setFlowUploadFileName)} />}<AdvancedFields state={formData} onChange={setFormData} showPlatformFields={formData.accessMode !== 'backend_api'} /></div><div className="flex items-center gap-3 border-t border-gray-200 bg-gray-50 px-8 py-5"><button onClick={closeCreateModal} className="rounded-lg border border-gray-300 px-5 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-100">取消</button><div className="flex-1">{createValidationMessage && <p className="text-xs text-amber-700">{createValidationMessage}</p>}</div><button onClick={createJob} disabled={creating || Boolean(createValidationMessage)} title={createValidationMessage || undefined} className="rounded-lg bg-blue-600 px-6 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">{creating ? '创建中...' : '创建任务'}</button></div></div></div>}
 
-        {reactivateJob && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"><div className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-2xl bg-white shadow-xl"><div className="flex items-center justify-between border-b border-gray-200 px-8 py-5"><div><h2 className="text-xl font-bold text-gray-900">重新激活初始化任务</h2><p className="mt-0.5 text-sm text-gray-500">{reactivateJob.name || `任务 #${reactivateJob.id.substring(0, 8)}`}</p></div><button onClick={closeReactivateModal} className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-gray-100"><i className="fas fa-times text-gray-500"></i></button></div><div className="flex-1 space-y-6 overflow-y-auto px-8 py-6">{reactivateError && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">{reactivateError}</div>}<div className="space-y-3"><label className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 ${reactivateMode === 'reuse' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}`} onClick={() => setReactivateMode('reuse')}><input type="radio" checked={reactivateMode === 'reuse'} readOnly className="mt-0.5" /><div><p className="text-sm font-medium text-gray-900">复用历史材料</p><p className="mt-0.5 text-xs text-gray-500">沿用上次的初始化材料重新执行。</p></div></label><label className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 ${reactivateMode === 'new' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}`} onClick={() => setReactivateMode('new')}><input type="radio" checked={reactivateMode === 'new'} readOnly className="mt-0.5" /><div><p className="text-sm font-medium text-gray-900">换新材料</p><p className="mt-0.5 text-xs text-gray-500">切换接入方式或重新上传新的初始化内容。</p></div></label></div><ModeCards value={reactivateDoc.accessMode} onChange={(accessMode) => setReactivateDoc((prev) => ({ ...prev, accessMode }))} /><BasicFields state={reactivateDoc} onChange={setReactivateDoc} />{reactivateMode === 'new' && (reactivateDoc.accessMode === 'backend_api' ? <ApiDocFields uploadFileName={reactivateFileName} onFileUpload={(event) => handleFileUpload(event, setReactivateDoc, 'apiDocContent', setReactivateFileName)} /> : <FlowFields state={reactivateDoc} onChange={setReactivateDoc} uploadFileName={reactivateFlowFileName} onFileUpload={(event) => handleFileUpload(event, setReactivateDoc, 'rpaFlowContent', setReactivateFlowFileName)} />)}<AdvancedFields state={reactivateDoc} onChange={setReactivateDoc} showPlatformFields={reactivateDoc.accessMode !== 'backend_api'} /></div><div className="flex items-center gap-3 border-t border-gray-200 bg-gray-50 px-8 py-5"><button onClick={closeReactivateModal} className="rounded-lg border border-gray-300 px-5 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-100">取消</button><div className="flex-1">{reactivateValidationMessage && <p className="text-xs text-amber-700">{reactivateValidationMessage}</p>}</div><button onClick={handleReactivate} disabled={reactivating || (reactivateMode === 'new' && Boolean(reactivateValidationMessage))} title={reactivateValidationMessage || undefined} className="rounded-lg bg-blue-600 px-6 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">{reactivating ? '处理中...' : '重新激活'}</button></div></div></div>}
+        {reactivateJob && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"><div className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-2xl bg-white shadow-xl"><div className="flex items-center justify-between border-b border-gray-200 px-8 py-5"><div><h2 className="text-xl font-bold text-gray-900">重新激活初始化任务</h2><p className="mt-0.5 text-sm text-gray-500">{reactivateJob.name || `任务 #${reactivateJob.id.substring(0, 8)}`}</p></div><button onClick={closeReactivateModal} className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-gray-100"><i className="fas fa-times text-gray-500"></i></button></div><div className="flex-1 space-y-6 overflow-y-auto px-8 py-6">{reactivateError && <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">{reactivateError}</div>}<div className="rounded-lg border border-blue-100 bg-blue-50/80 px-4 py-3 text-xs leading-5 text-blue-800">重新激活会重新创建该任务对应的连接器，并恢复这条初始化任务导入的流程。</div><div className="space-y-3"><label className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 ${reactivateMode === 'reuse' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}`} onClick={() => setReactivateMode('reuse')}><input type="radio" checked={reactivateMode === 'reuse'} readOnly className="mt-0.5" /><div><p className="text-sm font-medium text-gray-900">复用历史材料</p><p className="mt-0.5 text-xs text-gray-500">沿用这条初始化任务上次的材料，恢复它原先导入的流程。</p></div></label><label className={`flex cursor-pointer items-start gap-3 rounded-lg border p-3 ${reactivateMode === 'new' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:bg-gray-50'}`} onClick={() => setReactivateMode('new')}><input type="radio" checked={reactivateMode === 'new'} readOnly className="mt-0.5" /><div><p className="text-sm font-medium text-gray-900">换新材料</p><p className="mt-0.5 text-xs text-gray-500">切换接入方式或重新上传新的初始化内容。</p></div></label></div><ModeCards value={reactivateDoc.accessMode} onChange={(accessMode) => setReactivateDoc((prev) => ({ ...prev, accessMode }))} /><BasicFields state={reactivateDoc} onChange={setReactivateDoc} />{reactivateMode === 'new' && (reactivateDoc.accessMode === 'backend_api' ? <ApiDocFields uploadFileName={reactivateFileName} onFileUpload={(event) => handleFileUpload(event, setReactivateDoc, 'apiDocContent', setReactivateFileName)} /> : <FlowFields state={reactivateDoc} onChange={setReactivateDoc} uploadFileName={reactivateFlowFileName} onFileUpload={(event) => handleFileUpload(event, setReactivateDoc, 'rpaFlowContent', setReactivateFlowFileName)} />)}<AdvancedFields state={reactivateDoc} onChange={setReactivateDoc} showPlatformFields={reactivateDoc.accessMode !== 'backend_api'} /></div><div className="flex items-center gap-3 border-t border-gray-200 bg-gray-50 px-8 py-5"><button onClick={closeReactivateModal} className="rounded-lg border border-gray-300 px-5 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-100">取消</button><div className="flex-1">{reactivateValidationMessage && <p className="text-xs text-amber-700">{reactivateValidationMessage}</p>}</div><button onClick={handleReactivate} disabled={reactivating || (reactivateMode === 'new' && Boolean(reactivateValidationMessage))} title={reactivateValidationMessage || undefined} className="rounded-lg bg-blue-600 px-6 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50">{reactivating ? '处理中...' : '重新激活'}</button></div></div></div>}
 
-        {deleteConfirm && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"><div className="w-full max-w-sm rounded-2xl bg-white shadow-xl"><div className="px-6 py-5"><h3 className="text-base font-bold text-gray-900">删除初始化任务</h3><p className="mt-2 text-sm text-gray-600">这会永久删除当前任务及其相关产物。</p></div><div className="flex gap-3 border-t border-gray-200 px-6 py-4"><button onClick={() => setDeleteConfirm(null)} className="flex-1 rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50">取消</button><button onClick={async () => { if (!deleteConfirm) return; setDeleting(true); try { await apiClient.delete(`/bootstrap/jobs/${deleteConfirm.id}`); setDeleteConfirm(null); await loadJobs(); } catch { /* deletion failed — keep dialog open so user can retry */ } finally { setDeleting(false); } }} disabled={deleting} className="flex-1 rounded-lg bg-red-600 py-2.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50">{deleting ? '删除中...' : '删除'}</button></div></div></div>}
+        {deleteConfirm && <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4"><div className="w-full max-w-sm rounded-2xl bg-white shadow-xl"><div className="px-6 py-5"><h3 className="text-base font-bold text-gray-900">删除初始化任务</h3><p className="mt-2 text-sm text-gray-600">{deleteConfirm.connectorId && ['PUBLISHED', 'PARTIALLY_PUBLISHED'].includes(deleteConfirm.status) ? '要彻底删除这个系统，请先在连接器管理中删除连接器。连接器删除后，其关联流程会一并删除；然后才能回来删除这条初始化记录。' : '这会永久删除当前初始化任务及其相关产物。'}</p></div><div className="flex gap-3 border-t border-gray-200 px-6 py-4"><button onClick={() => setDeleteConfirm(null)} className="flex-1 rounded-lg border border-gray-300 px-4 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-50">关闭</button>{!(deleteConfirm.connectorId && ['PUBLISHED', 'PARTIALLY_PUBLISHED'].includes(deleteConfirm.status)) && <button onClick={async () => { if (!deleteConfirm) return; setDeleting(true); try { await apiClient.delete(`/bootstrap/jobs/${deleteConfirm.id}`); setDeleteConfirm(null); await loadJobs(); } catch { /* deletion failed — keep dialog open so user can retry */ } finally { setDeleting(false); } }} disabled={deleting} className="flex-1 rounded-lg bg-red-600 py-2.5 text-sm font-medium text-white hover:bg-red-700 disabled:opacity-50">{deleting ? '删除中...' : '删除'}</button>}</div></div></div>}
       </div>
     </main>
   );

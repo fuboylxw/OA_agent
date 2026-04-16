@@ -55,10 +55,22 @@ export class ConnectorService {
 
   async list(tenantId: string) {
     return this.prisma.connector.findMany({
-      where: { tenantId },
+      where: {
+        tenantId,
+        bootstrapJobs: {
+          some: {},
+        },
+      },
       include: {
         capability: true,
         secretRef: true,
+        processTemplates: {
+          where: { status: 'published' },
+          orderBy: [
+            { updatedAt: 'desc' },
+            { version: 'desc' },
+          ],
+        },
       },
       orderBy: { createdAt: 'desc' },
     });
@@ -66,7 +78,13 @@ export class ConnectorService {
 
   async get(id: string, tenantId: string) {
     const connector = await this.prisma.connector.findFirst({
-      where: { id, tenantId },
+      where: {
+        id,
+        tenantId,
+        bootstrapJobs: {
+          some: {},
+        },
+      },
       include: {
         capability: true,
         secretRef: true,

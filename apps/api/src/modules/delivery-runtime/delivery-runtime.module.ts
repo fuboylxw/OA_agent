@@ -6,6 +6,8 @@ import { DeliveryOrchestratorService } from './delivery-orchestrator.service';
 import { PageFlowDeliveryService } from './page-flow-delivery.service';
 import { UrlDeliveryAgent } from './url-delivery.agent';
 import { UrlDeliveryBootstrapService } from './url-delivery-bootstrap.service';
+import { UrlNetworkSubmitService } from './url-network-submit.service';
+import { UrlPortalSsoBridgeService } from './url-portal-sso-bridge.service';
 import { VisionDeliveryAgent } from './vision-delivery.agent';
 import { VisionDeliveryBootstrapService } from './vision-delivery-bootstrap.service';
 import { VisionDeliveryService } from './vision-delivery.service';
@@ -17,6 +19,8 @@ import { VisionTaskRuntime } from './vision-task-runtime';
   providers: [
     DeliveryOrchestratorService,
     PageFlowDeliveryService,
+    UrlNetworkSubmitService,
+    UrlPortalSsoBridgeService,
     ApiDeliveryBootstrapService,
     UrlDeliveryBootstrapService,
     VisionDeliveryBootstrapService,

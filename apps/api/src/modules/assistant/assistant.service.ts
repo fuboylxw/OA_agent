@@ -197,6 +197,44 @@ interface PendingSubmissionSelection {
   processName?: string;
 }
 
+interface PendingConnectorSelection {
+  id: string;
+  name: string;
+}
+
+interface PendingConnectorSelectionContext {
+  originalMessage?: string;
+  processCode?: string;
+  processName?: string;
+}
+
+interface SubmissionResolution {
+  flows: Array<{
+    id: string;
+    processCode: string;
+    processName: string;
+    processCategory: string | null;
+    connector?: {
+      id: string;
+      name: string;
+      oaType: string;
+      oclLevel: string;
+    } | null;
+  }>;
+  matchedFlow?: {
+    processCode: string;
+    processName: string;
+    confidence: number;
+  };
+  connectorId?: string | null;
+  connectorName?: string | null;
+  needsConnectorSelection: boolean;
+  connectorCandidates?: PendingConnectorSelection[];
+  connectorSelectionQuestion?: string;
+  needsFlowClarification: boolean;
+  flowClarificationQuestion?: string;
+}
+
 interface PendingActionExecutionContext {
   action: 'supplement' | 'delegate';
   submissionId: string;
@@ -265,9 +303,10 @@ export class AssistantService {
           && [ProcessStatus.PARAMETER_COLLECTION, ProcessStatus.REWORK_REQUIRED].includes(processContext.status)
         ) {
           const currentFormData = { ...processContext.parameters };
-          const template = await this.processLibraryService.getByCode(
+          const template = await this.findTemplateForResolvedFlow(
             input.tenantId,
             processContext.processCode,
+            ((session.metadata || {}) as Record<string, any>).currentConnectorId || null,
           );
           if (!template) {
             return {
@@ -355,6 +394,22 @@ export class AssistantService {
       if (pendingActionResponse) {
         const enrichedResponse = await this.enrichChatResponse(
           pendingActionResponse,
+          session,
+          input.tenantId,
+        );
+        await this.saveAssistantMessage(session.id, enrichedResponse);
+        return enrichedResponse;
+      }
+
+      const pendingConnectorResponse = await this.tryHandlePendingConnectorSelection(
+        { ...input, userId: resolvedUserId },
+        session,
+        sharedContext,
+        traceId,
+      );
+      if (pendingConnectorResponse) {
+        const enrichedResponse = await this.enrichChatResponse(
+          pendingConnectorResponse,
           session,
           input.tenantId,
         );
@@ -969,9 +1024,10 @@ export class AssistantService {
       };
     }
 
-    const template = await this.processLibraryService.getByCode(
+    const template = await this.findTemplateForResolvedFlow(
       input.tenantId,
       processContext.processCode,
+      ((session.metadata || {}) as Record<string, any>).currentConnectorId || null,
     );
     const currentFieldOrigins: Record<string, ProcessFieldOrigin> = {
       ...(((session.metadata || {}) as Record<string, any>).currentFieldOrigins as Record<string, ProcessFieldOrigin> | undefined),
@@ -1192,6 +1248,211 @@ export class AssistantService {
     return `${prefix}\n\n${allQuestions}\n\n您可以一次性告诉我，也可以逐个回答。`;
   }
 
+  private async resolveSubmissionTarget(
+    input: ChatInput,
+    session: any,
+    intentResult: any,
+  ): Promise<SubmissionResolution> {
+    const sessionMeta = (session.metadata || {}) as Record<string, any>;
+    const allFlows = await this.processLibraryService.list(input.tenantId);
+
+    const preferredProcessCode = typeof intentResult?.extractedEntities?.flowCode === 'string'
+      ? intentResult.extractedEntities.flowCode.trim()
+      : '';
+    const explicitConnectorId = sessionMeta.routedConnectorId || null;
+
+    const candidateFromEntity = preferredProcessCode
+      ? allFlows.filter((flow) => flow.processCode === preferredProcessCode)
+      : [];
+
+    let scopedFlows = allFlows;
+    if (explicitConnectorId) {
+      const connectorScoped = allFlows.filter((flow) => flow.connector?.id === explicitConnectorId);
+      if (connectorScoped.length > 0) {
+        scopedFlows = connectorScoped;
+      }
+    }
+
+    const flowCandidates = candidateFromEntity.length > 0 ? candidateFromEntity : scopedFlows;
+    const uniqueFlowCandidates = this.dedupeFlowCandidates(flowCandidates);
+
+    let matchedFlow = uniqueFlowCandidates.length === 1
+      ? {
+        processCode: uniqueFlowCandidates[0].processCode,
+        processName: uniqueFlowCandidates[0].processName,
+        confidence: 0.99,
+      }
+      : undefined;
+    let flowClarificationQuestion: string | undefined;
+    let needsFlowClarification = false;
+
+    if (!matchedFlow) {
+      const flowResult = await this.flowAgent.matchFlow(
+        intentResult.intent,
+        input.message,
+        uniqueFlowCandidates.map((flow) => ({
+          processCode: flow.processCode,
+          processName: flow.processName,
+          processCategory: flow.processCategory || '',
+        })),
+      );
+
+      matchedFlow = flowResult.matchedFlow;
+      needsFlowClarification = flowResult.needsClarification || !flowResult.matchedFlow;
+      flowClarificationQuestion = flowResult.clarificationQuestion;
+    }
+
+    if (!matchedFlow) {
+      return {
+        flows: allFlows,
+        needsConnectorSelection: false,
+        needsFlowClarification: true,
+        flowClarificationQuestion,
+      };
+    }
+
+    const matchedTemplates = allFlows.filter((flow) => flow.processCode === matchedFlow.processCode);
+    const availableConnectors = this.dedupeConnectorCandidates(
+      matchedTemplates
+        .map((flow) => flow.connector)
+        .filter((connector): connector is NonNullable<typeof flowCandidates[number]['connector']> => Boolean(connector)),
+    );
+
+    if (availableConnectors.length === 0) {
+      return {
+        flows: allFlows,
+        matchedFlow,
+        needsConnectorSelection: false,
+        needsFlowClarification: true,
+        flowClarificationQuestion: `流程“${matchedFlow.processName}”当前没有可用系统，请联系管理员检查配置。`,
+      };
+    }
+
+    const routedConnector = explicitConnectorId
+      ? availableConnectors.find((connector) => connector.id === explicitConnectorId) || null
+      : null;
+
+    if (routedConnector) {
+      return {
+        flows: matchedTemplates.filter((flow) => flow.connector?.id === routedConnector.id),
+        matchedFlow,
+        connectorId: routedConnector.id,
+        connectorName: routedConnector.name,
+        needsConnectorSelection: false,
+        needsFlowClarification: false,
+      };
+    }
+
+    if (availableConnectors.length === 1) {
+      return {
+        flows: matchedTemplates.filter((flow) => flow.connector?.id === availableConnectors[0].id),
+        matchedFlow,
+        connectorId: availableConnectors[0].id,
+        connectorName: availableConnectors[0].name,
+        needsConnectorSelection: false,
+        needsFlowClarification: false,
+      };
+    }
+
+    const routeResult = await this.connectorRouter.route(
+      input.tenantId,
+      input.userId,
+      input.message,
+      explicitConnectorId,
+      matchedTemplates
+        .map((flow) => flow.connector)
+        .filter((connector): connector is NonNullable<typeof flowCandidates[number]['connector']> => Boolean(connector)),
+    );
+
+    if (routeResult.connectorId) {
+      return {
+        flows: matchedTemplates.filter((flow) => flow.connector?.id === routeResult.connectorId),
+        matchedFlow,
+        connectorId: routeResult.connectorId,
+        connectorName: routeResult.connectorName || null,
+        needsConnectorSelection: false,
+        needsFlowClarification: false,
+      };
+    }
+
+    return {
+      flows: matchedTemplates,
+      matchedFlow,
+      needsConnectorSelection: true,
+      connectorCandidates: routeResult.candidates || availableConnectors,
+      connectorSelectionQuestion: routeResult.selectionQuestion,
+      needsFlowClarification: false,
+    };
+  }
+
+  private dedupeFlowCandidates(flows: Array<{
+    id: string;
+    processCode: string;
+    processName: string;
+    processCategory: string | null;
+    connector?: {
+      id: string;
+      name: string;
+      oaType: string;
+      oclLevel: string;
+    } | null;
+  }>) {
+    const seen = new Map<string, typeof flows[number]>();
+    for (const flow of flows) {
+      if (!seen.has(flow.processCode)) {
+        seen.set(flow.processCode, flow);
+      }
+    }
+    return [...seen.values()];
+  }
+
+  private dedupeConnectorCandidates(connectors: Array<{
+    id: string;
+    name: string;
+    oaType: string;
+    oclLevel: string;
+  }>) {
+    const seen = new Map<string, PendingConnectorSelection>();
+    for (const connector of connectors) {
+      if (!seen.has(connector.id)) {
+        seen.set(connector.id, {
+          id: connector.id,
+          name: connector.name,
+        });
+      }
+    }
+    return [...seen.values()];
+  }
+
+  private async findTemplateForResolvedFlow(
+    tenantId: string,
+    processCode: string,
+    connectorId?: string | null,
+  ) {
+    if (connectorId) {
+      const template = await this.prisma.processTemplate.findFirst({
+        where: {
+          tenantId,
+          processCode,
+          connectorId,
+          status: 'published',
+        },
+        include: {
+          connector: true,
+        },
+        orderBy: {
+          version: 'desc',
+        },
+      });
+
+      if (template) {
+        return template;
+      }
+    }
+
+    return this.processLibraryService.getByCode(tenantId, processCode);
+  }
+
   private extractProcessContext(session: any): ProcessContext | null {
     const metadata = session.metadata || {};
     if (!metadata.currentProcessCode) {
@@ -1220,9 +1481,10 @@ export class AssistantService {
     traceId: string,
   ): Promise<ChatResponse> {
     try {
-      const template = await this.processLibraryService.getByCode(
+      const template = await this.findTemplateForResolvedFlow(
         input.tenantId,
         processContext.processCode,
+        ((session.metadata || {}) as Record<string, any>).currentConnectorId || null,
       );
       if (!template) {
         return {
@@ -1482,9 +1744,10 @@ export class AssistantService {
 
       case 'modify':
         {
-          const template = await this.processLibraryService.getByCode(
+          const template = await this.findTemplateForResolvedFlow(
             input.tenantId,
             processContext.processCode,
+            ((session.metadata || {}) as Record<string, any>).currentConnectorId || null,
           );
           if (!template) {
             this.logger.warn(`Template not found for processCode=${processContext.processCode}`);
@@ -1656,9 +1919,10 @@ ${currentFields}
     }
 
     // 获取模板用于格式化
-    const template = await this.processLibraryService.getByCode(
+    const template = await this.findTemplateForResolvedFlow(
       input.tenantId,
       processContext.processCode,
+      ((session.metadata || {}) as Record<string, any>).currentConnectorId || null,
     );
 
     // 更新会话中的表单数据
@@ -2006,9 +2270,14 @@ ${currentFields}
 
       const pathLabel = this.formatDeliveryPathLabel(selectedPath);
       const submissionRef = submission.oaSubmissionId || submission.id;
-      const message = nextProcessStatus === ProcessStatus.EXECUTING
-        ? `申请已受理，正在通过${pathLabel}通道提交。\n\n申请编号：${submissionRef}\n流程：${displayProcessName}\n\n可稍后查询进度。`
-        : `申请已提交成功，已通过${pathLabel}通道完成交付。\n\n申请编号：${submissionRef}\n流程：${displayProcessName}\n\n您可以随时查询申请进度。`;
+      const templateUiHints = (draft.template.uiHints as Record<string, any> | null) || {};
+      const completionKind = (((templateUiHints.rpaDefinition as Record<string, any> | undefined)?.runtime as Record<string, any> | undefined)?.networkSubmit as Record<string, any> | undefined)?.completionKind
+        || 'submitted';
+      const message = completionKind === 'draft'
+        ? `申请内容已通过${pathLabel}通道写入 OA 草稿。\n\n申请编号：${submissionRef}\n流程：${displayProcessName}\n\n当前验证的是 URL 直达草稿交付链路。`
+        : nextProcessStatus === ProcessStatus.EXECUTING
+          ? `申请已受理，正在通过${pathLabel}通道提交。\n\n申请编号：${submissionRef}\n流程：${displayProcessName}\n\n可稍后查询进度。`
+          : `申请已提交成功，已通过${pathLabel}通道完成交付。\n\n申请编号：${submissionRef}\n流程：${displayProcessName}\n\n您可以随时查询申请进度。`;
 
       return {
         sessionId: session.id,
@@ -2147,85 +2416,77 @@ ${currentFields}
     traceId: string,
   ): Promise<ChatResponse> {
     try {
-      // Step 0: Route to the right connector
       const sessionMeta = (session.metadata || {}) as Record<string, any>;
-      const routeResult = await this.connectorRouter.route(
-        input.tenantId,
-        input.userId,
-        input.message,
-        sessionMeta.routedConnectorId || null,
-      );
+      const resolution = await this.resolveSubmissionTarget(input, session, intentResult);
 
-      if (routeResult.needsSelection) {
-        // Store candidates in session so user can pick by number/name
-        await this.prisma.chatSession.update({
-          where: { id: session.id },
-          data: {
-            metadata: {
-              ...sessionMeta,
-              pendingConnectorSelection: true,
-              connectorCandidates: routeResult.candidates,
-            },
-          },
-        });
+      if (resolution.needsFlowClarification || !resolution.matchedFlow) {
+        const suggestedFlows = this.dedupeFlowCandidates(resolution.flows || [])
+          .slice(0, 5)
+          .map((flow) => flow.processName);
         return {
           sessionId: session.id,
-          message: routeResult.selectionQuestion || '请选择要使用的 OA 系统。',
+          message: resolution.flowClarificationQuestion || '请问您想办理哪个流程？',
           needsInput: true,
-          suggestedActions: routeResult.candidates?.map(c => c.name),
+          suggestedActions: suggestedFlows,
         };
       }
 
-      // Persist routed connector in session
-      if (routeResult.connectorId && routeResult.connectorId !== sessionMeta.routedConnectorId) {
+      if (resolution.needsConnectorSelection) {
+        const pendingConnectorMetadata = {
+          ...sessionMeta,
+          pendingConnectorSelection: true,
+          connectorCandidates: (resolution.connectorCandidates || []).map((connector) => ({
+            id: connector.id,
+            name: connector.name,
+          })),
+          pendingConnectorSelectionContext: {
+            originalMessage: input.message,
+            processCode: resolution.matchedFlow.processCode,
+            processName: resolution.matchedFlow.processName,
+          },
+        } as Record<string, any>;
+        await this.prisma.chatSession.update({
+          where: { id: session.id },
+          data: {
+            metadata: pendingConnectorMetadata,
+          },
+        });
+        session.metadata = pendingConnectorMetadata;
+        return {
+          sessionId: session.id,
+          message: resolution.connectorSelectionQuestion
+            || this.buildPendingConnectorPrompt(
+              session.id,
+              resolution.connectorCandidates || [],
+              resolution.matchedFlow.processName,
+            ).message,
+          needsInput: true,
+          suggestedActions: resolution.connectorCandidates?.map((connector) => connector.name),
+        };
+      }
+
+      if (resolution.connectorId && resolution.connectorId !== sessionMeta.routedConnectorId) {
         await this.prisma.chatSession.update({
           where: { id: session.id },
           data: {
             metadata: {
               ...sessionMeta,
-              routedConnectorId: routeResult.connectorId,
-              routedConnectorName: routeResult.connectorName,
+              routedConnectorId: resolution.connectorId,
+              routedConnectorName: resolution.connectorName,
             },
           },
         });
         session.metadata = {
           ...sessionMeta,
-          routedConnectorId: routeResult.connectorId,
-          routedConnectorName: routeResult.connectorName,
+          routedConnectorId: resolution.connectorId,
+          routedConnectorName: resolution.connectorName,
         };
       }
 
-      // Step 1: Get flows scoped to the selected connector only
-      const allFlows = await this.processLibraryService.list(input.tenantId);
-      const flows = routeResult.connectorId
-        ? allFlows.filter(f => f.connector?.id === routeResult.connectorId)
-        : allFlows;
-
-      // Match flow (LLM only sees this connector's flows)
-      const flowResult = await this.flowAgent.matchFlow(
-        intentResult.intent,
-        input.message,
-        flows.map(f => ({
-          processCode: f.processCode,
-          processName: f.processName,
-          processCategory: f.processCategory || '',
-        })),
-      );
-
-      if (flowResult.needsClarification || !flowResult.matchedFlow) {
-        return {
-          sessionId: session.id,
-          message: flowResult.clarificationQuestion || '请问您想办理哪个流程？',
-          needsInput: true,
-          suggestedActions: flows.slice(0, 5).map(f => f.processName),
-        };
-      }
-
-      // Check permission
       const permResult = await this.permissionService.check({
         tenantId: input.tenantId,
         userId: input.userId,
-        processCode: flowResult.matchedFlow.processCode,
+        processCode: resolution.matchedFlow.processCode,
         action: 'submit',
         traceId,
       });
@@ -2233,15 +2494,15 @@ ${currentFields}
       if (!permResult.allowed) {
         return {
           sessionId: session.id,
-          message: `抱歉，您没有权限发起"${flowResult.matchedFlow.processName}"。\n原因：${permResult.reason}`,
+          message: `抱歉，您没有权限发起"${resolution.matchedFlow.processName}"。\n原因：${permResult.reason}`,
           needsInput: false,
         };
       }
 
-      // Get template and extract fields
-      const template = await this.processLibraryService.getByCode(
+      const template = await this.findTemplateForResolvedFlow(
         input.tenantId,
-        flowResult.matchedFlow.processCode,
+        resolution.matchedFlow.processCode,
+        resolution.connectorId,
       );
       if (!template) {
         return {
@@ -2253,7 +2514,7 @@ ${currentFields}
 
       const schema = template.schema as any;
       const formResult = await this.formAgent.extractFields(
-        flowResult.matchedFlow.processCode,
+        resolution.matchedFlow.processCode,
         schema,
         input.message,
         {},
@@ -2268,8 +2529,8 @@ ${currentFields}
       const processId = `process_${Date.now()}`;
       const displayProcessName = this.resolveDisplayProcessName(
         session,
-        flowResult.matchedFlow.processName,
-        flowResult.matchedFlow.processCode,
+        resolution.matchedFlow.processName,
+        resolution.matchedFlow.processCode,
       );
 
       await this.auditService.createLog({
@@ -2280,7 +2541,7 @@ ${currentFields}
         result: 'success',
         details: {
           processId,
-          processCode: flowResult.matchedFlow.processCode,
+          processCode: resolution.matchedFlow.processCode,
           extractedFields: Object.keys(currentFormData),
         },
       });
@@ -2306,8 +2567,8 @@ ${currentFields}
         processType: ChatIntent.CREATE_SUBMISSION,
         currentTemplateId: template.id,
         currentConnectorId: template.connectorId,
-        currentConnectorName: template.connector?.name || routeResult.connectorName || null,
-        currentProcessCode: flowResult.matchedFlow.processCode,
+        currentConnectorName: template.connector?.name || resolution.connectorName || null,
+        currentProcessCode: resolution.matchedFlow.processCode,
         currentProcessName: displayProcessName,
         currentProcessCategory: template.processCategory || null,
         currentFormData,
@@ -2330,13 +2591,12 @@ ${currentFields}
 
       if (!formResult.isComplete) {
         const hasFileField = formResult.missingFields.some(f => f.type === 'file');
-        // 一次性列出所有缺失字段，让用户可以一次性提供
-        const allQuestions = formResult.missingFields
-          .map((f, i) => `${i + 1}. ${f.question}`)
-          .join('\n');
         return {
           sessionId: session.id,
-          message: `正在为您填写"${flowResult.matchedFlow.processName}"，还需要以下信息：\n\n${allQuestions}\n\n您可以一次性告诉我，也可以逐个回答。`,
+          message: this.buildMissingFieldsPrompt(
+            formResult.missingFields,
+            resolution.matchedFlow.processName,
+          ),
           intent: ChatIntent.CREATE_SUBMISSION,
           needsInput: true,
           formData: currentFormData,
@@ -2893,6 +3153,79 @@ ${currentFields}
     );
   }
 
+  private async tryHandlePendingConnectorSelection(
+    input: ChatInput,
+    session: any,
+    sharedContext: SharedContext,
+    traceId: string,
+  ): Promise<ChatResponse | null> {
+    const sessionMeta = (session.metadata || {}) as Record<string, any>;
+    const pendingConnectorSelection = sessionMeta.pendingConnectorSelection;
+    const candidates = Array.isArray(sessionMeta.connectorCandidates)
+      ? sessionMeta.connectorCandidates as PendingConnectorSelection[]
+      : [];
+
+    if (!pendingConnectorSelection || candidates.length === 0) {
+      return null;
+    }
+
+    if (this.isAbortPendingSelectionMessage(input.message)) {
+      await this.clearPendingConnectorSelection(session);
+      return {
+        sessionId: session.id,
+        message: '已取消本次系统选择。如需继续办理，请重新告诉我您要办什么。',
+        needsInput: false,
+      };
+    }
+
+    const selected = this.resolvePendingConnectorSelection(input.message, candidates);
+    if (!selected) {
+      const context = this.parsePendingConnectorSelectionContext(
+        sessionMeta.pendingConnectorSelectionContext,
+      );
+      return this.buildPendingConnectorPrompt(session.id, candidates, context?.processName);
+    }
+
+    const context = this.parsePendingConnectorSelectionContext(
+      sessionMeta.pendingConnectorSelectionContext,
+    );
+    const nextMetadata = {
+      ...sessionMeta,
+      routedConnectorId: selected.id,
+      routedConnectorName: selected.name,
+    } as Record<string, any>;
+    delete nextMetadata.pendingConnectorSelection;
+    delete nextMetadata.connectorCandidates;
+    delete nextMetadata.pendingConnectorSelectionContext;
+
+    await this.prisma.chatSession.update({
+      where: { id: session.id },
+      data: {
+        metadata: nextMetadata,
+      },
+    });
+    session.metadata = nextMetadata;
+
+    const followupIntent = {
+      intent: ChatIntent.CREATE_SUBMISSION,
+      confidence: 0.9,
+      extractedEntities: {
+        ...(context?.processCode ? { flowCode: context.processCode } : {}),
+      },
+    };
+
+    return this.handleCreateSubmission(
+      {
+        ...input,
+        message: context?.originalMessage || input.message,
+      },
+      session,
+      followupIntent,
+      sharedContext,
+      traceId,
+    );
+  }
+
   private async handleServiceRequest(
     input: ChatInput,
     session: any,
@@ -3242,6 +3575,37 @@ ${currentFields}
     ) || null;
   }
 
+  private parsePendingConnectorSelectionContext(input: unknown): PendingConnectorSelectionContext | null {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      return null;
+    }
+
+    const record = input as Record<string, any>;
+    return {
+      originalMessage: typeof record.originalMessage === 'string' ? record.originalMessage : undefined,
+      processCode: typeof record.processCode === 'string' ? record.processCode : undefined,
+      processName: typeof record.processName === 'string' ? record.processName : undefined,
+    };
+  }
+
+  private resolvePendingConnectorSelection(
+    message: string,
+    candidates: PendingConnectorSelection[],
+  ) {
+    const trimmed = message.trim();
+
+    if (/^\d+$/.test(trimmed)) {
+      const index = Number(trimmed) - 1;
+      return index >= 0 && index < candidates.length ? candidates[index] : null;
+    }
+
+    const normalized = trimmed.toLowerCase();
+    return candidates.find((candidate) =>
+      candidate.id.toLowerCase() === normalized
+      || candidate.name.trim().toLowerCase() === normalized,
+    ) || null;
+  }
+
   private buildPendingActionPrompt(
     sessionId: string,
     action: PendingAssistantAction,
@@ -3258,6 +3622,26 @@ ${currentFields}
       message: `请选择要${this.getActionDisplayName(action)}的申请：\n${selectionList}\n\n请回复序号或申请编号。`,
       needsInput: true,
       suggestedActions: candidates.map(candidate => candidate.oaSubmissionId || candidate.submissionId),
+    };
+  }
+
+  private buildPendingConnectorPrompt(
+    sessionId: string,
+    candidates: PendingConnectorSelection[],
+    processName?: string,
+  ): ChatResponse {
+    const selectionList = candidates
+      .map((candidate, index) => `${index + 1}. ${candidate.name}`)
+      .join('\n');
+    const prefix = processName
+      ? `我已经识别到您要办理“${processName}”，但这个流程在多个系统中都可能存在。请选择要使用的系统：`
+      : '请选择要使用的系统：';
+
+    return {
+      sessionId,
+      message: `${prefix}\n${selectionList}\n\n请回复序号或系统名称。`,
+      needsInput: true,
+      suggestedActions: candidates.map((candidate) => candidate.name),
     };
   }
 
@@ -3370,6 +3754,21 @@ ${currentFields}
     const metadata = { ...((session.metadata || {}) as Record<string, any>) };
     delete metadata.pendingAction;
     delete metadata.pendingSubmissionSelection;
+
+    await this.prisma.chatSession.update({
+      where: { id: session.id },
+      data: {
+        metadata,
+      },
+    });
+    session.metadata = metadata;
+  }
+
+  private async clearPendingConnectorSelection(session: any) {
+    const metadata = { ...((session.metadata || {}) as Record<string, any>) };
+    delete metadata.pendingConnectorSelection;
+    delete metadata.connectorCandidates;
+    delete metadata.pendingConnectorSelectionContext;
 
     await this.prisma.chatSession.update({
       where: { id: session.id },

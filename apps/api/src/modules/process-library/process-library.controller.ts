@@ -1,8 +1,18 @@
-import { Controller, Get, Param, Query, Req } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  ForbiddenException,
+  Get,
+  Param,
+  Post,
+  Query,
+  Req,
+} from '@nestjs/common';
 import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import type { Request } from 'express';
 import { ProcessLibraryService } from './process-library.service';
 import { RequestAuthService } from '../common/request-auth.service';
+import { CreateProcessTemplateDto } from './dto/create-process-template.dto';
 
 @ApiTags('process-library')
 @Controller('process-library')
@@ -18,9 +28,24 @@ export class ProcessLibraryController {
     @Req() req: Request,
     @Query('tenantId') tenantId: string,
     @Query('category') category?: string,
+    @Query('connectorId') connectorId?: string,
   ) {
     const auth = await this.requestAuth.resolveUser(req, { tenantId, requireUser: true });
-    return this.processLibraryService.list(auth.tenantId, category);
+    return this.processLibraryService.list(auth.tenantId, category, connectorId);
+  }
+
+  @Post()
+  @ApiOperation({ summary: 'Create a published process template under a source system' })
+  async create(
+    @Req() req: Request,
+    @Body() dto: CreateProcessTemplateDto,
+  ) {
+    const auth = await this.requestAuth.resolveUser(req, { requireUser: true });
+    if (!auth.roles.some((role) => role === 'admin' || role === 'flow_manager')) {
+      throw new ForbiddenException('只有管理员或流程管理员可以添加流程');
+    }
+
+    return this.processLibraryService.createManualProcessTemplate(auth.tenantId, dto);
   }
 
   @Get(':processCode')

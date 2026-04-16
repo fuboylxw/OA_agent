@@ -60,6 +60,7 @@ AUTH_OAUTH2_REDIRECT_URI=http://202.200.206.250/login/callback
 AUTH_OAUTH2_BASE_URL=https://sz.xpu.edu.cn
 AUTH_OAUTH2_CLIENT_ID=平台分配的APPID
 AUTH_OAUTH2_CLIENT_SECRET=平台分配的SECRET
+AUTH_OAUTH2_PRIVATE_KEY=学校白名单后台登录使用的SM2私钥
 AUTH_OAUTH2_SCOPE=client
 
 # 前端走同源，保持为空即可
@@ -68,6 +69,14 @@ NEXT_PUBLIC_API_URL=
 # Next.js 服务端转发 API 时走内网地址
 INTERNAL_API_ORIGIN=http://api:3001
 ```
+
+如果启用了 OA 白名单后台登录，而连接器配置里没有单独指定 `clientIdEnv` / `privateKeyEnv`，项目会默认复用：
+
+- `AUTH_OAUTH2_CLIENT_ID`
+- `AUTH_OAUTH2_PRIVATE_KEY`
+
+其中 `AUTH_OAUTH2_CLIENT_SECRET` 仍然只用于标准 OAuth2 换取令牌，不参与白名单登录签名。
+白名单后台登录默认按文档示例使用 `hex` 签名编码；`AUTH_OAUTH2_PRIVATE_KEY` 同时支持 PEM 和 Base64 DER 两种私钥格式。
 
 如果你使用域名和 HTTPS，把上面的 `PUBLIC_WEB_BASE_URL` 和 `AUTH_OAUTH2_REDIRECT_URI` 改成域名版本。
 

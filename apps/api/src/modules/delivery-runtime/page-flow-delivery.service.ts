@@ -7,6 +7,7 @@ import { BrowserRpaExecutor } from '../adapter-runtime/browser-rpa-executor';
 import { LocalRpaExecutor } from '../adapter-runtime/local-rpa-executor';
 import type { DeliveryStatusExecutionResult, DeliverySubmitExecutionResult } from './delivery-agent.types';
 import type { UrlDeliveryExecutionContext } from './delivery-bootstrap.types';
+import { UrlNetworkSubmitService } from './url-network-submit.service';
 
 interface BasePageFlowExecutionInput {
   path: Extract<DeliveryPath, 'url'>;
@@ -34,7 +35,9 @@ export class PageFlowDeliveryService {
   private readonly localExecutor = new LocalRpaExecutor();
   private readonly browserExecutor = new BrowserRpaExecutor();
 
-  constructor() {
+  constructor(
+    private readonly urlNetworkSubmitService: UrlNetworkSubmitService,
+  ) {
     this.client = axios.create({
       timeout: 30000,
       headers: {
@@ -254,6 +257,56 @@ export class PageFlowDeliveryService {
                   connectorId: input.connectorId,
                   flowCode: input.context.rpaFlow!.processCode,
                   deliveryPath: input.path,
+                },
+                timeline: [],
+              } satisfies StatusResult,
+              artifactRefs: [] as ArtifactReference[],
+              summary: message,
+            };
+      }
+    }
+
+    const internalNetworkDefinition = action === 'submit'
+      ? runtime.networkSubmit
+      : runtime.networkStatus;
+    if (internalNetworkDefinition?.url) {
+      try {
+        return await this.urlNetworkSubmitService.execute({
+          action,
+          connectorId: input.connectorId,
+          processCode: input.context.rpaFlow!.processCode,
+          processName: input.processName,
+          context: input.context,
+          payload,
+        });
+      } catch (error: any) {
+        const message = error.message || `${input.path} internal network execution failed`;
+        return action === 'submit'
+          ? {
+              submitResult: {
+                success: false,
+                errorMessage: message,
+                metadata: {
+                  connectorId: input.connectorId,
+                  flowCode: input.context.rpaFlow!.processCode,
+                  deliveryPath: input.path,
+                  jumpUrl: ticket.jumpUrl,
+                  ticketIssued: !!ticket.ticket,
+                  mode: 'url-network',
+                },
+              } satisfies SubmitResult,
+              artifactRefs: [] as ArtifactReference[],
+              summary: message,
+            }
+          : {
+              statusResult: {
+                status: 'error',
+                statusDetail: {
+                  error: message,
+                  connectorId: input.connectorId,
+                  flowCode: input.context.rpaFlow!.processCode,
+                  deliveryPath: input.path,
+                  mode: 'url-network',
                 },
                 timeline: [],
               } satisfies StatusResult,

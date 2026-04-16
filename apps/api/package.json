@@ -12,7 +12,9 @@
     "prisma": "corepack pnpm exec prisma",
     "prisma:generate": "corepack pnpm exec prisma generate --schema ../../prisma/schema.prisma",
     "prisma:migrate": "corepack pnpm exec prisma migrate dev --schema ../../prisma/schema.prisma",
-    "prisma:seed": "corepack pnpm exec tsx ../../prisma/seed.ts"
+    "prisma:seed": "corepack pnpm exec tsx ../../prisma/seed.ts",
+    "seed:xpu-connector": "corepack pnpm exec tsx scripts/ensure-xpu-whitelist-connector.ts",
+    "verify:xpu-whitelist-login": "corepack pnpm exec tsx scripts/verify-xpu-whitelist-login.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
@@ -42,6 +44,7 @@
     "playwright": "^1.58.2",
     "reflect-metadata": "^0.2.2",
     "rxjs": "^7.8.1",
+    "sm-crypto": "^0.4.0",
     "uuid": "^9.0.1",
     "zod": "^3.22.4"
   },

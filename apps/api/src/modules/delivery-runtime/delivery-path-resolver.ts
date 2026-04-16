@@ -22,6 +22,7 @@ export function resolveAvailablePaths(
 
   const executionModes = (uiHints.executionModes as Record<string, any> | undefined) || {};
   const rpaDefinition = uiHints.rpaDefinition as RpaFlowDefinition | undefined;
+  const runtime = rpaDefinition?.runtime;
   const endpoints = Array.isArray(uiHints.endpoints) ? uiHints.endpoints : [];
   const hasApi = includesMode(executionModes[action], 'api')
     || endpoints.some((endpoint) =>
@@ -32,12 +33,16 @@ export function resolveAvailablePaths(
   const hasFlowAction = action === 'submit'
     ? Boolean(rpaDefinition?.actions?.submit)
     : Boolean(rpaDefinition?.actions?.queryStatus);
+  const hasNetworkRequest = action === 'submit'
+    ? hasRuntimeNetworkRequest(runtime?.networkSubmit)
+    : hasRuntimeNetworkRequest(runtime?.networkStatus);
+  const hasUrlAction = hasFlowAction || hasNetworkRequest;
   const hasVision = hasFlowAction;
-  const hasUrl = hasFlowAction && Boolean(
+  const hasUrl = hasUrlAction && Boolean(
     rpaDefinition?.platform?.entryUrl
     || rpaDefinition?.platform?.jumpUrlTemplate
     || rpaDefinition?.platform?.ticketBrokerUrl
-    || rpaDefinition?.runtime,
+    || runtime,
   );
   const preferred: DeliveryPath[] = hasVision
     ? [API_DELIVERY_PATH, VISION_DELIVERY_PATH, URL_DELIVERY_PATH]
@@ -87,4 +92,14 @@ function isApiEndpoint(endpoint: any) {
 
 function includesMode(value: unknown, mode: string) {
   return Array.isArray(value) && value.some((item) => String(item).toLowerCase() === mode);
+}
+
+function hasRuntimeNetworkRequest(value: unknown) {
+  return Boolean(
+    value
+    && typeof value === 'object'
+    && !Array.isArray(value)
+    && typeof (value as Record<string, any>).url === 'string'
+    && (value as Record<string, any>).url.trim(),
+  );
 }

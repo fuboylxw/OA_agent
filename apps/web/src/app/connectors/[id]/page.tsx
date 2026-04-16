@@ -5,6 +5,12 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import AuthGuard from '../../components/AuthGuard';
 import { apiClient } from '../../lib/api-client';
+import {
+  RESOLVED_ACCESS_MODE_META,
+  type ResolvedAccessModeKey,
+  formatExecutionModes,
+  resolvePublishedAccessMode,
+} from '../../lib/connector-access-mode';
 
 function formatDate(value?: string | null) {
   if (!value) return '-';
@@ -17,12 +23,20 @@ function renderBoolean(value: boolean | null | undefined) {
   return '-';
 }
 
-function renderExecutionModes(uiHints: Record<string, any> | null | undefined) {
-  const executionModes = uiHints?.executionModes as Record<string, string[]> | undefined;
-  if (!executionModes) return '-';
-  const submit = Array.isArray(executionModes.submit) ? executionModes.submit.join(' / ') : '-';
-  const queryStatus = Array.isArray(executionModes.queryStatus) ? executionModes.queryStatus.join(' / ') : '-';
-  return `submit: ${submit}; queryStatus: ${queryStatus}`;
+function resolveConnectorAccessMode(connector: any): ResolvedAccessModeKey {
+  const templates = Array.isArray(connector?.processTemplates) ? connector.processTemplates : [];
+
+  for (const template of templates) {
+    const resolved = resolvePublishedAccessMode({
+      uiHints: template?.uiHints,
+      authConfig: connector?.authConfig,
+    });
+    if (resolved !== 'unknown') {
+      return resolved;
+    }
+  }
+
+  return resolvePublishedAccessMode({ authConfig: connector?.authConfig });
 }
 
 function ConnectorDetail() {
@@ -63,6 +77,7 @@ function ConnectorDetail() {
   }
 
   const capability = connector.capability || {};
+  const connectorAccessMode = resolveConnectorAccessMode(connector);
 
   return (
     <main className="h-full overflow-y-auto">
@@ -82,10 +97,16 @@ function ConnectorDetail() {
           </span>
         </div>
 
-        <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-3">
+        <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-4">
           <div className="rounded-xl border border-gray-200 bg-white p-5">
             <div className="text-sm text-gray-500">基础地址</div>
             <div className="mt-2 break-all text-sm text-gray-900">{connector.baseUrl}</div>
+          </div>
+          <div className="rounded-xl border border-gray-200 bg-white p-5">
+            <div className="text-sm text-gray-500">接入方式</div>
+            <div className="mt-2 text-sm text-gray-900">
+              {connectorAccessMode === 'unknown' ? '-' : RESOLVED_ACCESS_MODE_META[connectorAccessMode].label}
+            </div>
           </div>
           <div className="rounded-xl border border-gray-200 bg-white p-5">
             <div className="text-sm text-gray-500">认证方式</div>
@@ -109,11 +130,11 @@ function ConnectorDetail() {
               <div className="mt-1 break-all font-mono text-sm text-gray-900">{connector.tenantId}</div>
             </div>
             <div>
-              <div className="text-sm text-gray-500">OA 版本</div>
+              <div className="text-sm text-gray-500">业务系统版本</div>
               <div className="mt-1 text-sm text-gray-900">{connector.oaVersion || '-'}</div>
             </div>
             <div>
-              <div className="text-sm text-gray-500">健康检查地址</div>
+              <div className="text-sm text-gray-500">认证 / 检测入口</div>
               <div className="mt-1 break-all text-sm text-gray-900">{connector.healthCheckUrl || '-'}</div>
             </div>
             <div>
@@ -145,7 +166,11 @@ function ConnectorDetail() {
             <div className="space-y-4">
               {connector.processTemplates.map((template: any) => {
                 const uiHints = (template.uiHints as Record<string, any> | null) || null;
-                const hasRpaDefinition = Boolean(uiHints?.rpaDefinition);
+                const accessMode = resolvePublishedAccessMode({
+                  uiHints,
+                  authConfig: connector.authConfig,
+                });
+                const hasPageFlowDefinition = Boolean(uiHints?.rpaDefinition);
                 return (
                   <div key={template.id} className="rounded-lg border border-gray-200 p-4">
                     <div className="flex items-center justify-between gap-4">
@@ -157,18 +182,24 @@ function ConnectorDetail() {
                       </div>
                       <div className="text-sm text-gray-500">v{template.version}</div>
                     </div>
-                    <div className="mt-3 grid grid-cols-1 gap-3 text-sm md:grid-cols-3">
+                    <div className="mt-3 grid grid-cols-1 gap-3 text-sm md:grid-cols-4">
                       <div className="rounded-lg bg-gray-50 p-3">
                         <div className="text-xs text-gray-500">FAL</div>
                         <div className="mt-1 text-gray-900">{template.falLevel || '-'}</div>
                       </div>
                       <div className="rounded-lg bg-gray-50 p-3">
-                        <div className="text-xs text-gray-500">Execution Modes</div>
-                        <div className="mt-1 text-gray-900">{renderExecutionModes(uiHints)}</div>
+                        <div className="text-xs text-gray-500">接入方式</div>
+                        <div className="mt-1 text-gray-900">
+                          {accessMode === 'unknown' ? '-' : RESOLVED_ACCESS_MODE_META[accessMode].label}
+                        </div>
                       </div>
                       <div className="rounded-lg bg-gray-50 p-3">
-                        <div className="text-xs text-gray-500">RPA Definition</div>
-                        <div className="mt-1 text-gray-900">{hasRpaDefinition ? '已配置' : '未配置'}</div>
+                        <div className="text-xs text-gray-500">执行模式</div>
+                        <div className="mt-1 text-gray-900">{formatExecutionModes(uiHints)}</div>
+                      </div>
+                      <div className="rounded-lg bg-gray-50 p-3">
+                        <div className="text-xs text-gray-500">页面流程定义</div>
+                        <div className="mt-1 text-gray-900">{hasPageFlowDefinition ? '已配置' : '未配置'}</div>
                       </div>
                     </div>
                   </div>

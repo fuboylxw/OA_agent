@@ -73,6 +73,50 @@ describe('FormAgent', () => {
     expect(result.missingFields[0].key).toBe('leave_type');
   });
 
+  it('stabilizes free-text reason fields when the utterance contains a clear natural-language cause segment', async () => {
+    const duplicatedReasonSchema = {
+      fields: [
+        { key: 'field_1', label: '开始日期', type: 'date', required: true },
+        { key: 'field_2', label: '结束日期', type: 'date', required: true },
+        { key: 'field_3', label: '请假类型', type: 'text', required: true },
+        { key: 'field_4', label: '请假原因', type: 'textarea', required: true },
+        { key: 'field_5', label: '请假事由', type: 'textarea', required: true },
+        { key: 'field_6', label: '外出地点', type: 'text', required: true },
+        { key: 'field_7', label: '外出通讯方式', type: 'text', required: true },
+        { key: 'field_8', label: '请假时间', type: 'text', required: true },
+      ],
+    };
+
+    (agent as any).llmClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: JSON.stringify({
+          extractedFields: {
+            field_1: '明天',
+            field_2: '2026-04-18',
+            field_3: '事假',
+            field_6: '北京',
+            field_7: '13800138000',
+          },
+          missingFieldQuestions: {
+            field_4: '请说明一下请假的具体原因是什么？',
+            field_5: '可以详细描述一下请假的事由吗？',
+            field_8: '请问具体的请假时间是几点到几点？',
+          },
+        }),
+      }),
+    };
+
+    const result = await agent.extractFields(
+      'leave_request',
+      duplicatedReasonSchema,
+      '我要请假，明天开始，请假三天，事假，去北京出差，联系电话13800138000',
+    );
+
+    expect(result.extractedFields.field_4).toBe('去北京出差');
+    expect(result.extractedFields.field_5).toBe('去北京出差');
+    expect(result.missingFields.map((field) => field.key)).toEqual(['field_8']);
+  });
+
   it('normalizes llm extracted dates and string options before returning fields', async () => {
     const typedLeaveSchema = {
       fields: [

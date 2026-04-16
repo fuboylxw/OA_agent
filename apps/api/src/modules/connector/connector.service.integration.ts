@@ -262,4 +262,59 @@ describe('ConnectorService Integration', () => {
       }),
     });
   });
+
+  it('lists only connectors that come from initialization center', async () => {
+    mockPrisma.connector.findMany.mockResolvedValue([]);
+
+    await service.list('tenant-default');
+
+    expect(mockPrisma.connector.findMany).toHaveBeenCalledWith({
+      where: {
+        tenantId: 'tenant-default',
+        bootstrapJobs: {
+          some: {},
+        },
+      },
+      include: {
+        capability: true,
+        secretRef: true,
+        processTemplates: {
+          where: { status: 'published' },
+          orderBy: [
+            { updatedAt: 'desc' },
+            { version: 'desc' },
+          ],
+        },
+      },
+      orderBy: { createdAt: 'desc' },
+    });
+  });
+
+  it('gets only a connector that comes from initialization center', async () => {
+    mockPrisma.connector.findFirst.mockResolvedValue({
+      id: 'connector-1',
+      name: '统一办公',
+      processTemplates: [],
+    });
+
+    await service.get('connector-1', 'tenant-default');
+
+    expect(mockPrisma.connector.findFirst).toHaveBeenCalledWith({
+      where: {
+        id: 'connector-1',
+        tenantId: 'tenant-default',
+        bootstrapJobs: {
+          some: {},
+        },
+      },
+      include: {
+        capability: true,
+        secretRef: true,
+        processTemplates: {
+          where: { status: 'published' },
+          orderBy: { createdAt: 'desc' },
+        },
+      },
+    });
+  });
 });

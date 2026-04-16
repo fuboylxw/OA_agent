@@ -70,4 +70,23 @@ describe('delivery-path-resolver', () => {
 
     expect(paths).toEqual([VISION_DELIVERY_PATH, URL_DELIVERY_PATH]);
   });
+
+  it('includes url when only networkSubmit is configured under runtime', () => {
+    const paths = resolveAvailablePaths({
+      rpaDefinition: {
+        processCode: 'leave_apply_url_network',
+        processName: 'Leave Apply URL Network',
+        platform: {
+          jumpUrlTemplate: 'https://oa.example.com/workflow/{processCode}',
+        },
+        runtime: {
+          networkSubmit: {
+            url: 'https://oa.example.com/api/workflow/submit',
+          },
+        },
+      },
+    }, 'submit');
+
+    expect(paths).toEqual([URL_DELIVERY_PATH]);
+  });
 });

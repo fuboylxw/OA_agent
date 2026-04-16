@@ -26,6 +26,10 @@ const EMPTY_AUTH_SNAPSHOT: ClientAuthSnapshot = {
 
 let cachedSnapshot: ClientAuthSnapshot = EMPTY_AUTH_SNAPSHOT;
 
+export function getClientAuthServerSnapshot(): ClientAuthSnapshot {
+  return EMPTY_AUTH_SNAPSHOT;
+}
+
 export function readCookieValue(name: string) {
   if (typeof document === 'undefined') {
     return '';

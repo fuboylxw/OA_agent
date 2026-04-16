@@ -4,12 +4,15 @@ import { BrowserSecurityPolicy } from './browser-security-policy';
 import { ElementRefCache } from './element-ref-cache';
 import type { BrowserEngineAdapter } from './browser-engine-adapter';
 import type { BrowserSessionRecord, BrowserTabRecord } from './browser-runtime.types';
+import { BrowserEvaluateBuiltinRegistry } from './browser-evaluate-builtin-registry';
 import {
   detectAuthCredentialFieldKind,
   resolveAuthCredentialValue,
 } from '../common/auth-field.util';
 
 export class BrowserActionExecutor {
+  private readonly evaluateBuiltins = new BrowserEvaluateBuiltinRegistry();
+
   constructor(
     private readonly engine: BrowserEngineAdapter,
     private readonly refCache: ElementRefCache,
@@ -24,7 +27,7 @@ export class BrowserActionExecutor {
     snapshotId: string | undefined,
   ): Promise<{
     stepResult: RpaExecutedStep;
-    extractedValue?: { key: string; value: any };
+    extractedValues?: Record<string, any>;
     refreshSnapshot: boolean;
   }> {
     const resolvedStep = this.interpolateStep(step, tab.payload);
@@ -33,6 +36,7 @@ export class BrowserActionExecutor {
       ? this.resolveElement(session.sessionId, tab.tabId, resolvedStep)
       : undefined;
     const value = this.resolveValue(resolvedStep, tab.payload);
+    let extractedValues: Record<string, any> | undefined;
 
     switch (resolvedStep.type) {
       case 'goto':
@@ -56,12 +60,22 @@ export class BrowserActionExecutor {
       case 'extract': {
         const extracted = await this.engine.extract(session, tab, element);
         const key = resolvedStep.fieldKey || 'lastExtracted';
-        tab.extractedValues[key] = extracted;
-        return {
-          stepResult: this.buildStepResult(resolvedStep, index, snapshotId, element, value, 'executed'),
-          extractedValue: { key, value: extracted },
-          refreshSnapshot: true,
+        extractedValues = {
+          [key]: extracted,
         };
+        break;
+      }
+      case 'evaluate': {
+        const evaluationScript = resolvedStep.script?.trim()
+          || this.evaluateBuiltins.resolve(resolvedStep);
+        const evaluated = await this.engine.evaluate(
+          session,
+          tab,
+          evaluationScript,
+          this.buildEvaluateContext(tab, resolvedStep, value),
+        );
+        extractedValues = this.normalizeEvaluateOutput(resolvedStep, evaluated);
+        break;
       }
       case 'download': {
         const downloaded = await this.engine.download(session, tab, element);
@@ -78,8 +92,12 @@ export class BrowserActionExecutor {
     }
 
     await this.engine.stabilize(session, tab, resolvedStep.timeoutMs);
+    if (extractedValues) {
+      Object.assign(tab.extractedValues, extractedValues);
+    }
     return {
       stepResult: this.buildStepResult(resolvedStep, index, snapshotId, element, value, 'executed'),
+      extractedValues,
       refreshSnapshot: resolvedStep.type !== 'wait',
     };
   }
@@ -128,6 +146,8 @@ export class BrowserActionExecutor {
       ...step,
       selector: this.interpolateTemplate(step.selector, payload),
       value: this.interpolateTemplate(step.value, payload),
+      script: this.interpolateTemplate(step.script, payload),
+      options: this.interpolateValue(step.options, payload),
       target: step.target
         ? {
             ...step.target,
@@ -148,6 +168,24 @@ export class BrowserActionExecutor {
       const resolved = this.getPayloadValue(payload, path);
       return resolved === undefined || resolved === null ? '' : String(resolved);
     });
+  }
+
+  private interpolateValue(value: any, payload: Record<string, any>): any {
+    if (typeof value === 'string') {
+      return this.interpolateTemplate(value, payload);
+    }
+
+    if (!value || typeof value !== 'object') {
+      return value;
+    }
+
+    if (Array.isArray(value)) {
+      return value.map((item) => this.interpolateValue(item, payload));
+    }
+
+    return Object.fromEntries(
+      Object.entries(value).map(([key, current]) => [key, this.interpolateValue(current, payload)]),
+    );
   }
 
   private getPayloadValue(payload: Record<string, any>, path: string) {
@@ -187,6 +225,61 @@ export class BrowserActionExecutor {
     }
   }
 
+  private buildEvaluateContext(
+    tab: BrowserTabRecord,
+    step: RpaStepDefinition,
+    value: any,
+  ) {
+    return {
+      payload: tab.payload || {},
+      formData: tab.payload?.formData || {},
+      auth: tab.payload?.auth || {},
+      extractedValues: tab.extractedValues || {},
+      ticket: tab.ticket || {},
+      tab: {
+        url: tab.url,
+        title: tab.title,
+        history: tab.history,
+        action: tab.action,
+        pageVersion: tab.pageVersion,
+      },
+      step: {
+        type: step.type,
+        selector: step.selector,
+        fieldKey: step.fieldKey,
+        value,
+        description: step.description,
+        timeoutMs: step.timeoutMs,
+        builtin: step.builtin,
+        options: step.options,
+        target: step.target,
+      },
+    };
+  }
+
+  private normalizeEvaluateOutput(
+    step: RpaStepDefinition,
+    value: any,
+  ) {
+    if (step.fieldKey) {
+      return {
+        [step.fieldKey]: value,
+      };
+    }
+
+    if (value && typeof value === 'object' && !Array.isArray(value)) {
+      return value as Record<string, any>;
+    }
+
+    if (value === undefined) {
+      return undefined;
+    }
+
+    return {
+      lastEvaluated: value,
+    };
+  }
+
   private buildStepResult(
     step: RpaStepDefinition,
     index: number,
@@ -210,6 +303,6 @@ export class BrowserActionExecutor {
   }
 
   private requiresElement(type: RpaStepDefinition['type']) {
-    return type !== 'goto' && type !== 'wait' && type !== 'screenshot';
+    return type !== 'goto' && type !== 'wait' && type !== 'screenshot' && type !== 'evaluate';
   }
 }

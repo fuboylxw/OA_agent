@@ -12,6 +12,11 @@ export class CreateBootstrapJobDto {
   @IsString()
   name?: string;
 
+  @ApiProperty({ required: false, description: '导入目标连接器 ID' })
+  @IsOptional()
+  @IsString()
+  connectorId?: string;
+
   @ApiProperty({ required: false, description: 'OA 地址' })
   @IsOptional()
   @ValidateIf((o) => o.oaUrl !== '')

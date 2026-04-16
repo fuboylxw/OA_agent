@@ -1,46 +1,110 @@
 'use client';
 
-import { useCallback, useEffect, useState } from 'react';
+import { useCallback, useEffect, useState, type ChangeEvent } from 'react';
 import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { FileText, CheckCircle, Clock, AlertCircle, Search } from 'lucide-react';
-import { authFetch } from '../lib/api-client';
+import { FileText, CheckCircle, AlertCircle, Search, Plus } from 'lucide-react';
+import { apiClient, authFetch } from '../lib/api-client';
 import { withBrowserApiBase } from '../lib/browser-api-base-url';
-import { hasClientSession } from '../lib/client-auth';
+import { getClientUserInfo, hasClientSession } from '../lib/client-auth';
 
 interface ProcessTemplate {
   id: string;
   processCode: string;
   processName: string;
   processCategory: string | null;
+  version?: number;
   status: string;
   falLevel: string | null;
   uiHints: any;
   createdAt: string;
   updatedAt: string;
-  sourceType: 'published' | 'bootstrap_candidate';
+  sourceType: 'published';
   connector?: {
     id: string;
     name: string;
     oaType: string;
     oclLevel: string;
   } | null;
-  bootstrapJobId?: string;
-  bootstrapJobStatus?: string;
+}
+
+interface ConnectorOption {
+  id: string;
+  name: string;
+  baseUrl?: string | null;
+}
+
+type CreateFormState = {
+  connectorId: string;
+  processCode: string;
+  processName: string;
+  processCategory: string;
+  description: string;
+  falLevel: string;
+  rpaFlowContent: string;
+};
+
+function createEmptyFormState(): CreateFormState {
+  return {
+    connectorId: '',
+    processCode: '',
+    processName: '',
+    processCategory: '',
+    description: '',
+    falLevel: 'F2',
+    rpaFlowContent: JSON.stringify({
+      flows: [{
+        processCode: 'leave_request',
+        processName: '请假申请',
+        fields: [
+          { key: 'start_date', label: '开始日期', type: 'date', required: true },
+          { key: 'end_date', label: '结束日期', type: 'date', required: true },
+          { key: 'reason', label: '请假原因', type: 'textarea', required: true },
+        ],
+        actions: {
+          submit: {
+            steps: [
+              { type: 'goto', value: 'https://oa.example.com/leave' },
+              { type: 'input', fieldKey: 'start_date', target: { kind: 'text', value: '开始日期' } },
+              { type: 'input', fieldKey: 'end_date', target: { kind: 'text', value: '结束日期' } },
+              { type: 'input', fieldKey: 'reason', target: { kind: 'text', value: '请假原因' } },
+              { type: 'click', target: { kind: 'text', value: '提交' } },
+            ],
+          },
+        },
+      }],
+    }, null, 2),
+  };
 }
 
 export default function ProcessLibraryPage() {
   const router = useRouter();
   const [processes, setProcesses] = useState<ProcessTemplate[]>([]);
+  const [connectors, setConnectors] = useState<ConnectorOption[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [searchTerm, setSearchTerm] = useState('');
   const [categoryFilter, setCategoryFilter] = useState('all');
+  const [connectorFilter, setConnectorFilter] = useState('all');
+  const [showCreateModal, setShowCreateModal] = useState(false);
+  const [createForm, setCreateForm] = useState<CreateFormState>(createEmptyFormState());
+  const [createError, setCreateError] = useState('');
+  const [creating, setCreating] = useState(false);
+
+  const canManage = (() => {
+    const roles = getClientUserInfo().roles || [];
+    return roles.includes('admin') || roles.includes('flow_manager');
+  })();
 
   const fetchProcesses = useCallback(async () => {
     try {
       setError(null);
-      const response = await authFetch(withBrowserApiBase('/api/v1/process-library'));
+      const params = new URLSearchParams();
+      if (connectorFilter !== 'all') {
+        params.set('connectorId', connectorFilter);
+      }
+      const suffix = params.toString() ? `?${params.toString()}` : '';
+      const response = await authFetch(withBrowserApiBase(`/api/v1/process-library${suffix}`));
 
       if (!response.ok) {
         throw new Error('流程库加载失败');
@@ -55,6 +119,16 @@ export default function ProcessLibraryPage() {
     } finally {
       setLoading(false);
     }
+  }, [connectorFilter]);
+
+  const fetchConnectors = useCallback(async () => {
+    try {
+      const response = await apiClient.get('/connectors');
+      setConnectors(response.data || []);
+    } catch (err) {
+      console.error('Failed to fetch connectors:', err);
+      setConnectors([]);
+    }
   }, []);
 
   useEffect(() => {
@@ -68,30 +142,32 @@ export default function ProcessLibraryPage() {
     }
 
     void fetchProcesses();
-  }, [fetchProcesses, router]);
+    void fetchConnectors();
+  }, [fetchProcesses, fetchConnectors, router]);
 
   const filteredProcesses = processes.filter((process) => {
     const matchesSearch =
       process.processName.toLowerCase().includes(searchTerm.toLowerCase()) ||
-      process.processCode.toLowerCase().includes(searchTerm.toLowerCase());
+      process.processCode.toLowerCase().includes(searchTerm.toLowerCase()) ||
+      (process.connector?.name || '').toLowerCase().includes(searchTerm.toLowerCase());
     const matchesCategory =
       categoryFilter === 'all' || process.processCategory === categoryFilter;
-    return matchesSearch && matchesCategory;
+    const matchesConnector =
+      connectorFilter === 'all' || process.connector?.id === connectorFilter;
+    return matchesSearch && matchesCategory && matchesConnector;
   });
 
   const categories = Array.from(new Set(processes.map((p) => p.processCategory).filter((value): value is string => !!value)));
-  const pendingCount = processes.filter(
-    (p) => p.status === 'validation_failed' || p.status === 'validation_partial',
-  ).length;
+  const connectorOptions = Array.from(new Map(
+    connectors
+      .filter((connector) => connector.id)
+      .map((connector) => [connector.id, connector]),
+  ).values());
 
   const getStatusIcon = (status: string) => {
     switch (status) {
       case 'published':
         return <CheckCircle className="w-5 h-5 text-green-500" />;
-      case 'validation_partial':
-        return <Clock className="w-5 h-5 text-yellow-500" />;
-      case 'validation_failed':
-        return <AlertCircle className="w-5 h-5 text-red-500" />;
       default:
         return <AlertCircle className="w-5 h-5 text-gray-500" />;
     }
@@ -101,10 +177,6 @@ export default function ProcessLibraryPage() {
     switch (status) {
       case 'published':
         return '已发布';
-      case 'validation_partial':
-        return '验证未通过';
-      case 'validation_failed':
-        return '验证失败';
       case 'archived':
         return '已归档';
       default:
@@ -123,18 +195,39 @@ export default function ProcessLibraryPage() {
     return colors[level] || 'bg-gray-100 text-gray-700';
   };
 
-  const getRepairStatusText = (status: string) => {
-    switch (status) {
-      case 'fixed':
-        return '已修复';
-      case 'failed':
-        return '修复失败';
-      case 'skipped':
-        return '未自动修复';
-      case 'rejected':
-        return '修复建议被拒绝';
-      default:
-        return status;
+  const handleFileUpload = (event: ChangeEvent<HTMLInputElement>) => {
+    const file = event.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (loadEvent) => {
+      const content = String(loadEvent.target?.result || '');
+      setCreateForm((prev) => ({ ...prev, rpaFlowContent: content }));
+    };
+    reader.readAsText(file);
+    event.target.value = '';
+  };
+
+  const handleCreate = async () => {
+    setCreating(true);
+    setCreateError('');
+    try {
+      await apiClient.post('/process-library', {
+        connectorId: createForm.connectorId,
+        processCode: createForm.processCode.trim(),
+        processName: createForm.processName.trim(),
+        processCategory: createForm.processCategory.trim() || undefined,
+        description: createForm.description.trim() || undefined,
+        falLevel: createForm.falLevel,
+        rpaFlowContent: createForm.rpaFlowContent,
+      });
+      setShowCreateModal(false);
+      setCreateForm(createEmptyFormState());
+      await fetchProcesses();
+    } catch (err: any) {
+      const message = err.response?.data?.message || err.message || '创建流程失败';
+      setCreateError(typeof message === 'string' ? message : JSON.stringify(message));
+    } finally {
+      setCreating(false);
     }
   };
 
@@ -152,8 +245,22 @@ export default function ProcessLibraryPage() {
   return (
     <div className="container mx-auto p-6 max-w-7xl">
       <div className="mb-6">
-        <h1 className="text-3xl font-bold mb-2">流程库</h1>
-        <p className="text-gray-600">管理和查看所有办事流程</p>
+        <div className="flex items-center justify-between gap-4">
+          <div>
+            <h1 className="text-3xl font-bold mb-2">流程库</h1>
+            <p className="text-gray-600">只展示正式发布流程。每个流程都必须隶属于一个连接器。</p>
+          </div>
+          {canManage && (
+            <button
+              type="button"
+              onClick={() => setShowCreateModal(true)}
+              className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-700"
+            >
+              <Plus className="h-4 w-4" />
+              单个添加流程
+            </button>
+          )}
+        </div>
       </div>
 
       {error && (
@@ -187,6 +294,18 @@ export default function ProcessLibraryPage() {
               </option>
             ))}
           </select>
+          <select
+            value={connectorFilter}
+            onChange={(e) => setConnectorFilter(e.target.value)}
+            className="px-4 py-2 border border-gray-300 rounded-md"
+          >
+            <option value="all">所有连接器</option>
+            {connectorOptions.map((connector) => (
+              <option key={connector.id} value={connector.id}>
+                {connector.name}
+              </option>
+            ))}
+          </select>
         </div>
       </div>
 
@@ -204,9 +323,9 @@ export default function ProcessLibraryPage() {
         </div>
         <div className="bg-white rounded-lg shadow-md p-4">
           <div className="text-2xl font-bold text-yellow-600">
-            {pendingCount}
+            {connectorOptions.length}
           </div>
-          <div className="text-sm text-gray-600">待处理</div>
+          <div className="text-sm text-gray-600">连接器数</div>
         </div>
         <div className="bg-white rounded-lg shadow-md p-4">
           <div className="text-2xl font-bold text-purple-600">{categories.length}</div>
@@ -234,6 +353,7 @@ export default function ProcessLibraryPage() {
                   <div className="flex items-center gap-4 text-sm text-gray-600">
                     <span>代码: {process.processCode}</span>
                     <span>分类: {process.processCategory || '-'}</span>
+                    <span>所属连接器: {process.connector?.name || '-'}</span>
                   </div>
                 </div>
                 {process.falLevel && (
@@ -263,28 +383,7 @@ export default function ProcessLibraryPage() {
                   )}
                   {process.sourceType === 'published' && process.connector && (
                     <div className="mt-2 text-sm text-gray-600">
-                      连接器: {process.connector.name}
-                    </div>
-                  )}
-                  {process.sourceType === 'bootstrap_candidate' && (
-                    <div className="space-y-2 text-sm">
-                      <div className="flex items-center gap-2">
-                        <AlertCircle className="w-4 h-4 text-red-500" />
-                        <span className="text-red-600">该流程尚未通过验证，未注册到 MCP</span>
-                      </div>
-                      {process.uiHints.repairResult?.attempts > 0 && (
-                        <div className="text-gray-600">
-                          自动修复: 已尝试 {process.uiHints.repairResult.attempts} 次，最近结果为 {getRepairStatusText(process.uiHints.repairResult?.lastStatus || '')}
-                        </div>
-                      )}
-                      {process.uiHints.repairResult?.lastSummary && (
-                        <div className="text-gray-600">
-                          修复摘要: {process.uiHints.repairResult.lastSummary}
-                        </div>
-                      )}
-                      {process.uiHints.sourceUrl && (
-                        <div className="text-gray-600 break-all">来源: {process.uiHints.sourceUrl}</div>
-                      )}
+                      所属连接器: {process.connector.name}
                     </div>
                   )}
                   {process.uiHints.validationResult && (
@@ -330,16 +429,6 @@ export default function ProcessLibraryPage() {
                       )}
                     </div>
                   )}
-                  {process.sourceType === 'bootstrap_candidate' && process.bootstrapJobId && (
-                    <div className="mt-3">
-                      <Link
-                        href={`/bootstrap/${process.bootstrapJobId}`}
-                        className="inline-flex items-center gap-2 rounded-md bg-blue-600 px-3 py-1.5 text-sm font-medium text-white hover:bg-blue-700"
-                      >
-                        前往初始化任务处理
-                      </Link>
-                    </div>
-                  )}
                 </div>
               )}
 
@@ -352,6 +441,106 @@ export default function ProcessLibraryPage() {
           ))
         )}
       </div>
+
+      {showCreateModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
+          <div className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-2xl bg-white shadow-xl">
+            <div className="flex items-center justify-between border-b border-gray-200 px-8 py-5">
+              <div>
+                <h2 className="text-xl font-bold text-gray-900">单个添加流程</h2>
+                <p className="mt-0.5 text-sm text-gray-500">流程库中的流程必须先选择所属连接器。</p>
+              </div>
+              <button onClick={() => { setShowCreateModal(false); setCreateError(''); }} className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-gray-100">
+                <i className="fas fa-times text-gray-500"></i>
+              </button>
+            </div>
+
+            <div className="flex-1 space-y-6 overflow-y-auto px-8 py-6">
+              {createError && (
+                <div className="rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-600">
+                  {createError}
+                </div>
+              )}
+
+              <section className="grid grid-cols-1 gap-4 rounded-xl border border-gray-200 p-4 sm:grid-cols-2">
+                <div className="sm:col-span-2">
+                  <label className="mb-1 block text-sm font-medium text-gray-700">所属连接器</label>
+                  <select
+                    value={createForm.connectorId}
+                    onChange={(e) => setCreateForm((prev) => ({ ...prev, connectorId: e.target.value }))}
+                    className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  >
+                    <option value="">请选择连接器</option>
+                    {connectors.map((connector) => (
+                      <option key={connector.id} value={connector.id}>
+                        {connector.name}
+                        {connector.baseUrl ? ` - ${connector.baseUrl}` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700">流程编码</label>
+                  <input className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" value={createForm.processCode} onChange={(e) => setCreateForm((prev) => ({ ...prev, processCode: e.target.value }))} placeholder="leave_request" />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700">流程名称</label>
+                  <input className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" value={createForm.processName} onChange={(e) => setCreateForm((prev) => ({ ...prev, processName: e.target.value }))} placeholder="请假申请" />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700">流程分类</label>
+                  <input className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" value={createForm.processCategory} onChange={(e) => setCreateForm((prev) => ({ ...prev, processCategory: e.target.value }))} placeholder="人事" />
+                </div>
+                <div>
+                  <label className="mb-1 block text-sm font-medium text-gray-700">FAL</label>
+                  <select className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" value={createForm.falLevel} onChange={(e) => setCreateForm((prev) => ({ ...prev, falLevel: e.target.value }))}>
+                    <option value="F0">F0</option>
+                    <option value="F1">F1</option>
+                    <option value="F2">F2</option>
+                    <option value="F3">F3</option>
+                    <option value="F4">F4</option>
+                  </select>
+                </div>
+                <div className="sm:col-span-2">
+                  <label className="mb-1 block text-sm font-medium text-gray-700">流程描述</label>
+                  <input className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" value={createForm.description} onChange={(e) => setCreateForm((prev) => ({ ...prev, description: e.target.value }))} placeholder="用于员工请假申请" />
+                </div>
+              </section>
+
+              <section className="space-y-4 rounded-xl border border-gray-200 p-4">
+                <div className="flex items-center justify-between gap-4">
+                  <div>
+                    <h3 className="text-sm font-semibold text-gray-900">流程定义</h3>
+                    <p className="mt-1 text-xs text-gray-500">使用现有页面/链接流程 JSON。单个添加只允许一个流程定义。</p>
+                  </div>
+                  <label className="inline-flex cursor-pointer items-center justify-center rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 hover:border-blue-400 hover:bg-blue-50">
+                    <input type="file" className="hidden" accept=".json,.txt" onChange={handleFileUpload} />
+                    上传流程文件
+                  </label>
+                </div>
+                <textarea
+                  rows={14}
+                  className="w-full rounded-lg border border-gray-300 px-3 py-2.5 font-mono text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
+                  value={createForm.rpaFlowContent}
+                  onChange={(e) => setCreateForm((prev) => ({ ...prev, rpaFlowContent: e.target.value }))}
+                />
+              </section>
+            </div>
+
+            <div className="flex items-center gap-3 border-t border-gray-200 bg-gray-50 px-8 py-5">
+              <button onClick={() => { setShowCreateModal(false); setCreateError(''); }} className="rounded-lg border border-gray-300 px-5 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-100">取消</button>
+              <div className="flex-1 text-xs text-gray-500">没有连接器时，请先去初始化中心创建或批量初始化一个连接器。</div>
+              <button
+                onClick={handleCreate}
+                disabled={creating || !createForm.connectorId || !createForm.processCode.trim() || !createForm.processName.trim() || !createForm.rpaFlowContent.trim()}
+                className="rounded-lg bg-blue-600 px-6 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {creating ? '创建中...' : '创建流程'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
     </div>
   );
 }

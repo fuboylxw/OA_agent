@@ -3027,7 +3027,6 @@ ${JSON.stringify(forms, null, 2)}
     const baseUrl = this.resolveBaseUrl(bootstrapJob);
     const authConfig = bootstrapJob.authConfig || {};
     const authType = authConfig.authType || (hasRpaDefinitions ? 'cookie' : 'apikey');
-    const connectorName = bootstrapJob.name || `OA-${bootstrapJob.id.substring(0, 8)}`;
     const oclLevel = this.computeOclLevel(processes);
 
     // 拆分 authConfig 为公开部分和敏感部分
@@ -3035,33 +3034,60 @@ ${JSON.stringify(forms, null, 2)}
 
     // 使用事务保证 Connector + Capability + SecretRef + MCPTool + RemoteProcess + ProcessTemplate 的一致性
     await this.prisma.$transaction(async (tx) => {
+      const selectedConnector = bootstrapJob.connectorId
+        ? await tx.connector.findFirst({
+            where: {
+              id: bootstrapJob.connectorId,
+              tenantId: bootstrapJob.tenantId,
+            },
+            select: {
+              id: true,
+              name: true,
+            },
+          })
+        : null;
+      const connectorName = selectedConnector?.name || bootstrapJob.name || `OA-${bootstrapJob.id.substring(0, 8)}`;
+
       // ── 1. 创建或更新 Connector ──
-      const connector = await tx.connector.upsert({
-        where: {
-          tenantId_name: {
-            tenantId: bootstrapJob.tenantId,
-            name: connectorName,
-          },
-        },
-        create: {
-          tenantId: bootstrapJob.tenantId,
-          name: connectorName,
-          oaType: connectorOaType,
-          baseUrl,
-          authType,
-          authConfig: publicConfig,
-          oclLevel,
-          status: 'active',
-        },
-        update: {
-          oaType: connectorOaType,
-          baseUrl,
-          authType,
-          authConfig: publicConfig,
-          oclLevel,
-          status: 'active',
-        },
-      });
+      const connector = selectedConnector
+        ? await tx.connector.update({
+            where: { id: selectedConnector.id },
+            data: {
+              name: connectorName,
+              oaType: connectorOaType,
+              baseUrl,
+              authType,
+              authConfig: publicConfig,
+              oclLevel,
+              status: 'active',
+            },
+          })
+        : await tx.connector.upsert({
+            where: {
+              tenantId_name: {
+                tenantId: bootstrapJob.tenantId,
+                name: connectorName,
+              },
+            },
+            create: {
+              tenantId: bootstrapJob.tenantId,
+              name: connectorName,
+              oaType: connectorOaType,
+              baseUrl,
+              authType,
+              authConfig: publicConfig,
+              oclLevel,
+              status: 'active',
+            },
+            update: {
+              oaType: connectorOaType,
+              baseUrl,
+              authType,
+              authConfig: publicConfig,
+              oclLevel,
+              status: 'active',
+            },
+          });
 
       this.logger.log(`Connector upserted: ${connector.id} (${connectorName})`);
 
@@ -3982,17 +4008,92 @@ ${JSON.stringify(forms, null, 2)}
 
   /**
    * 从 bootstrapJob 中解析 baseUrl
-   * 优先级：oaUrl > openApiUrl 的 origin > API 文档 servers 字段 > fallback
+   * 对 URL / direct-link 模式，连接器应指向最终业务系统，而不是登录/认证入口。
+   * 优先级：明确业务地址 > 跳转/提交目标地址 > oaUrl > openApiUrl 的 origin > API 文档 servers 字段 > 入口链接 > fallback
    */
   private resolveBaseUrl(bootstrapJob: any): string {
     const authConfig = (bootstrapJob.authConfig as Record<string, any> | null) || {};
     const platformConfig = (authConfig.platformConfig as Record<string, any> | null) || {};
+    const rpaDefinitions = this.getRpaDefinitions(bootstrapJob);
 
-    if (platformConfig.entryUrl) {
+    const tryOrigin = (value: unknown): string | null => {
+      const raw = String(value || '').trim();
+      if (!raw) return null;
+
       try {
-        return new URL(platformConfig.entryUrl).origin;
-      } catch { /* ignore */ }
+        return new URL(raw).origin;
+      } catch {
+        return null;
+      }
+    };
+
+    const tryActionStepOrigin = (): string | null => {
+      for (const definition of rpaDefinitions) {
+        const submitSteps = Array.isArray(definition?.actions?.submit?.steps)
+          ? definition.actions.submit.steps
+          : [];
+        const querySteps = Array.isArray(definition?.actions?.queryStatus?.steps)
+          ? definition.actions.queryStatus.steps
+          : [];
+
+        for (const step of [...submitSteps, ...querySteps]) {
+          if (String(step?.type || '').trim().toLowerCase() !== 'goto') {
+            continue;
+          }
+          const origin = tryOrigin((step as Record<string, any>).value);
+          if (origin) {
+            return origin;
+          }
+        }
+      }
+
+      return null;
+    };
+
+    const tryRuntimeOrigin = (): string | null => {
+      for (const definition of rpaDefinitions) {
+        const runtime = (definition?.runtime as Record<string, any> | null) || {};
+        const networkSubmit = (runtime.networkSubmit as Record<string, any> | null) || {};
+        const networkStatus = (runtime.networkStatus as Record<string, any> | null) || {};
+
+        const directOrigin = tryOrigin(networkSubmit.url)
+          || tryOrigin(networkStatus.url);
+        if (directOrigin) {
+          return directOrigin;
+        }
+      }
+
+      return null;
+    };
+
+    const tryPlatformOrigin = (): string | null => {
+      for (const definition of rpaDefinitions) {
+        const platform = (definition?.platform as Record<string, any> | null) || {};
+        const portalSsoBridge = (platform.portalSsoBridge as Record<string, any> | null) || {};
+
+        const origin = tryOrigin(platform.businessBaseUrl)
+          || tryOrigin(platform.targetBaseUrl)
+          || tryOrigin(platform.jumpUrlTemplate)
+          || tryOrigin(portalSsoBridge.businessBaseUrl)
+          || tryOrigin(portalSsoBridge.targetBaseUrl);
+        if (origin) {
+          return origin;
+        }
+      }
+
+      return null;
+    };
+
+    const explicitBusinessOrigin = tryOrigin(platformConfig.businessBaseUrl)
+      || tryOrigin(platformConfig.targetBaseUrl)
+      || tryPlatformOrigin()
+      || tryRuntimeOrigin()
+      || tryActionStepOrigin()
+      || tryOrigin(platformConfig.jumpUrlTemplate);
+    if (explicitBusinessOrigin) {
+      return explicitBusinessOrigin;
     }
+
     // 1. 优先使用 oaUrl
     if (bootstrapJob.oaUrl) {
       return new URL(bootstrapJob.oaUrl).origin;
@@ -4014,6 +4115,12 @@ ${JSON.stringify(forms, null, 2)}
         const doc = JSON.parse(docSource.sourceContent);
         const serverUrl = doc.servers?.[0]?.url;
         if (serverUrl) return serverUrl.replace(/\/+$/, '');
+      } catch { /* ignore */ }
+    }
+
+    if (platformConfig.entryUrl) {
+      try {
+        return new URL(platformConfig.entryUrl).origin;
       } catch { /* ignore */ }
     }
 

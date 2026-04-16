@@ -37,7 +37,9 @@ export default function ProcessesContent({ initialProcesses }: { initialProcesse
   }, []);
 
   const filteredProcesses = processes.filter((p) =>
-    (p.processName || '').includes(searchTerm) || (p.processCode || '').includes(searchTerm)
+    (p.processName || '').includes(searchTerm)
+    || (p.processCode || '').includes(searchTerm)
+    || (p.connector?.name || '').includes(searchTerm)
   );
 
   const grouped: Record<string, any[]> = {};
@@ -95,9 +97,12 @@ export default function ProcessesContent({ initialProcesses }: { initialProcesse
                         {process.falLevel}
                       </span>
                     </div>
-                    <p className="text-sm text-gray-500 mb-4 font-mono">{process.processCode}</p>
+                    <p className="text-sm text-gray-500 mb-2 font-mono">{process.processCode}</p>
+                    <p className="mb-4 text-xs text-gray-500">
+                      所属连接器：{process.connector?.name || '-'}
+                    </p>
                     <div className="flex items-center justify-between pt-4 border-t border-gray-200">
-                      <span className="text-xs text-gray-500">版本 v{process.version}</span>
+                      <span className="text-xs text-gray-500">版本 v{process.version || '-'}</span>
                       <a
                         href={`/chat?flow=${process.processCode}`}
                         className="text-sm text-blue-600 hover:text-blue-800 font-medium inline-flex items-center gap-1"

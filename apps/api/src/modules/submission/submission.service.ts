@@ -18,6 +18,7 @@ import { ChatSessionProcessService } from '../common/chat-session-process.servic
 import { AttachmentBindingService } from '../attachment/attachment-binding.service';
 import { AttachmentService } from '../attachment/attachment.service';
 import { DeliveryOrchestratorService } from '../delivery-runtime/delivery-orchestrator.service';
+import { normalizeExternalSubmissionId } from '../delivery-runtime/rpa-submit-confirmation.util';
 import {
   getSubmissionStatusText,
   isActiveSubmissionStatus,
@@ -297,17 +298,21 @@ export class SubmissionService {
         connectorId,
         processCode,
       });
+      const completionKind = this.resolveCompletionKind(result);
+      const nextSubmissionStatus = result.success
+        ? (completionKind === 'draft' ? 'pending' : 'submitted')
+        : 'failed';
       const normalizedOaSubmissionId = this.normalizeOaSubmissionId(result.submissionId);
 
       // Update submission
       await this.prisma.submission.update({
         where: { id: submissionId },
         data: {
-          status: result.success ? 'submitted' : 'failed',
+          status: nextSubmissionStatus,
           oaSubmissionId: normalizedOaSubmissionId,
           submitResult: persistedResult as any,
           errorMsg: result.errorMessage,
-          submittedAt: result.success ? new Date() : undefined,
+          submittedAt: result.success && completionKind !== 'draft' ? new Date() : undefined,
         },
       });
       const persisted = await this.prisma.submission.findUnique({
@@ -323,7 +328,9 @@ export class SubmissionService {
         await this.createSubmissionEvent({
           tenantId: persisted.tenantId,
           submissionId,
-          eventType: result.success ? 'submitted' : 'submit_failed',
+          eventType: result.success
+            ? (completionKind === 'draft' ? 'draft_saved' : 'submitted')
+            : 'submit_failed',
           eventSource: 'internal',
           remoteEventId: persisted.oaSubmissionId || undefined,
           status: persisted.status,
@@ -334,7 +341,7 @@ export class SubmissionService {
       await this.chatSessionProcessService.syncSubmissionStatusToSession({
         submissionId,
         previousSubmissionStatus: originalSubmission.status,
-        externalStatus: result.success ? 'submitted' : 'failed',
+        externalStatus: nextSubmissionStatus,
         payload: persistedResult as Record<string, any>,
         createStatusMessage: false,
       });
@@ -768,20 +775,7 @@ export class SubmissionService {
   }
 
   private normalizeOaSubmissionId(value: unknown): string | undefined {
-    if (value === null || value === undefined) {
-      return undefined;
-    }
-
-    if (typeof value === 'string') {
-      const trimmed = value.trim();
-      return trimmed || undefined;
-    }
-
-    if (typeof value === 'number' || typeof value === 'bigint') {
-      return String(value);
-    }
-
-    return undefined;
+    return normalizeExternalSubmissionId(value);
   }
 
   private buildPersistedSubmitResult(
@@ -801,6 +795,12 @@ export class SubmissionService {
           deliveryPath: metadata.deliveryPath || DEFAULT_DELIVERY_PATH,
         },
       };
+  }
+
+  private resolveCompletionKind(result: Record<string, any>) {
+    const completionKind = ((result.metadata as Record<string, any> | undefined)?.request?.completionKind)
+      || ((result.metadata as Record<string, any> | undefined)?.completionKind);
+    return completionKind === 'draft' ? 'draft' : 'submitted';
   }
 
   private async refreshTrackedSubmissionStatuses(

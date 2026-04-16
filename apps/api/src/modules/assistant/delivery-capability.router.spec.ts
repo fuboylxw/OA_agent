@@ -183,4 +183,56 @@ describe('DeliveryCapabilityRouter', () => {
     expect(summary.fallbackOrder).toEqual(['vision', 'url']);
     expect(router.selectPrimaryPath(summary, 'submit')).toBe('vision');
   });
+
+  it('treats url network runtime as a submit/query capable url path even without browser submit steps', () => {
+    const router = new DeliveryCapabilityRouter({} as any);
+    const summary = router.resolveForTemplateRecord({
+      id: 'template-4',
+      tenantId: 'tenant-1',
+      connectorId: 'connector-1',
+      remoteProcessId: 'remote-1',
+      processCode: 'leave_apply_url_network',
+      processName: '请假申请-URL网络模式',
+      processCategory: 'hr',
+      description: null,
+      status: 'published',
+      falLevel: null,
+      version: 1,
+      sourceVersion: '1',
+      sourceHash: null,
+      schema: {},
+      rules: null,
+      permissions: null,
+      uiHints: {
+        rpaDefinition: {
+          processCode: 'leave_apply_url_network',
+          processName: '请假申请-URL网络模式',
+          platform: {
+            jumpUrlTemplate: 'https://oa.example.com/workflow/{processCode}',
+          },
+          runtime: {
+            networkSubmit: {
+              url: 'https://oa.example.com/api/workflow/submit',
+            },
+            networkStatus: {
+              url: 'https://oa.example.com/api/workflow/status',
+            },
+          },
+        },
+      },
+      lastSyncedAt: new Date(),
+      publishedAt: new Date(),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      supersedesId: null,
+      connector: null,
+    } as any);
+
+    expect(summary.url.available).toBe(true);
+    expect(summary.url.submitEnabled).toBe(true);
+    expect(summary.url.queryEnabled).toBe(true);
+    expect(summary.url.executorMode).toBe('http');
+    expect(summary.vision.available).toBe(false);
+    expect(router.selectPrimaryPath(summary, 'submit')).toBe('url');
+  });
 });

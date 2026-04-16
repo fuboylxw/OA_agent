@@ -4,7 +4,11 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { apiClient } from '../lib/api-client';
 import { hasRequiredRole } from '../lib/access-control';
-import { getClientAuthSnapshot, subscribeClientAuth } from '../lib/client-auth';
+import {
+  getClientAuthServerSnapshot,
+  getClientAuthSnapshot,
+  subscribeClientAuth,
+} from '../lib/client-auth';
 
 interface Stats {
   totalSubmissions: number;
@@ -81,7 +85,7 @@ export default function HomeContent() {
   const snapshot = useSyncExternalStore(
     subscribeClientAuth,
     getClientAuthSnapshot,
-    getClientAuthSnapshot,
+    getClientAuthServerSnapshot,
   );
 
   useEffect(() => {

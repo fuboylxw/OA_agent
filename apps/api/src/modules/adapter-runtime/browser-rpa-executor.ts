@@ -1,5 +1,6 @@
 import type { RpaActionDefinition, RpaFlowDefinition } from '@uniflow/shared-types';
 import { BrowserTaskRuntime } from '../browser-runtime/browser-task-runtime';
+import { confirmRpaSubmit } from '../delivery-runtime/rpa-submit-confirmation.util';
 import type { RpaExecutionInput, RpaExecutionResult, RpaExecutor } from './rpa-executor';
 
 export class BrowserRpaExecutor implements RpaExecutor {
@@ -44,21 +45,22 @@ export class BrowserRpaExecutor implements RpaExecutor {
     }
 
     if (input.action === 'submit') {
-      const submissionId = this.resolveSubmissionId(
-        actionDefinition,
-        input.flow.processCode,
-        input.payload,
-        taskResult.extractedValues,
-      );
       const message = this.resolveMessage(actionDefinition, taskResult.extractedValues)
         || `${input.flow.processName} submitted through browser runtime`;
-      const status = this.resolveStatus(actionDefinition, input.payload.submissionId, taskResult.extractedValues)
-        || 'submitted';
+      const confirmation = confirmRpaSubmit({
+        actionDefinition,
+        extractedValues: taskResult.extractedValues,
+        finalSnapshot: taskResult.finalSnapshot,
+        fallbackMessage: message,
+      });
+      const status = confirmation.confirmed
+        ? (this.resolveStatus(actionDefinition, input.payload.submissionId, taskResult.extractedValues) || 'submitted')
+        : undefined;
       return {
-        success: true,
-        submissionId,
+        success: confirmation.confirmed,
+        submissionId: confirmation.submissionId,
         status,
-        message,
+        message: confirmation.confirmed ? message : (confirmation.failureReason || message),
         executedSteps: taskResult.executedSteps,
         jumpUrl: input.ticket.jumpUrl,
         ticketIssued: !!input.ticket.ticket,
