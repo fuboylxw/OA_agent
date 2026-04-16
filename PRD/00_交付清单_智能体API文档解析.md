@@ -391,7 +391,7 @@ curl -X POST http://localhost:3000/api/v1/bootstrap/jobs/{jobId}/parse-document 
 ### 后端
 - **框架**: NestJS 10.3
 - **ORM**: Prisma 5.8
-- **LLM**: Anthropic Claude Opus 4.6
+- **LLM**: Anthropic 模型
 - **语言**: TypeScript 5.3
 
 ### 数据库
