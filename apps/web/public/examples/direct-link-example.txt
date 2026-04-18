@@ -1,0 +1,28 @@
+# 全局
+认证入口: https://auth.example.com/
+系统网址: https://oa.example.com/
+
+## 流程: 请假申请
+描述: 教职工请假申请示例
+步骤:
+- 访问 https://auth.example.com/
+- 访问 https://oa.example.com/
+- 访问 https://oa.example.com/workflow/new?templateId=leave_request
+- 填写 请假事由 | 说明: 填写本次请假的具体原因 | 示例: 家中有事，需要请假半天
+- 填写 开始日期 | 说明: 请假开始日期 | 示例: 2026-04-20
+- 填写 结束日期 | 说明: 请假结束日期 | 示例: 2026-04-20
+- 填写 外出地点 | 说明: 请假期间所在地点 | 示例: 北京市海淀区
+- 填写 外出通讯方式 | 说明: 请假期间可联系到本人的手机号或其他联系方式 | 示例: 13800000000
+- 点击 保存待发
+- 看到 提交成功 就结束
+
+## 流程: 用印申请
+描述: 公章或合同章申请示例
+步骤:
+- 访问 https://auth.example.com/
+- 访问 https://oa.example.com/
+- 访问 https://oa.example.com/workflow/new?templateId=seal_apply
+- 填写 文件类型、名称及份数 | 说明: 填写需要盖章文件的类型、文件名称和份数 | 示例: 劳务合同 2份
+- 上传 用印附件 | 说明: 上传需要盖章的文件 | 示例: 劳务合同.pdf
+- 点击 保存待发
+- 看到 提交成功 就结束

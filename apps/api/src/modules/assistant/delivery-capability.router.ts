@@ -38,17 +38,23 @@ export class DeliveryCapabilityRouter {
     const rpaDefinition = uiHints.rpaDefinition as RpaFlowDefinition | undefined;
     const endpoints = Array.isArray(uiHints.endpoints) ? uiHints.endpoints : [];
     const runtime = rpaDefinition?.runtime;
+    const isDirectLink = this.isDirectLinkDefinition(rpaDefinition);
     const hasApiSubmit = this.includesMode(executionModes.submit, 'api')
       || endpoints.some((endpoint) => endpoint?.category === 'submit' && String(endpoint?.method || '').toUpperCase() !== 'RPA');
     const hasApiQuery = this.includesMode(executionModes.queryStatus, 'api')
       || endpoints.some((endpoint) => ['query', 'status_query'].includes(endpoint?.category) && String(endpoint?.method || '').toUpperCase() !== 'RPA');
-    const hasRpaSubmit = !!rpaDefinition?.actions?.submit;
-    const hasRpaQuery = !!rpaDefinition?.actions?.queryStatus;
-    const hasUrlSubmit = hasRpaSubmit || this.hasNetworkRequest(runtime?.networkSubmit);
-    const hasUrlQuery = hasRpaQuery || this.hasNetworkRequest(runtime?.networkStatus);
+    const hasRpaSubmit = this.includesMode(executionModes.submit, 'rpa')
+      || (!isDirectLink && !!rpaDefinition?.actions?.submit);
+    const hasRpaQuery = this.includesMode(executionModes.queryStatus, 'rpa')
+      || (!isDirectLink && !!rpaDefinition?.actions?.queryStatus);
+    const hasUrlSubmit = this.includesMode(executionModes.submit, 'url')
+      || (isDirectLink && this.hasNetworkRequest(runtime?.networkSubmit));
+    const hasUrlQuery = this.includesMode(executionModes.queryStatus, 'url')
+      || (isDirectLink && this.hasNetworkRequest(runtime?.networkStatus));
     const hasVisionTargets = this.hasImageTargets(rpaDefinition);
     const hasUrlEntry = !!(rpaDefinition?.platform?.entryUrl || rpaDefinition?.platform?.jumpUrlTemplate || rpaDefinition?.platform?.ticketBrokerUrl);
-    const hasUrlCapability = (hasUrlSubmit || hasUrlQuery) && hasUrlEntry;
+    const hasUrlCapability = (hasUrlSubmit || hasUrlQuery)
+      && (hasUrlEntry || this.hasNetworkRequest(runtime?.networkSubmit) || this.hasNetworkRequest(runtime?.networkStatus));
     const hasVisionCapability = hasRpaSubmit || hasRpaQuery;
 
     const apiHealth = this.resolveApiHealth(template.connector, hasApiSubmit || hasApiQuery);
@@ -230,6 +236,21 @@ export class DeliveryCapabilityRouter {
       && typeof (value as Record<string, any>).url === 'string'
       && (value as Record<string, any>).url.trim(),
     );
+  }
+
+  private isDirectLinkDefinition(definition?: RpaFlowDefinition) {
+    if (!definition || typeof definition !== 'object') {
+      return false;
+    }
+
+    const raw = definition as Record<string, any>;
+    const metadata = raw.metadata && typeof raw.metadata === 'object'
+      ? raw.metadata as Record<string, any>
+      : {};
+    const accessMode = String(raw.accessMode || metadata.accessMode || '').trim().toLowerCase();
+    const sourceType = String(raw.sourceType || metadata.sourceType || '').trim().toLowerCase();
+
+    return accessMode === 'direct_link' || sourceType === 'direct_link';
   }
 
   private resolveUrlExecutorMode(runtime: RpaFlowDefinition['runtime']) {

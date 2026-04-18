@@ -60,6 +60,10 @@ function getArg(name: string, fallback?: string) {
   return fallback;
 }
 
+function escapeRegExp(value: string) {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
 function extractSm2PrivateKeyHex(rawKey: string) {
   const exported = Buffer.from(rawKey.trim(), 'base64').toString('hex');
   const match = exported.match(/0201010420([0-9a-f]{64})/i);
@@ -229,6 +233,68 @@ async function latestAssistantBubbleText(page: any) {
   return String(await locator.nth(count - 1).innerText()).replace(/\s+/g, ' ').trim();
 }
 
+async function uploadAttachmentFromChat(input: {
+  page: any;
+  uploadFile: string;
+  uploadFieldLabel?: string;
+}) {
+  const { page, uploadFile, uploadFieldLabel } = input;
+  const fileName = path.basename(uploadFile);
+  if (!fs.existsSync(uploadFile)) {
+    throw new Error(`Upload file not found: ${uploadFile}`);
+  }
+
+  const candidates = uploadFieldLabel
+    ? [
+      page.getByRole('button', { name: `上传${uploadFieldLabel}`, exact: true }),
+      page.getByText(`上传${uploadFieldLabel}`, { exact: true }),
+      page.locator('button', { hasText: `上传${uploadFieldLabel}` }).first(),
+      page.locator(`button[title="上传${uploadFieldLabel}"]`).first(),
+    ]
+    : [
+      page.getByRole('button', { name: '上传附件', exact: true }),
+      page.getByText('上传附件', { exact: true }),
+      page.locator('button[title="上传附件"]').first(),
+    ];
+
+  let clicked = false;
+  for (const locator of candidates) {
+    const count = await locator.count().catch(() => 0);
+    if (!count) {
+      continue;
+    }
+    try {
+      await locator.first().click({ timeout: 5000 });
+      clicked = true;
+      break;
+    } catch {
+      continue;
+    }
+  }
+
+  if (!clicked) {
+    const bodyPreview = await readBodyPreview(page);
+    throw new Error(`Could not find upload button${uploadFieldLabel ? ` for field ${uploadFieldLabel}` : ''}. Body preview: ${bodyPreview.slice(0, 400)}`);
+  }
+
+  const inputLocator = page.locator('input[type="file"]').first();
+  await inputLocator.setInputFiles(uploadFile, { timeout: 15000 });
+  await page.locator(`text=${fileName}`).first().waitFor({
+    state: 'visible',
+    timeout: 30000,
+  });
+
+  if (uploadFieldLabel) {
+    const escaped = escapeRegExp(uploadFieldLabel);
+    await page.getByText(new RegExp(escaped)).first().waitFor({
+      state: 'visible',
+      timeout: 10000,
+    }).catch(() => undefined);
+  }
+
+  await page.waitForTimeout(1500);
+}
+
 async function latestUserBubbleText(page: any) {
   const locator = page.locator('main div.flex.justify-end p.whitespace-pre-wrap');
   const count = await locator.count();
@@ -305,7 +371,12 @@ async function pollForSubmission(input: {
           ? detailResponse.data as JsonRecord
           : null;
 
-        if (latestDetail?.submitResult || latestDetail?.status === 'failed' || latestDetail?.status === 'submitted') {
+        if (
+          latestDetail?.submitResult
+          || latestDetail?.status === 'failed'
+          || latestDetail?.status === 'submitted'
+          || latestDetail?.status === 'draft_saved'
+        ) {
           return {
             list: latestList,
             detail: latestDetail,
@@ -344,6 +415,11 @@ async function main() {
   const processCode = String(getArg('--process-code', process.env.E2E_PROCESS_CODE || '') || '').trim();
   const processName = String(getArg('--process-name', process.env.E2E_PROCESS_NAME || '') || '').trim();
   const detailPrompt = String(getArg('--detail-prompt', process.env.E2E_DETAIL_PROMPT || '') || '').trim();
+  const uploadFileArg = String(getArg('--upload-file', process.env.E2E_UPLOAD_FILE || '') || '').trim();
+  const uploadFieldLabel = String(getArg('--upload-field-label', process.env.E2E_UPLOAD_FIELD_LABEL || '') || '').trim();
+  const uploadFile = uploadFileArg
+    ? path.resolve(process.cwd(), uploadFileArg)
+    : '';
   if (!processCode) {
     throw new Error('Missing --process-code');
   }
@@ -371,6 +447,8 @@ async function main() {
     processCode,
     processName,
     detailPrompt,
+    uploadFile: uploadFile || null,
+    uploadFieldLabel: uploadFieldLabel || null,
     steps: {},
     assertions: {},
     success: false,
@@ -433,6 +511,20 @@ async function main() {
       domAssistantMessage: await latestAssistantBubbleText(page),
     };
 
+    if (uploadFile) {
+      await uploadAttachmentFromChat({
+        page,
+        uploadFile,
+        uploadFieldLabel: uploadFieldLabel || undefined,
+      });
+
+      report.steps.upload = {
+        uploadFile,
+        uploadFieldLabel: uploadFieldLabel || null,
+        pendingFilesText: await readBodyPreview(page),
+      };
+    }
+
     const detailTurn = await waitForAssistantResponse(page, webBaseUrl, async () => {
       await page.locator('textarea').fill(detailPrompt);
       await page.getByRole('button', { name: '发送' }).click();
@@ -480,6 +572,7 @@ async function main() {
     report.assertions = {
       processesPageContainsProcess: processesBody.includes(processName) && processesBody.includes(processCode),
       bootstrapAskedForMissingFields: Array.isArray(bootstrapData?.missingFields) && bootstrapData.missingFields.length > 0,
+      uploadCompleted: uploadFile ? Boolean(report.steps.upload) : true,
       detailTurnReadyForConfirmation: Boolean(detailTurn.data?.processCard) && Array.isArray(detailTurn.data?.actionButtons),
       confirmTurnAccepted: confirmTurn.status >= 200 && confirmTurn.status < 300,
       submissionCreated: Boolean(submissionDetail.id),
@@ -487,19 +580,23 @@ async function main() {
       deliveryPathIsUrl: submitMetadata.deliveryPath === 'url',
       requestTargetsSaveDraft: /method=saveDraft/i.test(String(submitRequest.url || '')),
       requestContainsUrlMode: submitMetadata.mode === 'url-network',
+      confirmTurnReflectsDraftSaved: confirmTurn.data?.processStatus === 'draft_saved'
+        && confirmTurn.data?.processCard?.statusText === '已保存待发',
       finalStatus: submissionDetail.status || null,
     };
 
     report.success = Boolean(
       report.assertions.processesPageContainsProcess
       && report.assertions.bootstrapAskedForMissingFields
+      && report.assertions.uploadCompleted
       && report.assertions.detailTurnReadyForConfirmation
       && report.assertions.confirmTurnAccepted
       && report.assertions.submissionCreated
       && report.assertions.submissionFinished
       && report.assertions.deliveryPathIsUrl
       && report.assertions.requestTargetsSaveDraft
-      && report.assertions.requestContainsUrlMode,
+      && report.assertions.requestContainsUrlMode
+      && report.assertions.confirmTurnReflectsDraftSaved,
     );
   } catch (error: any) {
     report.error = {

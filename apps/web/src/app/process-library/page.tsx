@@ -1,18 +1,20 @@
 'use client';
 
 import { useCallback, useEffect, useState, type ChangeEvent } from 'react';
-import Link from 'next/link';
 import { useRouter } from 'next/navigation';
-import { FileText, CheckCircle, AlertCircle, Search, Plus } from 'lucide-react';
+import { FileText, CheckCircle, AlertCircle, Search, Plus, Trash2 } from 'lucide-react';
+import AuthGuard from '../components/AuthGuard';
 import { apiClient, authFetch } from '../lib/api-client';
 import { withBrowserApiBase } from '../lib/browser-api-base-url';
 import { getClientUserInfo, hasClientSession } from '../lib/client-auth';
+import { IDENTITY_SCOPE_META, normalizeIdentityScope } from '../lib/identity-scope';
 
 interface ProcessTemplate {
   id: string;
   processCode: string;
   processName: string;
   processCategory: string | null;
+  description?: string | null;
   version?: number;
   status: string;
   falLevel: string | null;
@@ -23,6 +25,7 @@ interface ProcessTemplate {
   connector?: {
     id: string;
     name: string;
+    identityScope?: 'teacher' | 'student' | 'both';
     oaType: string;
     oclLevel: string;
   } | null;
@@ -32,6 +35,7 @@ interface ConnectorOption {
   id: string;
   name: string;
   baseUrl?: string | null;
+  identityScope?: 'teacher' | 'student' | 'both';
 }
 
 type CreateFormState = {
@@ -42,6 +46,16 @@ type CreateFormState = {
   description: string;
   falLevel: string;
   rpaFlowContent: string;
+};
+
+type ProcessEditorMode = 'create' | 'edit';
+
+const FAL_LEVEL_META: Record<string, { label: string; description: string }> = {
+  F0: { label: '纯人工', description: '系统只展示流程，主要靠人工办理。' },
+  F1: { label: '人工为主', description: '系统能提供少量辅助，办理仍以人工为主。' },
+  F2: { label: '半自动', description: '系统可辅助填写和跳转，人工参与较多。' },
+  F3: { label: '高自动化', description: '大部分步骤可自动完成，仅少量人工确认。' },
+  F4: { label: '全自动', description: '流程几乎可自动闭环执行。' },
 };
 
 function createEmptyFormState(): CreateFormState {
@@ -77,7 +91,7 @@ function createEmptyFormState(): CreateFormState {
   };
 }
 
-export default function ProcessLibraryPage() {
+function ProcessLibraryContent() {
   const router = useRouter();
   const [processes, setProcesses] = useState<ProcessTemplate[]>([]);
   const [connectors, setConnectors] = useState<ConnectorOption[]>([]);
@@ -90,6 +104,10 @@ export default function ProcessLibraryPage() {
   const [createForm, setCreateForm] = useState<CreateFormState>(createEmptyFormState());
   const [createError, setCreateError] = useState('');
   const [creating, setCreating] = useState(false);
+  const [editorMode, setEditorMode] = useState<ProcessEditorMode>('create');
+  const [editingProcessId, setEditingProcessId] = useState<string | null>(null);
+  const [deletingProcessId, setDeletingProcessId] = useState<string | null>(null);
+  const [showAdvancedDefinition, setShowAdvancedDefinition] = useState(true);
 
   const canManage = (() => {
     const roles = getClientUserInfo().roles || [];
@@ -122,6 +140,10 @@ export default function ProcessLibraryPage() {
   }, [connectorFilter]);
 
   const fetchConnectors = useCallback(async () => {
+    if (!canManage) {
+      setConnectors([]);
+      return;
+    }
     try {
       const response = await apiClient.get('/connectors');
       setConnectors(response.data || []);
@@ -129,7 +151,7 @@ export default function ProcessLibraryPage() {
       console.error('Failed to fetch connectors:', err);
       setConnectors([]);
     }
-  }, []);
+  }, [canManage]);
 
   useEffect(() => {
     if (typeof window === 'undefined') {
@@ -142,7 +164,9 @@ export default function ProcessLibraryPage() {
     }
 
     void fetchProcesses();
-    void fetchConnectors();
+    if (canManage) {
+      void fetchConnectors();
+    }
   }, [fetchProcesses, fetchConnectors, router]);
 
   const filteredProcesses = processes.filter((process) => {
@@ -159,9 +183,22 @@ export default function ProcessLibraryPage() {
 
   const categories = Array.from(new Set(processes.map((p) => p.processCategory).filter((value): value is string => !!value)));
   const connectorOptions = Array.from(new Map(
-    connectors
-      .filter((connector) => connector.id)
-      .map((connector) => [connector.id, connector]),
+    [
+      ...processes
+        .map((process) => process.connector)
+        .filter((connector): connector is NonNullable<ProcessTemplate['connector']> => Boolean(connector?.id))
+        .map((connector) => ({
+          id: connector.id,
+          name: connector.name,
+          identityScope: normalizeIdentityScope(connector.identityScope),
+        })),
+      ...connectors
+        .filter((connector) => connector.id)
+        .map((connector) => ({
+          ...connector,
+          identityScope: normalizeIdentityScope(connector.identityScope),
+        })),
+    ].map((connector) => [connector.id, connector]),
   ).values());
 
   const getStatusIcon = (status: string) => {
@@ -195,6 +232,13 @@ export default function ProcessLibraryPage() {
     return colors[level] || 'bg-gray-100 text-gray-700';
   };
 
+  const getFalLevelMeta = (level: string | null | undefined) => {
+    return FAL_LEVEL_META[level || ''] || {
+      label: level || '未设置',
+      description: '用于表示这个流程的自动化程度。',
+    };
+  };
+
   const handleFileUpload = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
@@ -211,7 +255,7 @@ export default function ProcessLibraryPage() {
     setCreating(true);
     setCreateError('');
     try {
-      await apiClient.post('/process-library', {
+      const payload = {
         connectorId: createForm.connectorId,
         processCode: createForm.processCode.trim(),
         processName: createForm.processName.trim(),
@@ -219,15 +263,77 @@ export default function ProcessLibraryPage() {
         description: createForm.description.trim() || undefined,
         falLevel: createForm.falLevel,
         rpaFlowContent: createForm.rpaFlowContent,
-      });
-      setShowCreateModal(false);
-      setCreateForm(createEmptyFormState());
+      };
+      if (editorMode === 'edit' && editingProcessId) {
+        await apiClient.put(`/process-library/id/${editingProcessId}`, payload);
+      } else {
+        await apiClient.post('/process-library', payload);
+      }
+      closeEditor();
       await fetchProcesses();
     } catch (err: any) {
-      const message = err.response?.data?.message || err.message || '创建流程失败';
+      const message = err.response?.data?.message || err.message || (editorMode === 'edit' ? '修改流程失败' : '创建流程失败');
       setCreateError(typeof message === 'string' ? message : JSON.stringify(message));
     } finally {
       setCreating(false);
+    }
+  };
+
+  const closeEditor = () => {
+    setShowCreateModal(false);
+    setCreateError('');
+    setCreateForm(createEmptyFormState());
+    setEditorMode('create');
+    setEditingProcessId(null);
+    setShowAdvancedDefinition(true);
+  };
+
+  const openCreateEditor = () => {
+    setEditorMode('create');
+    setEditingProcessId(null);
+    setCreateForm(createEmptyFormState());
+    setCreateError('');
+    setShowAdvancedDefinition(true);
+    setShowCreateModal(true);
+  };
+
+  const openEditEditor = (process: ProcessTemplate) => {
+    const definition = process.uiHints && typeof process.uiHints === 'object'
+      ? process.uiHints.rpaDefinition
+      : null;
+
+    setEditorMode('edit');
+    setEditingProcessId(process.id);
+    setCreateError('');
+    setCreateForm({
+      connectorId: process.connector?.id || '',
+      processCode: process.processCode,
+      processName: process.processName,
+      processCategory: process.processCategory || '',
+      description: process.description || '',
+      falLevel: process.falLevel || 'F2',
+      rpaFlowContent: definition ? JSON.stringify({ flows: [definition] }, null, 2) : createEmptyFormState().rpaFlowContent,
+    });
+    setShowAdvancedDefinition(false);
+    setShowCreateModal(true);
+  };
+
+  const handleDelete = async (process: ProcessTemplate) => {
+    const confirmed = window.confirm(`确定删除“${process.processName}”吗？删除后该流程不会再出现在流程库中，但历史记录仍会保留。`);
+    if (!confirmed) {
+      return;
+    }
+
+    setDeletingProcessId(process.id);
+    setError(null);
+    try {
+      await apiClient.delete(`/process-library/id/${process.id}`);
+      await fetchProcesses();
+    } catch (err: any) {
+      const message = err.response?.data?.message || err.message || '删除流程失败';
+      setError(typeof message === 'string' ? message : JSON.stringify(message));
+    } finally {
+      setDeletingProcessId(null);
     }
   };
 
@@ -253,7 +359,7 @@ export default function ProcessLibraryPage() {
           {canManage && (
             <button
               type="button"
-              onClick={() => setShowCreateModal(true)}
+              onClick={openCreateEditor}
               className="inline-flex items-center gap-2 rounded-lg bg-blue-600 px-4 py-2.5 text-sm font-medium text-white hover:bg-blue-700"
             >
               <Plus className="h-4 w-4" />
@@ -303,6 +409,7 @@ export default function ProcessLibraryPage() {
             {connectorOptions.map((connector) => (
               <option key={connector.id} value={connector.id}>
                 {connector.name}
+                {connector.identityScope ? `（${IDENTITY_SCOPE_META[normalizeIdentityScope(connector.identityScope)].badge}）` : ''}
               </option>
             ))}
           </select>
@@ -354,15 +461,41 @@ export default function ProcessLibraryPage() {
                     <span>代码: {process.processCode}</span>
                     <span>分类: {process.processCategory || '-'}</span>
                     <span>所属连接器: {process.connector?.name || '-'}</span>
+                    {process.connector?.identityScope && (
+                      <span>适用范围: {IDENTITY_SCOPE_META[normalizeIdentityScope(process.connector.identityScope)].badge}</span>
+                    )}
                   </div>
                 </div>
-                {process.falLevel && (
-                  <div className="flex items-center gap-2">
-                    <span className={`px-3 py-1 rounded-full text-sm font-semibold ${getFalLevelColor(process.falLevel)}`}>
-                      {process.falLevel}
-                    </span>
-                  </div>
-                )}
+                <div className="flex items-center gap-2">
+                  {process.falLevel && (
+                    <div className="text-right">
+                      <span className={`inline-flex px-3 py-1 rounded-full text-sm font-semibold ${getFalLevelColor(process.falLevel)}`}>
+                        自动化等级 {process.falLevel}
+                      </span>
+                      <div className="mt-1 text-xs text-gray-500">{getFalLevelMeta(process.falLevel).label}</div>
+                    </div>
+                  )}
+                  {canManage && (
+                    <>
+                      <button
+                        type="button"
+                        onClick={() => openEditEditor(process)}
+                        className="rounded-lg border border-gray-300 px-3 py-1.5 text-sm font-medium text-gray-700 hover:border-blue-400 hover:bg-blue-50 hover:text-blue-700"
+                      >
+                        修改
+                      </button>
+                      <button
+                        type="button"
+                        onClick={() => handleDelete(process)}
+                        disabled={deletingProcessId === process.id}
+                        className="inline-flex items-center gap-1 rounded-lg border border-red-200 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 disabled:cursor-not-allowed disabled:opacity-60"
+                      >
+                        <Trash2 className="h-4 w-4" />
+                        {deletingProcessId === process.id ? '删除中...' : '删除'}
+                      </button>
+                    </>
+                  )}
+                </div>
               </div>
 
               {/* API信息 */}
@@ -384,6 +517,7 @@ export default function ProcessLibraryPage() {
                   {process.sourceType === 'published' && process.connector && (
                     <div className="mt-2 text-sm text-gray-600">
                       所属连接器: {process.connector.name}
+                      {process.connector.identityScope ? ` · ${IDENTITY_SCOPE_META[normalizeIdentityScope(process.connector.identityScope)].label}` : ''}
                     </div>
                   )}
                   {process.uiHints.validationResult && (
@@ -447,10 +581,14 @@ export default function ProcessLibraryPage() {
           <div className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-2xl bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-gray-200 px-8 py-5">
               <div>
-                <h2 className="text-xl font-bold text-gray-900">单个添加流程</h2>
-                <p className="mt-0.5 text-sm text-gray-500">流程库中的流程必须先选择所属连接器。</p>
+                <h2 className="text-xl font-bold text-gray-900">{editorMode === 'edit' ? '修改流程' : '单个添加流程'}</h2>
+                <p className="mt-0.5 text-sm text-gray-500">
+                  {editorMode === 'edit'
+                    ? '默认只修改基础信息；如需调整底层执行逻辑，再展开高级配置。'
+                    : '流程库中的流程必须先选择所属连接器。'}
+                </p>
               </div>
-              <button onClick={() => { setShowCreateModal(false); setCreateError(''); }} className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-gray-100">
+              <button onClick={closeEditor} className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-gray-100">
                 <i className="fas fa-times text-gray-500"></i>
               </button>
             </div>
@@ -467,17 +605,22 @@ export default function ProcessLibraryPage() {
                   <label className="mb-1 block text-sm font-medium text-gray-700">所属连接器</label>
                   <select
                     value={createForm.connectorId}
+                    disabled={editorMode === 'edit'}
                     onChange={(e) => setCreateForm((prev) => ({ ...prev, connectorId: e.target.value }))}
-                    className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:cursor-not-allowed disabled:bg-gray-100"
                   >
                     <option value="">请选择连接器</option>
                     {connectors.map((connector) => (
                       <option key={connector.id} value={connector.id}>
                         {connector.name}
+                        {connector.identityScope ? `（${IDENTITY_SCOPE_META[normalizeIdentityScope(connector.identityScope)].badge}）` : ''}
                         {connector.baseUrl ? ` - ${connector.baseUrl}` : ''}
                       </option>
                     ))}
                   </select>
+                  {editorMode === 'edit' && (
+                    <p className="mt-1 text-xs text-gray-500">修改流程时保持所属连接器不变，系统会发布一个新版本。</p>
+                  )}
                 </div>
                 <div>
                   <label className="mb-1 block text-sm font-medium text-gray-700">流程编码</label>
@@ -492,14 +635,15 @@ export default function ProcessLibraryPage() {
                   <input className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" value={createForm.processCategory} onChange={(e) => setCreateForm((prev) => ({ ...prev, processCategory: e.target.value }))} placeholder="人事" />
                 </div>
                 <div>
-                  <label className="mb-1 block text-sm font-medium text-gray-700">FAL</label>
+                  <label className="mb-1 block text-sm font-medium text-gray-700">自动化等级（FAL）</label>
                   <select className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" value={createForm.falLevel} onChange={(e) => setCreateForm((prev) => ({ ...prev, falLevel: e.target.value }))}>
-                    <option value="F0">F0</option>
-                    <option value="F1">F1</option>
-                    <option value="F2">F2</option>
-                    <option value="F3">F3</option>
-                    <option value="F4">F4</option>
+                    <option value="F0">F0（纯人工）</option>
+                    <option value="F1">F1（人工为主）</option>
+                    <option value="F2">F2（半自动）</option>
+                    <option value="F3">F3（高自动化）</option>
+                    <option value="F4">F4（全自动）</option>
                   </select>
+                  <p className="mt-1 text-xs text-gray-500">{getFalLevelMeta(createForm.falLevel).description}</p>
                 </div>
                 <div className="sm:col-span-2">
                   <label className="mb-1 block text-sm font-medium text-gray-700">流程描述</label>
@@ -510,37 +654,72 @@ export default function ProcessLibraryPage() {
               <section className="space-y-4 rounded-xl border border-gray-200 p-4">
                 <div className="flex items-center justify-between gap-4">
                   <div>
-                    <h3 className="text-sm font-semibold text-gray-900">流程定义</h3>
-                    <p className="mt-1 text-xs text-gray-500">使用现有页面/链接流程 JSON。单个添加只允许一个流程定义。</p>
+                    <h3 className="text-sm font-semibold text-gray-900">{editorMode === 'edit' ? '高级配置' : '流程定义'}</h3>
+                    <p className="mt-1 text-xs text-gray-500">
+                      {editorMode === 'edit'
+                        ? '小白管理者通常只改上面的基础信息即可；只有确实需要改底层执行逻辑时，才展开并修改原始定义。'
+                        : '使用现有页面/链接流程定义文件。单个添加只允许一个流程定义。'}
+                    </p>
                   </div>
-                  <label className="inline-flex cursor-pointer items-center justify-center rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 hover:border-blue-400 hover:bg-blue-50">
-                    <input type="file" className="hidden" accept=".json,.txt" onChange={handleFileUpload} />
-                    上传流程文件
-                  </label>
+                  <div className="flex items-center gap-2">
+                    {editorMode === 'edit' && (
+                      <button
+                        type="button"
+                        onClick={() => setShowAdvancedDefinition((prev) => !prev)}
+                        className="rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 hover:border-blue-400 hover:bg-blue-50"
+                      >
+                        {showAdvancedDefinition ? '收起高级配置' : '展开高级配置'}
+                      </button>
+                    )}
+                    {(editorMode === 'create' || showAdvancedDefinition) && (
+                      <label className="inline-flex cursor-pointer items-center justify-center rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 hover:border-blue-400 hover:bg-blue-50">
+                        <input type="file" className="hidden" accept=".json,.txt" onChange={handleFileUpload} />
+                        上传流程文件
+                      </label>
+                    )}
+                  </div>
                 </div>
-                <textarea
-                  rows={14}
-                  className="w-full rounded-lg border border-gray-300 px-3 py-2.5 font-mono text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
-                  value={createForm.rpaFlowContent}
-                  onChange={(e) => setCreateForm((prev) => ({ ...prev, rpaFlowContent: e.target.value }))}
-                />
+                {editorMode === 'create' || showAdvancedDefinition ? (
+                  <textarea
+                    rows={14}
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2.5 font-mono text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    value={createForm.rpaFlowContent}
+                    onChange={(e) => setCreateForm((prev) => ({ ...prev, rpaFlowContent: e.target.value }))}
+                  />
+                ) : (
+                  <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 px-4 py-4 text-sm text-gray-600">
+                    当前已隐藏底层流程定义，避免直接编辑 JSON。若确实需要调整底层动作、跳转或提交细节，请点击“展开高级配置”。
+                  </div>
+                )}
               </section>
             </div>
 
             <div className="flex items-center gap-3 border-t border-gray-200 bg-gray-50 px-8 py-5">
-              <button onClick={() => { setShowCreateModal(false); setCreateError(''); }} className="rounded-lg border border-gray-300 px-5 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-100">取消</button>
-              <div className="flex-1 text-xs text-gray-500">没有连接器时，请先去初始化中心创建或批量初始化一个连接器。</div>
+              <button onClick={closeEditor} className="rounded-lg border border-gray-300 px-5 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-100">取消</button>
+              <div className="flex-1 text-xs text-gray-500">
+                {editorMode === 'edit'
+                  ? '保存后会发布一个新版本，并自动归档当前已发布版本。'
+                  : '没有连接器时，请先去初始化中心创建或批量初始化一个连接器。'}
+              </div>
               <button
                 onClick={handleCreate}
                 disabled={creating || !createForm.connectorId || !createForm.processCode.trim() || !createForm.processName.trim() || !createForm.rpaFlowContent.trim()}
                 className="rounded-lg bg-blue-600 px-6 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
-                {creating ? '创建中...' : '创建流程'}
+                {creating ? (editorMode === 'edit' ? '保存中...' : '创建中...') : (editorMode === 'edit' ? '保存修改' : '创建流程')}
               </button>
             </div>
           </div>
         </div>
       )}
     </div>
+  );
+}
+
+export default function ProcessLibraryPage() {
+  return (
+    <AuthGuard allowedRoles={['admin', 'flow_manager']}>
+      <ProcessLibraryContent />
+    </AuthGuard>
   );
 }

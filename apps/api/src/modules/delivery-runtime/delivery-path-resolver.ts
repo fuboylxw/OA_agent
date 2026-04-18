@@ -24,6 +24,7 @@ export function resolveAvailablePaths(
   const rpaDefinition = uiHints.rpaDefinition as RpaFlowDefinition | undefined;
   const runtime = rpaDefinition?.runtime;
   const endpoints = Array.isArray(uiHints.endpoints) ? uiHints.endpoints : [];
+  const directLink = isDirectLinkDefinition(rpaDefinition);
   const hasApi = includesMode(executionModes[action], 'api')
     || endpoints.some((endpoint) =>
       isApiEndpoint(endpoint)
@@ -36,13 +37,15 @@ export function resolveAvailablePaths(
   const hasNetworkRequest = action === 'submit'
     ? hasRuntimeNetworkRequest(runtime?.networkSubmit)
     : hasRuntimeNetworkRequest(runtime?.networkStatus);
-  const hasUrlAction = hasFlowAction || hasNetworkRequest;
-  const hasVision = hasFlowAction;
+  const hasVision = includesMode(executionModes[action], 'rpa')
+    || (!directLink && hasFlowAction);
+  const hasUrlAction = includesMode(executionModes[action], 'url')
+    || (directLink && hasNetworkRequest);
   const hasUrl = hasUrlAction && Boolean(
     rpaDefinition?.platform?.entryUrl
     || rpaDefinition?.platform?.jumpUrlTemplate
     || rpaDefinition?.platform?.ticketBrokerUrl
-    || runtime,
+    || (directLink && runtime),
   );
   const preferred: DeliveryPath[] = hasVision
     ? [API_DELIVERY_PATH, VISION_DELIVERY_PATH, URL_DELIVERY_PATH]
@@ -102,4 +105,19 @@ function hasRuntimeNetworkRequest(value: unknown) {
     && typeof (value as Record<string, any>).url === 'string'
     && (value as Record<string, any>).url.trim(),
   );
+}
+
+function isDirectLinkDefinition(definition?: RpaFlowDefinition) {
+  if (!definition || typeof definition !== 'object') {
+    return false;
+  }
+
+  const raw = definition as Record<string, any>;
+  const metadata = raw.metadata && typeof raw.metadata === 'object'
+    ? raw.metadata as Record<string, any>
+    : {};
+  const accessMode = String(raw.accessMode || metadata.accessMode || '').trim().toLowerCase();
+  const sourceType = String(raw.sourceType || metadata.sourceType || '').trim().toLowerCase();
+
+  return accessMode === 'direct_link' || sourceType === 'direct_link';
 }

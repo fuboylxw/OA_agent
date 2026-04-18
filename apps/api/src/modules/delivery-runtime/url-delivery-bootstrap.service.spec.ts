@@ -218,4 +218,89 @@ describe('UrlDeliveryBootstrapService', () => {
       }),
     }));
   });
+
+  it('infers portal SSO bridge when legacy URL flows only expose entry and target base urls', async () => {
+    const adapterRuntimeService = {
+      getConnectorWithSecrets: jest.fn().mockResolvedValue({
+        id: 'connector-1',
+        authType: 'cookie',
+      }),
+      resolveAuthConfigForExecution: jest.fn().mockResolvedValue({
+        platformConfig: {
+          entryUrl: 'https://sz.xpu.edu.cn/#/home?component=thirdScreen',
+          oaBackendLogin: {
+            enabled: true,
+          },
+        },
+      }),
+      loadRpaFlowsForConnector: jest.fn().mockResolvedValue([
+        {
+          processCode: 'seal_request',
+          processName: '用印申请',
+          rpaDefinition: {
+            processCode: 'seal_request',
+            processName: '用印申请',
+            platform: {
+              entryUrl: 'https://sz.xpu.edu.cn/',
+              targetBaseUrl: 'https://oa2023.xpu.edu.cn/',
+              businessBaseUrl: 'https://oa2023.xpu.edu.cn/',
+            },
+            runtime: {
+              preflight: {
+                steps: [{ type: 'goto', value: 'https://oa2023.xpu.edu.cn/' }],
+              },
+            },
+          },
+        },
+      ]),
+    };
+    const bridgeService = {
+      resolve: jest.fn().mockResolvedValue({
+        authConfig: {
+          cookie: 'JSESSIONID=oa-session',
+        },
+        ticket: {
+          jumpUrl: 'https://oa2023.xpu.edu.cn/seeyon/collaboration/collaboration.do?method=newColl',
+        },
+      }),
+    };
+    const oaBackendLoginService = {
+      resolveExecutionAuthConfig: jest.fn().mockResolvedValue(null),
+    };
+
+    const service = new UrlDeliveryBootstrapService(
+      adapterRuntimeService as any,
+      bridgeService as any,
+      oaBackendLoginService as any,
+    );
+    const ticketBroker = {
+      issueTicket: jest.fn().mockResolvedValue({
+        jumpUrl: 'https://oa2023.xpu.edu.cn/seeyon/main.do',
+      }),
+    };
+    (service as any).ticketBroker = ticketBroker;
+
+    const context = await service.prepare({
+      action: 'submit',
+      connectorId: 'connector-1',
+      processCode: 'seal_request',
+      processName: '用印申请',
+      tenantId: 'tenant-1',
+      userId: 'user-1',
+    });
+
+    expect(bridgeService.resolve).toHaveBeenCalledWith(expect.objectContaining({
+      flow: expect.objectContaining({
+        platform: expect.objectContaining({
+          portalSsoBridge: expect.objectContaining({
+            enabled: true,
+            portalUrl: 'https://sz.xpu.edu.cn/#/home?component=thirdScreen',
+            oaInfoUrl: '/gate/lobby/api/oa/info',
+            sourcePath: 'coordinateUrl',
+          }),
+        }),
+      }),
+    }));
+    expect(context.navigation.portalUrl).toBe('https://sz.xpu.edu.cn/#/home?component=thirdScreen');
+  });
 });

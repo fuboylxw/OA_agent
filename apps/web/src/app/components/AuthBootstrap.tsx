@@ -14,7 +14,10 @@ import {
 
 function isPublicRoute(pathname?: string | null) {
   const normalized = pathname || '';
-  return normalized === '/login' || normalized.startsWith('/login/');
+  return normalized === '/login'
+    || normalized.startsWith('/login/')
+    || normalized === '/logout'
+    || normalized.startsWith('/logout/');
 }
 
 function getCurrentReturnTo() {

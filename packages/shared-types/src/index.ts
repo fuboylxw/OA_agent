@@ -296,7 +296,7 @@ export interface Submission {
   idempotencyKey: string;
   formData: Record<string, any>;
   oaSubmissionId?: string;
-  status: 'pending' | 'submitted' | 'failed' | 'cancelled';
+  status: 'draft_saved' | 'pending' | 'submitted' | 'approved' | 'rejected' | 'failed' | 'cancelled';
   submitResult?: Record<string, any>;
   errorMsg?: string;
   submittedAt?: Date;
@@ -404,6 +404,9 @@ export interface RpaFieldBinding {
   required?: boolean;
   selector?: string;
   defaultValue?: any;
+  description?: string;
+  example?: string;
+  multiple?: boolean;
 }
 
 export interface RpaStepDefinition {
@@ -487,13 +490,13 @@ export interface RpaNetworkMappingRule {
 
 export interface RpaNetworkRequestDefinition {
   url: string;
-  method?: 'GET' | 'POST' | 'PUT' | 'PATCH' | 'DELETE';
+  method?: string;
   successMode?: 'submissionId' | 'http2xx';
   completionKind?: 'draft' | 'submitted';
   query?: Record<string, string | RpaNetworkMappingRule>;
   headers?: Record<string, string | RpaNetworkMappingRule>;
   body?: any;
-  bodyMode?: 'json' | 'form';
+  bodyMode?: 'json' | 'form' | 'multipart' | string;
   responseMapping?: {
     successPath?: string;
     successValue?: string | number | boolean;

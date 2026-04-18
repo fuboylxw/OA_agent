@@ -386,4 +386,306 @@ describe('AssistantService', () => {
       'trace-1',
     );
   });
+
+  it('auto-binds a general uploaded attachment to the required attachment field during parameter collection', async () => {
+    const session = {
+      id: 'session-attachment-1',
+      userId: 'user-1',
+      metadata: {
+        currentProcessCode: 'expense_submit',
+        currentProcessName: '西安工程大学用印申请单',
+        currentConnectorId: 'connector-expense',
+        processStatus: ChatProcessStatus.PARAMETER_COLLECTION,
+        currentFormData: {},
+        missingFields: [
+          {
+            key: 'field_1',
+            label: '文件类型、名称及份数',
+            type: 'text',
+            question: '请填写文件类型、名称及份数。',
+          },
+          {
+            key: 'field_2',
+            label: '用印附件',
+            type: 'file',
+            question: '请上传用印附件。',
+          },
+        ],
+      },
+    };
+
+    const normalizedAttachment = {
+      attachmentId: 'attachment-1',
+      fileId: 'file-1',
+      fileName: 'seal.pdf',
+      fileSize: 1024,
+      mimeType: 'application/pdf',
+      bindScope: 'general' as const,
+      fieldKey: null,
+    };
+
+    jest.spyOn(service as any, 'getOrCreateSession').mockResolvedValue(session);
+    jest.spyOn(service as any, 'loadSharedContext').mockResolvedValue(sharedContext);
+    jest.spyOn(service as any, 'tryHandlePendingActionSelection').mockResolvedValue(null);
+    jest.spyOn(service as any, 'tryHandlePendingConnectorSelection').mockResolvedValue(null);
+    jest.spyOn(service as any, 'tryHandlePendingActionExecution').mockResolvedValue(null);
+    jest.spyOn(service as any, 'enrichChatResponse').mockImplementation(async (response: any) => response);
+    jest.spyOn(service as any, 'saveAssistantMessage').mockResolvedValue(undefined);
+    intentAgent.detectIntent.mockResolvedValue({
+      intent: ChatIntent.SERVICE_REQUEST,
+      confidence: 0.2,
+      extractedEntities: {},
+    });
+
+    attachmentService.normalizeAttachmentRefs.mockResolvedValue([normalizedAttachment]);
+    prisma.chatMessage = {
+      create: jest.fn().mockResolvedValue(undefined),
+    };
+    prisma.processTemplate.findFirst.mockResolvedValue({
+      id: 'template-expense-1',
+      tenantId: 'tenant-1',
+      processCode: 'expense_submit',
+      processName: '西安工程大学用印申请单',
+      status: 'published',
+      version: 1,
+      schema: {
+        fields: [
+          { key: 'field_1', label: '文件类型、名称及份数', type: 'text', required: true },
+          { key: 'field_2', label: '用印附件', type: 'file', required: true },
+        ],
+      },
+      connector: {
+        id: 'connector-expense',
+        name: 'OA系统',
+        authConfig: {},
+      },
+    });
+    formAgent.extractFields.mockResolvedValue({
+      extractedFields: {},
+      fieldOrigins: {},
+      missingFields: [
+        {
+          key: 'field_1',
+          label: '文件类型、名称及份数',
+          question: '请填写文件类型、名称及份数。',
+          type: 'text',
+        },
+      ],
+      isComplete: false,
+    });
+
+    const response = await service.chat({
+      tenantId: 'tenant-1',
+      userId: 'user-1',
+      sessionId: 'session-attachment-1',
+      message: '已上传附件',
+      attachments: [normalizedAttachment],
+    });
+
+    expect(formAgent.extractFields).toHaveBeenCalledWith(
+      'expense_submit',
+      expect.any(Object),
+      '已上传附件',
+      expect.objectContaining({
+        field_2: [
+          expect.objectContaining({
+            fileId: 'file-1',
+            fileName: 'seal.pdf',
+            fieldKey: 'field_2',
+          }),
+        ],
+      }),
+    );
+    expect(prisma.chatSession.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'session-attachment-1' },
+      data: expect.objectContaining({
+        metadata: expect.objectContaining({
+          currentFormData: expect.objectContaining({
+            field_2: [
+              expect.objectContaining({
+                fileId: 'file-1',
+                fileName: 'seal.pdf',
+                fieldKey: 'field_2',
+              }),
+            ],
+          }),
+        }),
+      }),
+    }));
+    expect(response.processStatus).toBe(ChatProcessStatus.PARAMETER_COLLECTION);
+  });
+
+  it('waits for the settled submission status instead of returning the initial pending state', async () => {
+    prisma.submission.findUnique
+      .mockResolvedValueOnce({
+        id: 'submission-1',
+        status: 'pending',
+        submitResult: null,
+        oaSubmissionId: null,
+      })
+      .mockResolvedValueOnce({
+        id: 'submission-1',
+        status: 'draft_saved',
+        submitResult: {
+          metadata: {
+            request: {
+              completionKind: 'draft',
+            },
+          },
+        },
+        oaSubmissionId: null,
+      });
+
+    jest.spyOn(service as any, 'sleep').mockResolvedValue(undefined);
+
+    const submission = await (service as any).waitForSubmissionSettlement('submission-1', {
+      timeoutMs: 1000,
+      pollIntervalMs: 10,
+    });
+
+    expect(prisma.submission.findUnique).toHaveBeenCalledTimes(2);
+    expect(submission).toEqual({
+      id: 'submission-1',
+      status: 'draft_saved',
+      submitResult: {
+        metadata: {
+          request: {
+            completionKind: 'draft',
+          },
+        },
+      },
+      oaSubmissionId: null,
+    });
+  });
+
+  it('returns draft-saved status immediately after URL submission settles to OA draft box', async () => {
+    const session = {
+      id: 'session-submit-1',
+      metadata: {
+        pendingDraftId: 'draft-1',
+        processId: 'process-1',
+        currentProcessSummary: '请确认后提交',
+        currentFieldOrigins: {
+          field_reason: 'user',
+        },
+      },
+    };
+    const processContext = {
+      processId: 'process-1',
+      processType: 'submission',
+      processCode: 'flow_url_1',
+      status: ChatProcessStatus.PENDING_CONFIRMATION,
+      parameters: {
+        field_reason: '测试请假',
+      },
+      collectedParams: new Set<string>(['field_reason']),
+      validationErrors: [],
+      createdAt: new Date('2026-04-18T10:00:00.000Z'),
+      updatedAt: new Date('2026-04-18T10:00:00.000Z'),
+    };
+    const draft = {
+      id: 'draft-1',
+      templateId: 'template-1',
+      formData: {
+        field_reason: '测试请假',
+      },
+      template: {
+        id: 'template-1',
+        tenantId: 'tenant-1',
+        connectorId: 'connector-1',
+        processCode: 'flow_url_1',
+        processName: '请假申请',
+        processCategory: '人事',
+        uiHints: {
+          rpaDefinition: {
+            runtime: {
+              networkSubmit: {
+                completionKind: 'draft',
+              },
+            },
+          },
+        },
+        schema: {
+          fields: [
+            { key: 'field_reason', label: '请假事由', type: 'textarea', required: true },
+          ],
+        },
+        connector: {
+          id: 'connector-1',
+          name: '西安工程大学OA系统',
+        },
+      },
+    };
+
+    prisma.processDraft.findUnique = jest.fn().mockResolvedValue(draft);
+    prisma.submission.findUnique.mockResolvedValue({
+      id: 'submission-1',
+      status: 'draft_saved',
+      submitResult: {
+        metadata: {
+          request: {
+            completionKind: 'draft',
+          },
+        },
+      },
+      oaSubmissionId: null,
+    });
+
+    taskPlanAgent.buildSubmitTaskPacketFromDraft.mockResolvedValue({
+      needsClarification: false,
+      taskPacket: {
+        selectedPath: 'url',
+        fallbackPolicy: ['url'],
+        runtime: {
+          idempotencyKey: 'idem-1',
+        },
+      },
+    });
+    submissionService.submit.mockResolvedValue({
+      submissionId: 'submission-1',
+      status: 'pending',
+      message: '申请已提交，正在处理中',
+    });
+
+    const response = await (service as any).executeSubmission(
+      {
+        tenantId: 'tenant-1',
+        userId: 'user-1',
+        message: '确认提交',
+      },
+      session,
+      processContext,
+      'trace-1',
+    );
+
+    expect(response.processStatus).toBe(ChatProcessStatus.DRAFT_SAVED);
+    expect(response.message).toContain('写入 OA 待发箱');
+    expect(response.processCard).toEqual(expect.objectContaining({
+      processStatus: ChatProcessStatus.DRAFT_SAVED,
+      statusText: '已保存待发',
+      submissionId: 'submission-1',
+      draftId: 'draft-1',
+    }));
+    expect(prisma.chatSession.update).toHaveBeenCalledWith({
+      where: { id: 'session-submit-1' },
+      data: {
+        metadata: expect.objectContaining({
+          currentSubmissionId: 'submission-1',
+          lastSubmissionStatus: 'draft_saved',
+          processStatus: ChatProcessStatus.DRAFT_SAVED,
+          selectedDeliveryPath: 'url',
+          deliveryFallbackPolicy: ['url'],
+        }),
+      },
+    });
+    expect(auditService.createLog).toHaveBeenCalledWith(expect.objectContaining({
+      action: 'submit_application',
+      result: 'success',
+      details: expect.objectContaining({
+        submissionId: 'submission-1',
+        submitStatus: 'draft_saved',
+        initialSubmitStatus: 'pending',
+      }),
+    }));
+  });
 });

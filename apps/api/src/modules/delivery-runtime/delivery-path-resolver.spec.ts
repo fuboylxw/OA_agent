@@ -6,7 +6,7 @@ import {
 import { buildExecutionOrder, resolveAvailablePaths } from './delivery-path-resolver';
 
 describe('delivery-path-resolver', () => {
-  it('prefers api, vision, url when an rpa flow is present', () => {
+  it('prefers api and vision without inferring url from browser steps', () => {
     const paths = resolveAvailablePaths({
       executionModes: {
         submit: ['api', 'rpa'],
@@ -28,7 +28,7 @@ describe('delivery-path-resolver', () => {
       },
     }, 'submit');
 
-    expect(paths).toEqual([API_DELIVERY_PATH, VISION_DELIVERY_PATH, URL_DELIVERY_PATH]);
+    expect(paths).toEqual([API_DELIVERY_PATH, VISION_DELIVERY_PATH]);
   });
 
   it('keeps selected path first and appends remaining fallbacks without duplication', () => {
@@ -76,6 +76,8 @@ describe('delivery-path-resolver', () => {
       rpaDefinition: {
         processCode: 'leave_apply_url_network',
         processName: 'Leave Apply URL Network',
+        accessMode: 'direct_link',
+        sourceType: 'direct_link',
         platform: {
           jumpUrlTemplate: 'https://oa.example.com/workflow/{processCode}',
         },

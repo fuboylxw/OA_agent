@@ -49,6 +49,14 @@ describe('Connector HTTP E2E', () => {
   let connectorService: jest.Mocked<ConnectorService>;
   let requestAuth: { resolveTenant: jest.Mock };
 
+  function mockAuth(roles: string[]) {
+    requestAuth.resolveTenant.mockReturnValue({
+      tenantId: 'tenant-1',
+      roles,
+      source: 'request',
+    });
+  }
+
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [ConnectorHttpTestModule],
@@ -70,11 +78,7 @@ describe('Connector HTTP E2E', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    requestAuth.resolveTenant.mockReturnValue({
-      tenantId: 'tenant-1',
-      roles: [],
-      source: 'request',
-    });
+    mockAuth(['admin']);
   });
 
   it('validates create payload and forwards enterprise connector config', async () => {
@@ -90,6 +94,7 @@ describe('Connector HTTP E2E', () => {
       .post('/api/v1/connectors')
       .send({
         name: 'O2OA Connector',
+        identityScope: 'both',
         oaType: 'openapi',
         oaVendor: 'o2oa',
         oaVersion: 'v8',
@@ -111,6 +116,7 @@ describe('Connector HTTP E2E', () => {
 
     expect(connectorService.create).toHaveBeenCalledWith({
       name: 'O2OA Connector',
+      identityScope: 'both',
       oaType: 'openapi',
       oaVendor: 'o2oa',
       oaVersion: 'v8',
@@ -130,6 +136,7 @@ describe('Connector HTTP E2E', () => {
       .post('/api/v1/connectors')
       .send({
         name: 'Broken Connector',
+        identityScope: 'both',
         oaType: 'invalid-type',
         baseUrl: 'not-a-url',
         authType: 'apikey',
@@ -183,5 +190,53 @@ describe('Connector HTTP E2E', () => {
       status: 'active',
     });
     expect(connectorService.healthCheck).toHaveBeenCalledWith('connector-1', 'tenant-1');
+  });
+
+  it('allows flow managers to read connectors but blocks management writes', async () => {
+    connectorService.list.mockResolvedValue([{ id: 'connector-1' }] as any);
+    connectorService.get.mockResolvedValue({ id: 'connector-1' } as any);
+    mockAuth(['flow_manager']);
+
+    await request(httpApp)
+      .get('/api/v1/connectors')
+      .query({ tenantId: 'tenant-1' })
+      .expect(200);
+
+    await request(httpApp)
+      .get('/api/v1/connectors/connector-1')
+      .expect(200);
+
+    await request(httpApp)
+      .post('/api/v1/connectors')
+      .send({
+        name: 'Blocked',
+        identityScope: 'both',
+        oaType: 'openapi',
+        baseUrl: 'https://oa.example.com',
+        authType: 'apikey',
+        authConfig: {},
+        oclLevel: 'OCL4',
+      })
+      .expect(403);
+
+    expect(connectorService.list).toHaveBeenCalledWith('tenant-1');
+    expect(connectorService.get).toHaveBeenCalledWith('connector-1', 'tenant-1');
+    expect(connectorService.create).not.toHaveBeenCalled();
+  });
+
+  it('blocks regular users from reading connectors', async () => {
+    mockAuth(['user']);
+
+    await request(httpApp)
+      .get('/api/v1/connectors')
+      .query({ tenantId: 'tenant-1' })
+      .expect(403);
+
+    await request(httpApp)
+      .get('/api/v1/connectors/connector-1')
+      .expect(403);
+
+    expect(connectorService.list).not.toHaveBeenCalled();
+    expect(connectorService.get).not.toHaveBeenCalled();
   });
 });

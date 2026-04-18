@@ -63,6 +63,7 @@ describe('ProcessLibrary HTTP E2E', () => {
       tenantId: 'tenant-1',
       userId: 'user-1',
       roles: ['user'],
+      identityType: 'teacher',
       source: 'session',
     });
   });
@@ -104,9 +105,21 @@ describe('ProcessLibrary HTTP E2E', () => {
         expect(body).toHaveLength(2);
       });
 
-    expect(processLibraryService.list).toHaveBeenCalledWith('tenant-1', 'finance');
-    expect(processLibraryService.getByCode).toHaveBeenCalledWith('tenant-1', 'expense_apply', 2);
-    expect(processLibraryService.getById).toHaveBeenCalledWith('tpl-1', 'tenant-1');
-    expect(processLibraryService.listVersions).toHaveBeenCalledWith('tenant-1', 'expense_apply');
+    expect(processLibraryService.list).toHaveBeenCalledWith('tenant-1', 'finance', undefined, {
+      identityType: 'teacher',
+      roles: ['user'],
+    });
+    expect(processLibraryService.getByCode).toHaveBeenCalledWith('tenant-1', 'expense_apply', 2, {
+      identityType: 'teacher',
+      roles: ['user'],
+    });
+    expect(processLibraryService.getById).toHaveBeenCalledWith('tpl-1', 'tenant-1', {
+      identityType: 'teacher',
+      roles: ['user'],
+    });
+    expect(processLibraryService.listVersions).toHaveBeenCalledWith('tenant-1', 'expense_apply', {
+      identityType: 'teacher',
+      roles: ['user'],
+    });
   });
 });

@@ -87,6 +87,49 @@ describe('BootstrapProcessor RPA publishing', () => {
     };
   }
 
+  function createDirectLinkDefinition() {
+    return {
+      processCode: 'leave_request',
+      processName: '请假申请',
+      accessMode: 'direct_link',
+      sourceType: 'direct_link',
+      metadata: {
+        accessMode: 'direct_link',
+        sourceType: 'direct_link',
+      },
+      platform: {
+        entryUrl: 'https://sz.xpu.edu.cn/',
+        businessBaseUrl: 'https://oa2023.xpu.edu.cn',
+        jumpUrlTemplate: 'https://oa2023.xpu.edu.cn/seeyon/collaboration/collaboration.do?method=newColl',
+      },
+      fields: [
+        {
+          key: 'reason',
+          label: '请假事由',
+          type: 'textarea',
+          required: true,
+        },
+      ],
+      runtime: {
+        executorMode: 'http',
+        preflight: {
+          steps: [
+            { type: 'goto', value: 'https://sz.xpu.edu.cn/' },
+            { type: 'evaluate', builtin: 'capture_form_submit' },
+          ],
+        },
+        networkSubmit: {
+          url: '{{preflight.submitCapture.action}}',
+          method: '{{preflight.submitCapture.method}}',
+          bodyMode: '{{preflight.submitBodyMode}}',
+          body: {
+            source: 'preflight.submitFields',
+          },
+        },
+      },
+    };
+  }
+
   it('extracts and merges RPA definitions from bootstrap sources', () => {
     const { prisma } = createTxMocks();
     const processor = new BootstrapProcessor(prisma as any);
@@ -157,6 +200,114 @@ describe('BootstrapProcessor RPA publishing', () => {
         expect.objectContaining({ method: 'RPA', category: 'status_query', path: 'rpa://expense_submit/status' }),
       ]),
     );
+  });
+
+  it('builds synthetic URL endpoints from direct-link network runtime definitions', () => {
+    const { prisma } = createTxMocks();
+    const processor = new BootstrapProcessor(prisma as any);
+
+    const processes = (processor as any).buildProcessesFromRpaDefinitions([createDirectLinkDefinition()]);
+
+    expect(processes).toHaveLength(1);
+    expect(processes[0].endpoints).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ method: 'RPA', category: 'submit', path: 'url://leave_request/submit' }),
+      ]),
+    );
+  });
+
+  it('synthesizes direct-link network submit from capture_form_submit when runtime omits explicit networkSubmit', () => {
+    const { prisma } = createTxMocks();
+    const processor = new BootstrapProcessor(prisma as any);
+
+    const definitions = (processor as any).getRpaDefinitions({
+      authConfig: { accessMode: 'direct_link' },
+      sources: [
+        {
+          sourceType: 'manual_rpa',
+          sourceContent: JSON.stringify({
+            flows: [{
+              processCode: 'leave_request_capture_only',
+              processName: '请假申请',
+              accessMode: 'direct_link',
+              sourceType: 'direct_link',
+              metadata: {
+                accessMode: 'direct_link',
+                sourceType: 'direct_link',
+              },
+              fields: [{
+                key: 'reason',
+                label: '请假事由',
+                type: 'textarea',
+                required: true,
+              }],
+              runtime: {
+                preflight: {
+                  steps: [
+                    {
+                      type: 'evaluate',
+                      builtin: 'capture_form_submit',
+                      options: {
+                        output: {
+                          captureKey: 'submitCapture',
+                          fieldsKey: 'submitFields',
+                          bodyModeKey: 'submitBodyMode',
+                          originKey: 'submitOrigin',
+                        },
+                      },
+                    },
+                  ],
+                },
+              },
+            }],
+          }),
+          metadata: {},
+        },
+      ],
+    });
+
+    expect(definitions[0].runtime).toMatchObject({
+      networkSubmit: {
+        url: '{{preflight.submitCapture.action}}',
+        method: '{{preflight.submitCapture.method}}',
+        bodyMode: '{{preflight.submitBodyMode}}',
+        body: {
+          source: 'preflight.submitFields',
+        },
+      },
+    });
+
+    const processes = (processor as any).buildProcessesFromRpaDefinitions(definitions);
+    expect(processes).toHaveLength(1);
+    expect(processes[0].endpoints).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ method: 'RPA', category: 'submit', path: 'url://leave_request_capture_only/submit' }),
+      ]),
+    );
+  });
+
+  it('does not treat direct-link browser submit steps as rpa endpoints without network submit runtime', () => {
+    const { prisma } = createTxMocks();
+    const processor = new BootstrapProcessor(prisma as any);
+
+    const processes = (processor as any).buildProcessesFromRpaDefinitions([{
+      processCode: 'leave_request_browser_only',
+      processName: '请假申请',
+      accessMode: 'direct_link',
+      sourceType: 'direct_link',
+      metadata: {
+        accessMode: 'direct_link',
+        sourceType: 'direct_link',
+      },
+      actions: {
+        submit: {
+          steps: [{ type: 'click', target: { kind: 'text', value: '提交' } }],
+        },
+      },
+    }]);
+
+    expect(processes).toHaveLength(1);
+    expect(processes[0].endpoints).toEqual([]);
   });
 
   it('prefers the final business jump URL over the portal entry URL when resolving connector baseUrl', () => {
@@ -368,6 +519,78 @@ describe('BootstrapProcessor RPA publishing', () => {
             submit: ['api', 'rpa'],
             queryStatus: ['api', 'rpa'],
           },
+        }),
+      }),
+    }));
+  });
+
+  it('publishes direct-link bootstrap flows with url execution modes instead of rpa', async () => {
+    const { prisma, processTemplateCreate } = createTxMocks();
+    const processor = new BootstrapProcessor(prisma as any);
+
+    await (processor as any).runCompiling(
+      {
+        id: 'job-4',
+        tenantId: 'tenant-1',
+        name: 'XPU OA',
+        oaUrl: 'https://oa2023.xpu.edu.cn',
+        openApiUrl: null,
+        authConfig: { accessMode: 'direct_link', bootstrapMode: 'rpa_only' },
+        sources: [
+          {
+            sourceType: 'manual_rpa',
+            sourceContent: JSON.stringify({ flows: [createDirectLinkDefinition()] }),
+            metadata: {},
+          },
+        ],
+      },
+      [
+        {
+          processCode: 'leave_request',
+          processName: '请假申请',
+          category: 'rpa',
+          description: 'XPU leave request',
+          endpoints: [
+            {
+              name: '请假申请 submit',
+              method: 'RPA',
+              path: 'url://leave_request/submit',
+              description: 'Submit through URL runtime',
+              category: 'submit',
+              parameters: [
+                {
+                  name: 'reason',
+                  type: 'string',
+                  required: true,
+                  description: '请假事由',
+                  in: 'body',
+                },
+              ],
+              responseMapping: { success: 'success', data: 'data' },
+              bodyTemplate: { kind: 'url_submit' },
+            },
+          ],
+        },
+      ],
+      'PUBLISHED',
+      [],
+    );
+
+    expect(processTemplateCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        uiHints: expect.objectContaining({
+          executionModes: {
+            submit: ['url'],
+            queryStatus: [],
+          },
+          rpaDefinition: expect.objectContaining({
+            processCode: 'leave_request',
+            runtime: expect.objectContaining({
+              networkSubmit: expect.objectContaining({
+                url: '{{preflight.submitCapture.action}}',
+              }),
+            }),
+          }),
         }),
       }),
     }));

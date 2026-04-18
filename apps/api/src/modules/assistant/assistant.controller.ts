@@ -57,6 +57,15 @@ class MissingFieldDto {
 
   @ApiProperty({ required: false, description: '字段类型' })
   type?: string;
+
+  @ApiProperty({ required: false, description: '字段解释/填写说明' })
+  description?: string;
+
+  @ApiProperty({ required: false, description: '字段示例值' })
+  example?: string;
+
+  @ApiProperty({ required: false, description: '是否支持多份上传/多值输入' })
+  multiple?: boolean;
 }
 
 class ActionButtonDto {
@@ -89,6 +98,15 @@ class ProcessCardFieldDto {
   @ApiProperty({ required: false, description: '是否必填' })
   required?: boolean;
 
+  @ApiProperty({ required: false, description: '字段解释/填写说明' })
+  description?: string;
+
+  @ApiProperty({ required: false, description: '字段示例值' })
+  example?: string;
+
+  @ApiProperty({ required: false, description: '是否支持多文件/多值' })
+  multiple?: boolean;
+
   @ApiProperty({ required: false, description: '字段来源', enum: ['user', 'derived', 'prefill'] })
   origin?: 'user' | 'derived' | 'prefill';
 
@@ -120,9 +138,9 @@ class ProcessCardDto {
 
   @ApiProperty({
     description: '流程阶段',
-    enum: ['collecting', 'confirming', 'executing', 'submitted', 'rework', 'completed', 'failed', 'cancelled'],
+    enum: ['collecting', 'confirming', 'executing', 'draft', 'submitted', 'rework', 'completed', 'failed', 'cancelled'],
   })
-  stage: 'collecting' | 'confirming' | 'executing' | 'submitted' | 'rework' | 'completed' | 'failed' | 'cancelled';
+  stage: 'collecting' | 'confirming' | 'executing' | 'draft' | 'submitted' | 'rework' | 'completed' | 'failed' | 'cancelled';
 
   @ApiProperty({ description: '卡片操作状态', enum: ['available', 'readonly'] })
   actionState: 'available' | 'readonly';
@@ -192,9 +210,9 @@ class SessionStateDto {
   @ApiProperty({
     required: false,
     description: '流程阶段',
-    enum: ['collecting', 'confirming', 'executing', 'submitted', 'rework', 'completed', 'failed', 'cancelled'],
+    enum: ['collecting', 'confirming', 'executing', 'draft', 'submitted', 'rework', 'completed', 'failed', 'cancelled'],
   })
-  stage?: 'collecting' | 'confirming' | 'executing' | 'submitted' | 'rework' | 'completed' | 'failed' | 'cancelled';
+  stage?: 'collecting' | 'confirming' | 'executing' | 'draft' | 'submitted' | 'rework' | 'completed' | 'failed' | 'cancelled';
 
   @ApiProperty({ required: false, description: '返工提示类型', enum: ['supplement', 'modify', 'unknown'] })
   reworkHint?: 'supplement' | 'modify' | 'unknown';
@@ -320,6 +338,8 @@ export class AssistantController {
         sessionId: dto.sessionId,
         message: dto.message,
         attachments: dto.attachments,
+        identityType: auth.identityType,
+        roles: auth.roles,
       });
     } catch (error: any) {
       if (error instanceof HttpException) {
@@ -423,11 +443,23 @@ export class AssistantController {
   async deleteSession(
     @Req() req: Request,
     @Param('sessionId') sessionId: string,
+    @Query('mode') mode: 'archive' | 'purge' | undefined,
   ) {
     try {
       const auth = await this.requestAuth.resolveUser(req, { requireUser: true });
-      await this.assistantService.deleteSession(sessionId, auth.tenantId, auth.userId!);
-      return { success: true, message: '会话已删除' };
+      const result = await this.assistantService.deleteSession(
+        sessionId,
+        auth.tenantId,
+        auth.userId!,
+        mode === 'purge' ? 'purge' : 'archive',
+      );
+      return {
+        success: true,
+        mode: result.mode,
+        restorable: result.restorable,
+        archivedAt: result.archivedAt || null,
+        message: result.mode === 'archive' ? '会话已从历史中移除' : '会话已永久删除',
+      };
     } catch (error: any) {
       if (error instanceof HttpException) {
         throw error;
@@ -435,6 +467,36 @@ export class AssistantController {
       this.logger.error(`deleteSession error: ${error.message}`);
       throw new HttpException(
         error.message || 'Failed to delete session',
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Post('sessions/restore')
+  @ApiOperation({
+    summary: '从业务记录恢复对话',
+    description: '从我的申请记录恢复已移除的对话，优先恢复原会话，否则创建新的恢复会话'
+  })
+  async restoreSession(
+    @Req() req: Request,
+    @Body() body: { sessionId?: string; submissionId?: string; draftId?: string },
+  ) {
+    try {
+      const auth = await this.requestAuth.resolveUser(req, { requireUser: true });
+      return await this.assistantService.restoreSessionFromBusinessRecord({
+        sessionId: body?.sessionId,
+        submissionId: body?.submissionId,
+        draftId: body?.draftId,
+        tenantId: auth.tenantId,
+        userId: auth.userId!,
+      });
+    } catch (error: any) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      this.logger.error(`restoreSession error: ${error.message}`);
+      throw new HttpException(
+        error.message || 'Failed to restore session',
         HttpStatus.INTERNAL_SERVER_ERROR
       );
     }

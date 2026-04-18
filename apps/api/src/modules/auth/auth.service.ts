@@ -13,6 +13,7 @@ import axios from 'axios';
 import { PrismaService } from '../common/prisma.service';
 import { getAuthSessionSecret } from '../common/auth-session-secret';
 import { DelegatedCredentialService } from '../delegated-credential/delegated-credential.service';
+import { normalizeIdentityType } from '../common/identity-scope.util';
 
 @Injectable()
 export class AuthService {
@@ -112,9 +113,11 @@ export class AuthService {
       return this.normalizeReturnTo(returnTo);
     }
 
-    const callback = `${this.resolvePublicWebBaseUrl(req)}${this.normalizeReturnTo(returnTo || '/login')}`;
+    const callback = `${this.resolvePublicWebBaseUrl(req, { preferRequestOrigin: true })}${this.normalizeReturnTo(returnTo || '/login')}`;
     const logoutUrl = new URL(this.resolveOauthEndpoint('logout'));
-    logoutUrl.searchParams.set('callback', callback);
+    for (const paramName of this.getOauthLogoutRedirectParams()) {
+      logoutUrl.searchParams.set(paramName, callback);
+    }
     return logoutUrl.toString();
   }
 
@@ -146,6 +149,7 @@ export class AuthService {
       displayName: user.displayName,
       roles: this.parseRoles(user.roles),
       tenantId: user.tenantId,
+      identityType: user.identityType || undefined,
     };
   }
 
@@ -163,6 +167,7 @@ export class AuthService {
     displayName: string;
     tenantId: string;
     roles: unknown;
+    identityType?: string | null;
   }) {
     const roles = this.parseRoles(user.roles);
     const sessionSecret = this.getSessionSecret();
@@ -173,6 +178,7 @@ export class AuthService {
       displayName: user.displayName,
       roles,
       tenantId: user.tenantId,
+      identityType: user.identityType || undefined,
     }, sessionSecret, sessionTtlSeconds);
 
     return {
@@ -181,6 +187,7 @@ export class AuthService {
       displayName: user.displayName,
       roles,
       tenantId: user.tenantId,
+      identityType: user.identityType || undefined,
       sessionToken: token,
       sessionExpiresAt: new Date(claims.exp * 1000).toISOString(),
     };
@@ -205,6 +212,17 @@ export class AuthService {
 
   private getOauthScope() {
     return (process.env.AUTH_OAUTH2_SCOPE || 'client').trim() || 'client';
+  }
+
+  private getOauthLogoutRedirectParams() {
+    const configured = (process.env.AUTH_OAUTH2_LOGOUT_REDIRECT_PARAMS
+      || process.env.AUTH_OAUTH2_LOGOUT_REDIRECT_PARAM
+      || 'callback')
+      .split(',')
+      .map((item) => item.trim())
+      .filter(Boolean);
+
+    return configured.length > 0 ? configured : ['callback'];
   }
 
   private resolveOauthEndpoint(kind: 'authorize' | 'token' | 'userinfo' | 'logout') {
@@ -234,27 +252,61 @@ export class AuthService {
   private resolveOauthRedirectUri(req: Request) {
     const configured = (process.env.AUTH_OAUTH2_REDIRECT_URI || '').trim();
     if (configured) {
-      return configured;
+      return this.rewriteConfiguredPublicUrlToRequestOrigin(configured, req);
     }
 
     return `${this.resolvePublicWebBaseUrl(req)}/login/callback`;
   }
 
-  private resolvePublicWebBaseUrl(req: Request) {
+  private resolvePublicWebBaseUrl(req: Request, options?: { preferRequestOrigin?: boolean }) {
+    const requestBaseUrl = this.resolveRequestPublicWebBaseUrl(req);
+    if (options?.preferRequestOrigin && requestBaseUrl) {
+      return requestBaseUrl;
+    }
+
     const configured = (process.env.PUBLIC_WEB_BASE_URL || process.env.PUBLIC_BASE_URL || '').trim();
     if (configured) {
       return configured.replace(/\/+$/, '');
     }
 
+    if (requestBaseUrl) {
+      return requestBaseUrl;
+    }
+
+    throw new UnauthorizedException('无法解析公网访问地址，请配置 PUBLIC_WEB_BASE_URL');
+  }
+
+  private resolveRequestPublicWebBaseUrl(req: Request) {
     const forwardedHost = req.header('x-forwarded-host');
     const host = forwardedHost || req.header('host') || '';
     if (!host) {
-      throw new UnauthorizedException('无法解析公网访问地址，请配置 PUBLIC_WEB_BASE_URL');
+      return '';
     }
 
     const proto = (req.header('x-forwarded-proto')
       || (host.startsWith('localhost') || host.startsWith('127.0.0.1') ? 'http' : 'https')).trim();
     return `${proto}://${host}`.replace(/\/+$/, '');
+  }
+
+  private rewriteConfiguredPublicUrlToRequestOrigin(configuredUrl: string, req: Request) {
+    const requestBaseUrl = this.resolveRequestPublicWebBaseUrl(req);
+    if (!requestBaseUrl) {
+      return configuredUrl;
+    }
+
+    try {
+      const configured = new URL(configuredUrl);
+      const requestBase = new URL(requestBaseUrl);
+      if (configured.origin === requestBase.origin) {
+        return configured.toString();
+      }
+
+      configured.protocol = requestBase.protocol;
+      configured.host = requestBase.host;
+      return configured.toString();
+    } catch {
+      return configuredUrl;
+    }
   }
 
   private issueOauthState(input: { redirectUri: string; returnTo: string }) {
@@ -466,6 +518,7 @@ export class AuthService {
       username: this.normalizeUsername(username),
       displayName: displayName || this.normalizeUsername(username),
       email: email || '',
+      identityType: this.resolveOauthIdentityType(response.data),
     };
   }
 
@@ -474,6 +527,7 @@ export class AuthService {
     username: string;
     displayName: string;
     email?: string;
+    identityType?: string;
   }) {
     const tenant = await this.ensureDefaultTenant();
     const syntheticEmail = profile.email?.trim() || `${profile.username}@oauth.local`;
@@ -496,6 +550,7 @@ export class AuthService {
           displayName: profile.displayName,
           email: existing.email || syntheticEmail,
           oaUserId: profile.oaUserId || existing.oaUserId,
+          identityType: profile.identityType || existing.identityType,
           status: 'active',
         },
       });
@@ -509,6 +564,7 @@ export class AuthService {
         displayName: profile.displayName,
         roles: this.resolveOauthBootstrapRoles(profile),
         oaUserId: profile.oaUserId,
+        identityType: profile.identityType,
         status: 'active',
       },
     });
@@ -589,6 +645,84 @@ export class AuthService {
 
   private normalizeUsername(input: string) {
     return input.trim().replace(/\s+/g, '_');
+  }
+
+  private resolveOauthIdentityType(input: unknown) {
+    const direct = normalizeIdentityType(this.pickString(input, [
+      'identityType',
+      'userType',
+      'personType',
+      'staffType',
+      'accountType',
+      'identity',
+      'userIdentity',
+      'data.identityType',
+      'data.userType',
+      'data.personType',
+      'data.staffType',
+      'data.accountType',
+      'data.identity',
+      'data.userIdentity',
+      'data.user.identityType',
+      'data.user.userType',
+      'data.user.personType',
+      'data.user.staffType',
+      'data.user.accountType',
+      'data.user.identity',
+      'data.user.userIdentity',
+      'result.identityType',
+      'result.userType',
+      'result.personType',
+      'result.staffType',
+      'result.accountType',
+      'result.identity',
+      'result.userIdentity',
+    ]));
+    if (direct) {
+      return direct;
+    }
+
+    const raw = this.pickString(input, [
+      'identityType',
+      'userType',
+      'personType',
+      'staffType',
+      'accountType',
+      'identity',
+      'userIdentity',
+      'data.identityType',
+      'data.userType',
+      'data.personType',
+      'data.staffType',
+      'data.accountType',
+      'data.identity',
+      'data.userIdentity',
+      'data.user.identityType',
+      'data.user.userType',
+      'data.user.personType',
+      'data.user.staffType',
+      'data.user.accountType',
+      'data.user.identity',
+      'data.user.userIdentity',
+      'result.identityType',
+      'result.userType',
+      'result.personType',
+      'result.staffType',
+      'result.accountType',
+      'result.identity',
+      'result.userIdentity',
+    ]).toLowerCase();
+    if (!raw) {
+      return undefined;
+    }
+
+    if (this.parseCsvEnv('AUTH_OAUTH2_TEACHER_IDENTITY_VALUES').has(raw)) {
+      return 'teacher';
+    }
+    if (this.parseCsvEnv('AUTH_OAUTH2_STUDENT_IDENTITY_VALUES').has(raw)) {
+      return 'student';
+    }
+    return undefined;
   }
 
   private pickString(input: unknown, paths: string[]) {

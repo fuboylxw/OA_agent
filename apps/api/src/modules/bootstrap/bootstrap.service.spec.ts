@@ -99,6 +99,8 @@ describe('BootstrapService', () => {
       const result = await service.createJob({
         tenantId: 'default-tenant',
         accessMode: 'backend_api',
+        oaUrl: 'https://oa.example.com',
+        identityScope: 'both',
         apiDocUrl: 'http://example.com/openapi.json',
       });
 
@@ -131,6 +133,8 @@ describe('BootstrapService', () => {
       const result = await service.createJob({
         tenantId: 'default-tenant',
         accessMode: 'direct_link',
+        oaUrl: 'https://oa.example.com',
+        identityScope: 'both',
         rpaFlowContent: '{"flows":[{"processCode":"expense_submit","processName":"Expense Submit"}]}',
         platformConfig: {
           entryUrl: 'https://portal.example.com/sso',
@@ -146,12 +150,27 @@ describe('BootstrapService', () => {
         data: expect.objectContaining({
           bootstrapJobId: mockJob.id,
           sourceType: 'manual_rpa',
+          sourceContent: expect.any(String),
           metadata: expect.objectContaining({
             accessMode: 'direct_link',
             sourceType: 'direct_link',
           }),
         }),
       }));
+      const createdSource = (prisma.bootstrapSource.create as jest.Mock).mock.calls.find(
+        ([call]) => call.data?.sourceType === 'manual_rpa',
+      )?.[0];
+      const normalizedFlow = JSON.parse(createdSource.data.sourceContent);
+      expect(normalizedFlow.flows[0]).toEqual(expect.objectContaining({
+        accessMode: 'direct_link',
+        sourceType: 'direct_link',
+        runtime: expect.objectContaining({
+          networkSubmit: expect.objectContaining({
+            url: '{{preflight.submitCapture.action}}',
+          }),
+        }),
+      }));
+      expect(normalizedFlow.flows[0].actions).toBeUndefined();
     });
 
     it('binds the bootstrap job to an existing source system when connectorId is provided', async () => {
@@ -165,6 +184,7 @@ describe('BootstrapService', () => {
         id: 'connector-1',
         name: '统一办公',
         baseUrl: 'https://oa.example.com',
+        identityScope: 'teacher',
         authConfig: {
           authType: 'oauth2',
           accessMode: 'direct_link',
@@ -182,6 +202,7 @@ describe('BootstrapService', () => {
         queueJobId: 'queue-job-id',
         connectorId: 'connector-1',
         name: '统一办公',
+        identityScope: 'teacher',
         oaUrl: 'https://oa.example.com',
         authConfig: {
           authType: 'oauth2',
@@ -224,6 +245,7 @@ describe('BootstrapService', () => {
           id: true,
           name: true,
           baseUrl: true,
+          identityScope: true,
           authConfig: true,
         },
       });
@@ -232,6 +254,7 @@ describe('BootstrapService', () => {
           connectorId: 'connector-1',
           name: '统一办公',
           oaUrl: 'https://oa.example.com',
+          identityScope: 'teacher',
           authConfig: expect.objectContaining({
             authType: 'oauth2',
             accessMode: 'direct_link',
@@ -266,6 +289,7 @@ describe('BootstrapService', () => {
         connectorId: 'connector-1',
         name: '统一办公',
         oaUrl: 'https://oa.example.com',
+        identityScope: 'teacher',
         authConfig: expect.objectContaining({
           authType: 'oauth2',
           accessMode: 'direct_link',
@@ -311,6 +335,8 @@ describe('BootstrapService', () => {
       const result = await service.createJob({
         tenantId: 'default-tenant',
         accessMode: 'direct_link',
+        oaUrl: 'https://oa.example.com',
+        identityScope: 'both',
         authType: 'oauth2',
         authConfig: {
           accessToken: 'secret-access-token',
@@ -373,6 +399,8 @@ describe('BootstrapService', () => {
       await expect(service.createJob({
         tenantId: 'default-tenant',
         accessMode: 'direct_link',
+        oaUrl: 'https://oa.example.com',
+        identityScope: 'both',
         rpaFlowContent: '{"flows":[{"name":"missing-process-code"}]}',
       })).rejects.toThrow('页面流程内容无效，无法识别可执行步骤');
 
@@ -398,6 +426,7 @@ describe('BootstrapService', () => {
         accessMode: 'text_guide',
         name: '请假申请',
         oaUrl: 'https://portal.example.com',
+        identityScope: 'student',
         rpaFlowContent: [
           '先点击 新建申请',
           '输入 开始日期 为 2026-03-20',
@@ -429,11 +458,11 @@ describe('BootstrapService', () => {
       const generatedFlow = JSON.parse(createdSource.data.sourceContent);
 
       expect(generatedFlow.flows[0]).toMatchObject({
-        processCode: 'text_guided_flow',
         runtime: expect.objectContaining({
           executorMode: 'browser',
         }),
       });
+      expect(generatedFlow.flows[0].processCode).toMatch(/^flow_[a-f0-9]{8}$/);
       expect(generatedFlow.flows[0].actions.submit.steps).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ type: 'goto', value: 'https://portal.example.com/leave' }),
@@ -467,6 +496,15 @@ describe('BootstrapService', () => {
           {
             processName: 'Leave Request',
             processCode: 'leave_request',
+            fields: [
+              {
+                label: 'Reason',
+                type: 'textarea',
+                required: true,
+                description: '请填写请假原因说明',
+                example: '因家中有事请假',
+              },
+            ],
             steps: [
               '\u70b9\u51fb Leave Application',
               '\u8f93\u5165 Reason \u4e3a Family matters',
@@ -487,6 +525,8 @@ describe('BootstrapService', () => {
         tenantId: 'default-tenant',
         accessMode: 'text_guide',
         name: 'Leave Request',
+        oaUrl: 'https://portal.example.com',
+        identityScope: 'both',
         rpaFlowContent: 'free form guide',
       });
 
@@ -502,6 +542,13 @@ describe('BootstrapService', () => {
       expect(generatedFlow.flows[0]).toMatchObject({
         processCode: 'leave_request',
         processName: 'Leave Request',
+        fields: expect.arrayContaining([
+          expect.objectContaining({
+            label: 'Reason',
+            description: '请填写请假原因说明',
+            example: '因家中有事请假',
+          }),
+        ]),
         platform: {
           entryUrl: 'https://portal.example.com/workbench',
         },
@@ -534,6 +581,8 @@ describe('BootstrapService', () => {
         tenantId: 'default-tenant',
         accessMode: 'text_guide',
         name: 'Fallback Flow',
+        oaUrl: 'https://portal.example.com',
+        identityScope: 'both',
         rpaFlowContent: [
           '\u70b9\u51fb \u65b0\u5efa\u7533\u8bf7',
           '\u8f93\u5165 \u539f\u56e0 \u4e3a \u5bb6\u4e2d\u6709\u4e8b',
@@ -575,6 +624,8 @@ describe('BootstrapService', () => {
         tenantId: 'default-tenant',
         accessMode: 'text_guide',
         name: '综合 OA',
+        oaUrl: 'https://portal.example.com',
+        identityScope: 'both',
         rpaFlowContent: [
           '# 全局',
           '入口链接: https://portal.example.com/workbench',
@@ -645,6 +696,182 @@ describe('BootstrapService', () => {
       );
     });
 
+    it('accepts a multi-flow direct-link guide document and keeps URL mode metadata', async () => {
+      const mockJob = {
+        id: 'multi-direct-link-job-id',
+        tenantId: 'default-tenant',
+        status: 'CREATED',
+      };
+
+      jest.spyOn(prisma.bootstrapJob, 'create').mockResolvedValue(mockJob as any);
+      jest.spyOn(prisma.bootstrapJob, 'findUnique').mockResolvedValue({
+        ...mockJob,
+        queueJobId: 'queue-job-id',
+      } as any);
+
+      await service.createJob({
+        tenantId: 'default-tenant',
+        accessMode: 'direct_link',
+        name: '综合 OA',
+        oaUrl: 'https://oa.example.com',
+        identityScope: 'both',
+        rpaFlowContent: [
+          '# 全局',
+          '认证入口: https://sz.xpu.edu.cn/',
+          '系统网址: https://oa.example.com',
+          '## 流程: 请假申请',
+          '描述: 网信处科员请假申请',
+          '流程编码: leave_request',
+          '参数:',
+          '- 请假事由 | textarea | 必填',
+          '- 开始日期 | date | 必填',
+          '- 结束日期 | date | 必填',
+          '步骤:',
+          '- 访问 https://sz.xpu.edu.cn/',
+          '- 访问 https://oa.example.com',
+          '- 访问 https://oa.example.com/leave/new',
+          '- 填写 请假事由',
+          '- 填写 开始日期',
+          '- 填写 结束日期',
+          '- 点击 保存待发',
+          '- 看到 提交成功 就结束',
+          '## 流程: 西安工程大学用印申请单',
+          '流程编码: expense_submit',
+          '描述: 西安工程大学印章申请',
+          '参数:',
+          '- 文件类型、名称及份数',
+          '- 用印附件',
+          '步骤:',
+          '- 访问 https://sz.xpu.edu.cn/',
+          '- 访问 https://oa.example.com',
+          '- 访问 https://oa.example.com/expense/new',
+          '- 填写 文件类型、名称及份数',
+          '- 上传 用印附件',
+          '- 点击 保存待发',
+          '- 看到 提交成功 就结束',
+        ].join('\n'),
+      });
+
+      expect(prisma.bootstrapSource.create).toHaveBeenCalledWith(expect.objectContaining({
+        data: expect.objectContaining({
+          sourceType: 'manual_rpa',
+          metadata: expect.objectContaining({
+            accessMode: 'direct_link',
+            sourceType: 'direct_link',
+            guideText: expect.stringContaining('流程: 请假申请'),
+          }),
+        }),
+      }));
+
+      const createdSource = (prisma.bootstrapSource.create as jest.Mock).mock.calls.find(
+        ([call]) => call.data?.sourceType === 'manual_rpa',
+      )?.[0];
+      const generatedFlow = JSON.parse(createdSource.data.sourceContent);
+
+      expect(generatedFlow.flows).toHaveLength(2);
+      expect(generatedFlow.flows[0]).toMatchObject({
+        processCode: 'leave_request',
+        processName: '请假申请',
+        description: '网信处科员请假申请',
+        accessMode: 'direct_link',
+        sourceType: 'direct_link',
+        metadata: expect.objectContaining({
+          accessMode: 'direct_link',
+          sourceType: 'direct_link',
+        }),
+        platform: expect.objectContaining({
+          entryUrl: 'https://sz.xpu.edu.cn/',
+          businessBaseUrl: 'https://oa.example.com',
+          targetBaseUrl: 'https://oa.example.com',
+          jumpUrlTemplate: 'https://oa.example.com/leave/new',
+        }),
+        runtime: expect.objectContaining({
+          executorMode: 'http',
+          networkSubmit: expect.objectContaining({
+            url: '{{preflight.submitCapture.action}}',
+            method: '{{preflight.submitCapture.method}}',
+            bodyMode: '{{preflight.submitBodyMode}}',
+            body: {
+              source: 'preflight.submitFields',
+            },
+          }),
+          preflight: expect.objectContaining({
+            steps: expect.arrayContaining([
+              expect.objectContaining({ type: 'goto', value: 'https://sz.xpu.edu.cn/' }),
+              expect.objectContaining({ type: 'goto', value: 'https://oa.example.com/leave/new' }),
+              expect.objectContaining({
+                type: 'evaluate',
+                builtin: 'capture_form_submit',
+                options: expect.objectContaining({
+                  trigger: expect.objectContaining({ text: '保存待发' }),
+                }),
+              }),
+            ]),
+          }),
+        }),
+      });
+      expect(generatedFlow.flows[1]).toMatchObject({
+        processCode: 'expense_submit',
+        processName: '西安工程大学用印申请单',
+        description: '西安工程大学印章申请',
+        accessMode: 'direct_link',
+        sourceType: 'direct_link',
+        fields: expect.arrayContaining([
+          expect.objectContaining({
+            label: '文件类型、名称及份数',
+            type: 'text',
+          }),
+          expect.objectContaining({
+            label: '用印附件',
+            type: 'file',
+          }),
+        ]),
+        platform: expect.objectContaining({
+          jumpUrlTemplate: 'https://oa.example.com/expense/new',
+        }),
+      });
+      expect(generatedFlow.flows[0].actions).toBeUndefined();
+    });
+
+    it('auto-generates a stable process code for Chinese direct-link flow names when 流程编码 is omitted', async () => {
+      const mockJob = {
+        id: 'auto-process-code-job-id',
+        tenantId: 'default-tenant',
+        status: 'CREATED',
+      };
+
+      jest.spyOn(prisma.bootstrapJob, 'create').mockResolvedValue(mockJob as any);
+      jest.spyOn(prisma.bootstrapJob, 'findUnique').mockResolvedValue({
+        ...mockJob,
+        queueJobId: 'queue-job-id',
+      } as any);
+
+      await service.createJob({
+        tenantId: 'default-tenant',
+        accessMode: 'direct_link',
+        name: '综合 OA',
+        oaUrl: 'https://oa.example.com',
+        identityScope: 'both',
+        rpaFlowContent: [
+          '# 全局',
+          '系统网址: https://oa.example.com',
+          '## 流程: 请假申请',
+          '步骤:',
+          '- 访问 https://oa.example.com/leave/new',
+          '- 填写 请假事由',
+          '- 点击 保存待发',
+          '- 看到 提交成功 就结束',
+        ].join('\n'),
+      });
+
+      const createdSource = (prisma.bootstrapSource.create as jest.Mock).mock.calls.find(
+        ([call]) => call.data?.sourceType === 'manual_rpa',
+      )?.[0];
+      const generatedFlow = JSON.parse(createdSource.data.sourceContent);
+
+      expect(generatedFlow.flows[0].processCode).toMatch(/^flow_[a-f0-9]{8}$/);
+    });
+
     it('supports separated parameter and test-sample sections without hard-coding sample values into runtime steps', async () => {
       const mockJob = {
         id: 'structured-guide-job-id',
@@ -662,6 +889,8 @@ describe('BootstrapService', () => {
         tenantId: 'default-tenant',
         accessMode: 'text_guide',
         name: '请假申请',
+        oaUrl: 'https://portal.example.com',
+        identityScope: 'teacher',
         rpaFlowContent: [
           '## 流程: 请假申请',
           '流程编码: leave_request',
@@ -703,7 +932,9 @@ describe('BootstrapService', () => {
         fieldKey: 'field_1',
       });
       expect(startDateStep.value).toBeUndefined();
-      expect(flow.metadata).toEqual({
+      expect(flow.metadata).toEqual(expect.objectContaining({
+        accessMode: 'text_guide',
+        sourceType: 'text_guide',
         textGuide: {
           sampleData: {
             field_1: '2026-04-01',
@@ -711,7 +942,7 @@ describe('BootstrapService', () => {
             field_3: '家中有事',
           },
         },
-      });
+      }));
     });
   });
 
@@ -757,10 +988,25 @@ describe('BootstrapService', () => {
         data: expect.objectContaining({
           bootstrapJobId: 'job-1',
           sourceType: 'manual_rpa',
-          sourceContent: '{"flows":[{"processCode":"expense_submit","processName":"Expense Submit"}]}',
+          sourceContent: expect.any(String),
           metadata: expect.objectContaining({
             accessMode: 'direct_link',
             sourceType: 'direct_link',
+          }),
+        }),
+      }));
+      const createdSource = (prisma.bootstrapSource.create as jest.Mock).mock.calls.find(
+        ([call]) => call.data?.bootstrapJobId === 'job-1' && call.data?.sourceType === 'manual_rpa',
+      )?.[0];
+      const normalizedFlow = JSON.parse(createdSource.data.sourceContent);
+      expect(normalizedFlow.flows[0]).toEqual(expect.objectContaining({
+        processCode: 'expense_submit',
+        processName: 'Expense Submit',
+        accessMode: 'direct_link',
+        sourceType: 'direct_link',
+        runtime: expect.objectContaining({
+          networkSubmit: expect.objectContaining({
+            url: '{{preflight.submitCapture.action}}',
           }),
         }),
       }));
@@ -781,6 +1027,28 @@ describe('BootstrapService', () => {
         }),
       }));
       expect(mockQueue.add).toHaveBeenCalled();
+    });
+
+    it('rejects direct-link flow definitions when text-guide mode is selected', async () => {
+      await expect(service.createJob({
+        tenantId: 'default-tenant',
+        accessMode: 'text_guide',
+        oaUrl: 'https://oa.example.com',
+        identityScope: 'both',
+        rpaFlowContent: JSON.stringify({
+          flows: [{
+            processCode: 'leave_request',
+            processName: '请假申请',
+            accessMode: 'direct_link',
+            sourceType: 'direct_link',
+            runtime: {
+              networkSubmit: {
+                url: 'https://oa.example.com/api/submit',
+              },
+            },
+          }],
+        }),
+      })).rejects.toThrow('文字示教接入不能使用链接直达流程定义，请改为链接直达模式');
     });
   });
 

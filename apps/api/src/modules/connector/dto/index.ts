@@ -7,6 +7,10 @@ export class CreateConnectorDto {
   @IsNotEmpty()
   name: string;
 
+  @ApiProperty({ enum: ['teacher', 'student', 'both'], description: '连接器适用身份范围' })
+  @IsEnum(['teacher', 'student', 'both'])
+  identityScope: string;
+
   @ApiProperty({ enum: ['openapi', 'form-page', 'hybrid'] })
   @IsEnum(['openapi', 'form-page', 'hybrid'])
   oaType: string;
@@ -49,6 +53,11 @@ export class CreateConnectorDto {
 }
 
 export class UpdateConnectorDto {
+  @ApiProperty({ enum: ['teacher', 'student', 'both'], required: false, description: '连接器适用身份范围' })
+  @IsOptional()
+  @IsEnum(['teacher', 'student', 'both'])
+  identityScope?: string;
+
   @ApiProperty({ enum: ['openapi', 'form-page', 'hybrid'], required: false })
   @IsOptional()
   @IsEnum(['openapi', 'form-page', 'hybrid'])

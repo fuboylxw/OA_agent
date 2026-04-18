@@ -8,7 +8,12 @@ export interface DeliverySubmitRequest {
   tenantId?: string;
   userId?: string;
   formData: Record<string, any>;
-  attachments?: Array<{ filename: string; content: Buffer }>;
+  attachments?: Array<{
+    filename: string;
+    content: Buffer;
+    mimeType?: string;
+    fieldKey?: string | null;
+  }>;
   idempotencyKey: string;
   selectedPath?: DeliveryPath | null;
   fallbackPolicy?: DeliveryPath[];

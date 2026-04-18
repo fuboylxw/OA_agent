@@ -1,4 +1,4 @@
-import { extname } from 'path';
+import { basename, extname } from 'path';
 import type {
   AttachmentBindScope,
   AttachmentPreviewStatus,
@@ -23,6 +23,64 @@ const GENERAL_ATTACHMENT_KEYS = new Set([
   'supportingDocuments',
 ]);
 
+const ATTACHMENT_FILENAME_CONTROL_CHAR_PATTERN = /[\u0000-\u001f\u007f]/g;
+const ATTACHMENT_FILENAME_MOJIBAKE_PATTERN =
+  /[\u0080-\u009f]|[ÃÂÅÆÇÈÉÊËÌÍÎÏÐÑÒÓÔÕÖØÙÚÛÜÝÞßàáâãäåæçèéêëìíîïðñòóôõö÷øùúûüýþÿ]/;
+
+function scoreAttachmentFileName(value: string) {
+  let score = 0;
+
+  if (!value) {
+    return -100;
+  }
+
+  if (ATTACHMENT_FILENAME_MOJIBAKE_PATTERN.test(value)) {
+    score -= 4;
+  }
+  if (value.includes('\uFFFD')) {
+    score -= 8;
+  }
+  if (/[\u4e00-\u9fff]/.test(value)) {
+    score += 6;
+  }
+  if (/[\u3040-\u30ff]/.test(value)) {
+    score += 6;
+  }
+  if (/[\uac00-\ud7af]/.test(value)) {
+    score += 6;
+  }
+  if (/[\u0400-\u04ff]/.test(value)) {
+    score += 4;
+  }
+  if (/[\u{1F300}-\u{1FAFF}]/u.test(value)) {
+    score += 4;
+  }
+  if (/[\p{L}\p{N}]/u.test(value)) {
+    score += 1;
+  }
+
+  return score;
+}
+
+function tryRepairUtf8Latin1Mojibake(value: string) {
+  if (!ATTACHMENT_FILENAME_MOJIBAKE_PATTERN.test(value)) {
+    return undefined;
+  }
+
+  const repaired = Buffer.from(value, 'latin1')
+    .toString('utf8')
+    .replace(ATTACHMENT_FILENAME_CONTROL_CHAR_PATTERN, '')
+    .trim();
+
+  if (!repaired || repaired === value || repaired.includes('\uFFFD')) {
+    return undefined;
+  }
+
+  return scoreAttachmentFileName(repaired) > scoreAttachmentFileName(value)
+    ? repaired.normalize('NFC')
+    : undefined;
+}
+
 export function normalizeExtension(input?: string | null) {
   if (!input) {
     return '';
@@ -30,6 +88,19 @@ export function normalizeExtension(input?: string | null) {
 
   const normalized = input.startsWith('.') ? input : extname(input);
   return normalized.toLowerCase();
+}
+
+export function normalizeAttachmentFileName(input?: string | null) {
+  const raw = typeof input === 'string' ? input : String(input ?? '');
+  const safeBaseName = basename(raw.replace(/\\/g, '/'))
+    .replace(ATTACHMENT_FILENAME_CONTROL_CHAR_PATTERN, '')
+    .trim();
+
+  if (!safeBaseName) {
+    return '';
+  }
+
+  return tryRepairUtf8Latin1Mojibake(safeBaseName) || safeBaseName;
 }
 
 export function getAttachmentPreviewStatus(
@@ -83,7 +154,9 @@ export function normalizeAttachmentRef(value: unknown): AttachmentRef | null {
 
   const record = value as unknown as Record<string, unknown>;
   const attachmentId = String(record.attachmentId || record.fileId || '').trim();
-  const fileName = typeof record.fileName === 'string' ? record.fileName : '';
+  const fileName = normalizeAttachmentFileName(
+    typeof record.fileName === 'string' ? record.fileName : '',
+  );
   const fileSize = Number(record.fileSize || 0);
   const mimeType = typeof record.mimeType === 'string' ? record.mimeType : 'application/octet-stream';
   const bindScope = record.bindScope === 'general' ? 'general' : 'field';

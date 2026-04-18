@@ -770,7 +770,7 @@ function ApiUploadContent() {
 
 export default function ApiUploadPage() {
   return (
-    <AuthGuard allowedRoles={['admin', 'flow_manager']}>
+    <AuthGuard allowedRoles={['admin']}>
       <ApiUploadContent />
     </AuthGuard>
   );

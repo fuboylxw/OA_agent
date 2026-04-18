@@ -21,14 +21,23 @@ import { TaskPlanAgent } from './agents/task-plan.agent';
 import {
   ACTIVE_SUBMISSION_STATUSES,
   getSubmissionStatusText,
+  normalizeSubmissionStatus,
 } from '../common/submission-status.util';
 import {
   ChatProcessStatus as ProcessStatus,
   ReworkHint,
   isTerminalChatProcessStatus,
+  mapSubmissionStatusToChatProcessStatus,
   requiresUserAction,
 } from '../common/chat-process-state';
 import { isAuthCredentialField } from '../common/auth-field.util';
+import { normalizeAttachmentRef } from '../attachment/attachment.utils';
+import {
+  buildChatRetentionWindow,
+  getRestoreStatusForProcess,
+  isConversationRestorable,
+  shouldApplyChatRetention,
+} from '../common/chat-retention.util';
 
 interface ChatInput {
   tenantId: string;
@@ -36,6 +45,8 @@ interface ChatInput {
   sessionId?: string;
   message: string;
   attachments?: ChatAttachment[];
+  identityType?: string;
+  roles?: string[];
 }
 
 interface ChatAttachment {
@@ -75,6 +86,9 @@ export interface ProcessCardField {
   displayValue: any;
   type: string;
   required?: boolean;
+  description?: string;
+  example?: string;
+  multiple?: boolean;
   origin?: ProcessFieldOrigin;
   tagLabel?: string;
   tagTone?: 'sky' | 'amber' | 'slate';
@@ -85,6 +99,7 @@ type ProcessCardStage =
   | 'collecting'
   | 'confirming'
   | 'executing'
+  | 'draft'
   | 'submitted'
   | 'rework'
   | 'completed'
@@ -106,7 +121,15 @@ interface ProcessCard {
   summary?: string;
   formData?: Record<string, any>;
   fields: ProcessCardField[];
-  missingFields?: Array<{ key: string; label: string; question: string; type?: string }>;
+  missingFields?: Array<{
+    key: string;
+    label: string;
+    question: string;
+    type?: string;
+    description?: string;
+    example?: string;
+    multiple?: boolean;
+  }>;
   actionButtons?: ActionButton[];
   needsAttachment?: boolean;
   draftId?: string;
@@ -129,6 +152,7 @@ export interface SessionState {
   reworkReason?: string | null;
   isTerminal?: boolean;
   activeProcessCard?: ProcessCard | null;
+  canRestoreConversation?: boolean;
 }
 
 export interface ChatResponse {
@@ -140,7 +164,15 @@ export interface ChatResponse {
   suggestedActions?: string[];
   actionButtons?: ActionButton[];
   formData?: Record<string, any>;
-  missingFields?: Array<{ key: string; label: string; question: string; type?: string }>;
+  missingFields?: Array<{
+    key: string;
+    label: string;
+    question: string;
+    type?: string;
+    description?: string;
+    example?: string;
+    multiple?: boolean;
+  }>;
   processStatus?: ProcessStatus;
   needsAttachment?: boolean;
   authChallenge?: AuthChallenge;
@@ -306,6 +338,10 @@ export class AssistantService {
           const template = await this.findTemplateForResolvedFlow(
             input.tenantId,
             processContext.processCode,
+            {
+              identityType: input.identityType,
+              roles: input.roles,
+            },
             ((session.metadata || {}) as Record<string, any>).currentConnectorId || null,
           );
           if (!template) {
@@ -318,23 +354,15 @@ export class AssistantService {
           const schema = template.schema as any;
           const fileFields = (schema?.fields || []).filter((f: any) => f.type === 'file');
           const fileFieldMap = new Map(fileFields.map((field: any) => [field.key, field]));
-            const missingFileFieldKeys = new Set<string>(
-              (((session.metadata || {}) as Record<string, any>).missingFields || [])
-                .filter((field: any) => field?.type === 'file')
-                .map((field: any) => field.key),
-            );
+          const missingFileFields = (((session.metadata || {}) as Record<string, any>).missingFields || [])
+            .filter((field: any) => field?.type === 'file');
+          const missingFileFieldKeys = new Set<string>(missingFileFields.map((field: any) => field.key));
+          const preferredMissingAttachmentField = missingFileFields.find((field: any) =>
+            this.looksLikeAttachmentFieldLabel(field?.label),
+          )?.key || null;
 
           let autoAssignedCount = 0;
           for (const attachment of normalizedAttachments) {
-            if (attachment.bindScope === 'general') {
-              const currentGeneralAttachments = Array.isArray(currentFormData.attachments)
-                ? currentFormData.attachments
-                : [];
-              currentFormData.attachments = [...currentGeneralAttachments, { ...attachment, bindScope: 'general' }];
-              autoAssignedCount += 1;
-              continue;
-            }
-
             const explicitFieldKey = attachment.fieldKey && fileFieldMap.has(attachment.fieldKey)
               ? attachment.fieldKey
               : null;
@@ -343,9 +371,20 @@ export class AssistantService {
             if (!targetFieldKey) {
               if (fileFields.length === 1) {
                 targetFieldKey = fileFields[0].key;
+              } else if (preferredMissingAttachmentField) {
+                targetFieldKey = preferredMissingAttachmentField;
               } else if (missingFileFieldKeys.size === 1) {
                 targetFieldKey = [...missingFileFieldKeys][0];
               }
+            }
+
+            if (!targetFieldKey && attachment.bindScope === 'general') {
+              const currentGeneralAttachments = Array.isArray(currentFormData.attachments)
+                ? currentFormData.attachments
+                : [];
+              currentFormData.attachments = [...currentGeneralAttachments, { ...attachment, bindScope: 'general' }];
+              autoAssignedCount += 1;
+              continue;
             }
 
             if (!targetFieldKey) {
@@ -462,7 +501,10 @@ export class AssistantService {
           switchCheck.confidence >= 0.7
         ) {
           // 用户可能想发起新流程，检查是否匹配到不同的流程
-          const allFlows = await this.processLibraryService.list(input.tenantId);
+          const allFlows = await this.processLibraryService.list(input.tenantId, undefined, undefined, {
+            identityType: input.identityType,
+            roles: input.roles,
+          });
           const sessionMeta = (session.metadata || {}) as Record<string, any>;
           const scopedFlows = sessionMeta.routedConnectorId
             ? allFlows.filter(f => f.connector?.id === sessionMeta.routedConnectorId)
@@ -798,17 +840,43 @@ export class AssistantService {
   private async buildSessionState(session: any, tenantId: string): Promise<SessionState> {
     const metadata = ((session.metadata || {}) as Record<string, any>) || {};
     const processCode = metadata.currentProcessCode as string | undefined;
-    const processStatus = metadata.processStatus as ProcessStatus | undefined;
+    const metadataProcessStatus = metadata.processStatus as ProcessStatus | undefined;
+    const currentSubmissionId = metadata.currentSubmissionId as string | undefined;
 
-    if (!processCode || !processStatus) {
+    if (!processCode) {
       return { hasActiveProcess: false, activeProcessCard: null };
     }
 
-    const template = await this.findTemplateForProcess(
-      tenantId,
-      metadata.currentTemplateId,
-      processCode,
-    );
+    const [template, currentSubmission] = await Promise.all([
+      this.findTemplateForProcess(
+        tenantId,
+        metadata.currentTemplateId,
+        processCode,
+      ),
+      currentSubmissionId
+        ? this.prisma.submission.findUnique({
+            where: { id: currentSubmissionId },
+            select: {
+              status: true,
+              submitResult: true,
+              oaSubmissionId: true,
+            },
+          })
+        : Promise.resolve(null),
+    ]);
+    const effectiveSubmissionStatus = currentSubmission
+      ? normalizeSubmissionStatus(currentSubmission.status, {
+          submitResult: currentSubmission.submitResult,
+        })
+      : '';
+    const processStatus = effectiveSubmissionStatus
+      ? mapSubmissionStatusToChatProcessStatus(effectiveSubmissionStatus)
+      : metadataProcessStatus;
+
+    if (!processStatus) {
+      return { hasActiveProcess: false, activeProcessCard: null };
+    }
+
     const reworkHint = (metadata.reworkHint as ReworkHint | undefined) || undefined;
     const reworkReason = (metadata.reworkReason as string | undefined) || undefined;
     const activeProcessCard = this.buildProcessCard({
@@ -823,8 +891,8 @@ export class AssistantService {
       fieldOrigins: (metadata.currentFieldOrigins as Record<string, ProcessFieldOrigin> | undefined) || {},
       missingFields: Array.isArray(metadata.missingFields) ? metadata.missingFields : [],
       draftId: metadata.pendingDraftId as string | undefined,
-      submissionId: metadata.currentSubmissionId as string | undefined,
-      oaSubmissionId: (metadata.currentOaSubmissionId as string | undefined) || null,
+      submissionId: currentSubmissionId,
+      oaSubmissionId: currentSubmission?.oaSubmissionId || (metadata.currentOaSubmissionId as string | undefined) || null,
       updatedAt: metadata.processUpdatedAt as string | undefined,
       actionState: [ProcessStatus.PENDING_CONFIRMATION, ProcessStatus.AUTH_REQUIRED].includes(processStatus)
         ? 'available'
@@ -887,7 +955,7 @@ export class AssistantService {
     summary?: string;
     formData?: Record<string, any>;
     fieldOrigins?: Record<string, ProcessFieldOrigin>;
-    missingFields?: Array<{ key: string; label: string; question: string; type?: string }>;
+  missingFields?: Array<{ key: string; label: string; question: string; type?: string }>;
     actionButtons?: ActionButton[];
     needsAttachment?: boolean;
     draftId?: string;
@@ -943,6 +1011,8 @@ export class AssistantService {
         return 'confirming';
       case ProcessStatus.EXECUTING:
         return 'executing';
+      case ProcessStatus.DRAFT_SAVED:
+        return 'draft';
       case ProcessStatus.SUBMITTED:
         return 'submitted';
       case ProcessStatus.REWORK_REQUIRED:
@@ -971,6 +1041,8 @@ export class AssistantService {
         return '待确认提交';
       case ProcessStatus.EXECUTING:
         return '提交执行中';
+      case ProcessStatus.DRAFT_SAVED:
+        return '已保存待发';
       case ProcessStatus.SUBMITTED:
         return '审批中';
       case ProcessStatus.REWORK_REQUIRED:
@@ -1027,6 +1099,10 @@ export class AssistantService {
     const template = await this.findTemplateForResolvedFlow(
       input.tenantId,
       processContext.processCode,
+      {
+        identityType: input.identityType,
+        roles: input.roles,
+      },
       ((session.metadata || {}) as Record<string, any>).currentConnectorId || null,
     );
     const currentFieldOrigins: Record<string, ProcessFieldOrigin> = {
@@ -1254,7 +1330,10 @@ export class AssistantService {
     intentResult: any,
   ): Promise<SubmissionResolution> {
     const sessionMeta = (session.metadata || {}) as Record<string, any>;
-    const allFlows = await this.processLibraryService.list(input.tenantId);
+    const allFlows = await this.processLibraryService.list(input.tenantId, undefined, undefined, {
+      identityType: input.identityType,
+      roles: input.roles,
+    });
 
     const preferredProcessCode = typeof intentResult?.extractedEntities?.flowCode === 'string'
       ? intentResult.extractedEntities.flowCode.trim()
@@ -1427,6 +1506,7 @@ export class AssistantService {
   private async findTemplateForResolvedFlow(
     tenantId: string,
     processCode: string,
+    access?: { identityType?: string; roles?: string[] },
     connectorId?: string | null,
   ) {
     if (connectorId) {
@@ -1436,6 +1516,19 @@ export class AssistantService {
           processCode,
           connectorId,
           status: 'published',
+          connector: {
+            is: {
+              ...(access?.roles?.some((role) => role === 'admin' || role === 'flow_manager')
+                ? {}
+                : {
+                    identityScope: {
+                      in: access?.identityType === 'teacher' || access?.identityType === 'student'
+                        ? ['both', access.identityType]
+                        : ['both'],
+                    },
+                  }),
+            },
+          },
         },
         include: {
           connector: true,
@@ -1450,7 +1543,7 @@ export class AssistantService {
       }
     }
 
-    return this.processLibraryService.getByCode(tenantId, processCode);
+    return this.processLibraryService.getByCode(tenantId, processCode, undefined, access);
   }
 
   private extractProcessContext(session: any): ProcessContext | null {
@@ -1484,6 +1577,10 @@ export class AssistantService {
       const template = await this.findTemplateForResolvedFlow(
         input.tenantId,
         processContext.processCode,
+        {
+          identityType: input.identityType,
+          roles: input.roles,
+        },
         ((session.metadata || {}) as Record<string, any>).currentConnectorId || null,
       );
       if (!template) {
@@ -1747,6 +1844,10 @@ export class AssistantService {
           const template = await this.findTemplateForResolvedFlow(
             input.tenantId,
             processContext.processCode,
+            {
+              identityType: input.identityType,
+              roles: input.roles,
+            },
             ((session.metadata || {}) as Record<string, any>).currentConnectorId || null,
           );
           if (!template) {
@@ -1922,6 +2023,10 @@ ${currentFields}
     const template = await this.findTemplateForResolvedFlow(
       input.tenantId,
       processContext.processCode,
+      {
+        identityType: input.identityType,
+        roles: input.roles,
+      },
       ((session.metadata || {}) as Record<string, any>).currentConnectorId || null,
     );
 
@@ -2191,19 +2296,19 @@ ${currentFields}
         fallbackPolicy,
       });
 
-      const submission = await this.prisma.submission.findUnique({
-        where: { id: submitOutcome.submissionId },
-      });
+      const submission = await this.waitForSubmissionSettlement(
+        submitOutcome.submissionId,
+        this.resolveSubmissionSettlementWaitOptions(selectedPath),
+      );
 
       if (!submission) {
         throw new Error('提交记录创建失败');
       }
 
-      const nextProcessStatus = submission.status === 'pending'
-        ? ProcessStatus.EXECUTING
-        : submission.status === 'failed'
-          ? ProcessStatus.FAILED
-          : ProcessStatus.SUBMITTED;
+      const effectiveSubmissionStatus = normalizeSubmissionStatus(submission.status, {
+        submitResult: submission.submitResult,
+      }) || submission.status;
+      const nextProcessStatus = mapSubmissionStatusToChatProcessStatus(effectiveSubmissionStatus);
       const processUpdatedAt = new Date().toISOString();
       const fallbackPolicyToPersist = fallbackPolicy.length
         ? fallbackPolicy
@@ -2234,7 +2339,7 @@ ${currentFields}
         currentFormData: draft.formData as Record<string, any>,
         currentSubmissionId: submission.id,
         currentOaSubmissionId: submission.oaSubmissionId || null,
-        lastSubmissionStatus: submission.status,
+        lastSubmissionStatus: effectiveSubmissionStatus,
         processStatus: nextProcessStatus,
         processUpdatedAt,
         missingFields: [],
@@ -2264,17 +2369,17 @@ ${currentFields}
           processCode: draft.template.processCode,
           selectedPath,
           fallbackPolicy: fallbackPolicyToPersist,
-          submitStatus: submitOutcome.status,
+          submitStatus: effectiveSubmissionStatus,
+          initialSubmitStatus: submitOutcome.status,
         },
       });
 
       const pathLabel = this.formatDeliveryPathLabel(selectedPath);
       const submissionRef = submission.oaSubmissionId || submission.id;
-      const templateUiHints = (draft.template.uiHints as Record<string, any> | null) || {};
-      const completionKind = (((templateUiHints.rpaDefinition as Record<string, any> | undefined)?.runtime as Record<string, any> | undefined)?.networkSubmit as Record<string, any> | undefined)?.completionKind
-        || 'submitted';
-      const message = completionKind === 'draft'
-        ? `申请内容已通过${pathLabel}通道写入 OA 草稿。\n\n申请编号：${submissionRef}\n流程：${displayProcessName}\n\n当前验证的是 URL 直达草稿交付链路。`
+      const message = nextProcessStatus === ProcessStatus.DRAFT_SAVED
+        ? `申请内容已通过${pathLabel}通道写入 OA 待发箱，尚未正式送审。\n\n申请编号：${submissionRef}\n流程：${displayProcessName}\n\n如需进入审批流，请在流程模板中配置真正的“提交”动作或补充状态查询能力。`
+        : nextProcessStatus === ProcessStatus.FAILED
+          ? `申请处理失败。\n\n申请编号：${submissionRef}\n流程：${displayProcessName}\n\n请稍后重试，或联系管理员检查该流程的交付配置。`
         : nextProcessStatus === ProcessStatus.EXECUTING
           ? `申请已受理，正在通过${pathLabel}通道提交。\n\n申请编号：${submissionRef}\n流程：${displayProcessName}\n\n可稍后查询进度。`
           : `申请已提交成功，已通过${pathLabel}通道完成交付。\n\n申请编号：${submissionRef}\n流程：${displayProcessName}\n\n您可以随时查询申请进度。`;
@@ -2374,6 +2479,77 @@ ${currentFields}
           canContinue: false,
         }),
       };
+    }
+  }
+
+  private async waitForSubmissionSettlement(
+    submissionId: string,
+    options?: {
+      timeoutMs?: number;
+      pollIntervalMs?: number;
+    },
+  ): Promise<{
+    id: string;
+    status: string;
+    submitResult?: unknown;
+    oaSubmissionId?: string | null;
+  } | null> {
+    const timeoutMs = Math.max(0, options?.timeoutMs ?? 4000);
+    const pollIntervalMs = Math.max(50, options?.pollIntervalMs ?? 200);
+    const startedAt = Date.now();
+
+    while (true) {
+      const submission = await this.prisma.submission.findUnique({
+        where: { id: submissionId },
+        select: {
+          id: true,
+          status: true,
+          submitResult: true,
+          oaSubmissionId: true,
+        },
+      });
+
+      if (!submission) {
+        return null;
+      }
+
+      const effectiveStatus = normalizeSubmissionStatus(submission.status, {
+        submitResult: submission.submitResult,
+      });
+
+      if (effectiveStatus && effectiveStatus !== 'pending') {
+        return submission;
+      }
+
+      if (Date.now() - startedAt >= timeoutMs) {
+        return submission;
+      }
+
+      await this.sleep(pollIntervalMs);
+    }
+  }
+
+  private sleep(ms: number) {
+    return new Promise((resolve) => setTimeout(resolve, ms));
+  }
+
+  private resolveSubmissionSettlementWaitOptions(path?: DeliveryPath | null) {
+    switch (path) {
+      case 'url':
+        return {
+          timeoutMs: 30000,
+          pollIntervalMs: 250,
+        };
+      case 'api':
+        return {
+          timeoutMs: 8000,
+          pollIntervalMs: 200,
+        };
+      default:
+        return {
+          timeoutMs: 4000,
+          pollIntervalMs: 200,
+        };
     }
   }
 
@@ -2502,6 +2678,10 @@ ${currentFields}
       const template = await this.findTemplateForResolvedFlow(
         input.tenantId,
         resolution.matchedFlow.processCode,
+        {
+          identityType: input.identityType,
+          roles: input.roles,
+        },
         resolution.connectorId,
       );
       if (!template) {
@@ -2639,7 +2819,9 @@ ${currentFields}
       const submissions = (await this.submissionService.listSubmissions(
         input.tenantId,
         input.userId,
-      )).slice(0, 5);
+      ))
+        .filter((submission) => submission.sourceType === 'submission')
+        .slice(0, 5);
 
       if (submissions.length === 0) {
         return {
@@ -3232,7 +3414,10 @@ ${currentFields}
     traceId: string,
   ): Promise<ChatResponse> {
     try {
-      const flows = await this.processLibraryService.list(input.tenantId);
+      const flows = await this.processLibraryService.list(input.tenantId, undefined, undefined, {
+        identityType: input.identityType,
+        roles: input.roles,
+      });
 
       if (flows.length === 0) {
         return {
@@ -3333,6 +3518,12 @@ ${currentFields}
           this.logger.warn(`Session ${input.sessionId} does not belong to tenant=${input.tenantId} user=${input.userId}`);
           throw new Error('无权访问该会话');
         }
+        if (existing.status === 'archived') {
+          await this.restoreSession(existing, null);
+          return this.prisma.chatSession.findUnique({
+            where: { id: input.sessionId },
+          });
+        }
         return existing;
       }
     }
@@ -3354,7 +3545,11 @@ ${currentFields}
 
   async listSessions(tenantId: string, userId: string) {
     const sessions = await this.prisma.chatSession.findMany({
-      where: { tenantId, userId },
+      where: {
+        tenantId,
+        userId,
+        status: 'active',
+      },
       orderBy: { updatedAt: 'desc' },
       take: 20,
       include: {
@@ -3394,6 +3589,12 @@ ${currentFields}
       const lastMeta = ((lastMsg?.metadata || {}) as Record<string, any>) || {};
       const lastProcessCard = (lastMeta.processCard as Record<string, any> | undefined) || undefined;
       const sessionState = sessionStates[i];
+      const processStatus = sessionState.processStatus || lastMeta.processStatus || lastProcessCard?.processStatus || null;
+      const reworkHint = sessionState.reworkHint || lastProcessCard?.reworkHint || null;
+      const processStatusText = sessionState.activeProcessCard?.statusText
+        || (processStatus
+          ? this.getProcessCardStatusText(processStatus as ProcessStatus, reworkHint || undefined)
+          : null);
       return {
         id: s.id,
         title: firstUserMsg.length > 30 ? firstUserMsg.substring(0, 30) + '...' : firstUserMsg || '新对话',
@@ -3402,13 +3603,24 @@ ${currentFields}
           : (lastMsg?.content || '').substring(0, 50),
         messageCount: s._count.messages,
         status: s.status,
+        archivedAt: (s as any).archivedAt || null,
+        archivedSource: (s as any).archivedSource || null,
+        restorableUntil: (s as any).restorableUntil || null,
         timestamp: s.updatedAt,
         createdAt: s.createdAt,
         hasActiveProcess: sessionState.hasActiveProcess,
         processName: sessionState.processName || lastProcessCard?.processName || null,
-        processStatus: sessionState.processStatus || lastMeta.processStatus || null,
+        processStatus,
+        processStatusText,
         processStage: sessionState.stage || lastProcessCard?.stage || null,
-        reworkHint: sessionState.reworkHint || lastProcessCard?.reworkHint || null,
+        reworkHint,
+        hasBusinessRecord: Boolean(
+          sessionState.processCode
+          || lastProcessCard?.processCode
+          || ((s.metadata || {}) as Record<string, any>).pendingDraftId
+          || ((s.metadata || {}) as Record<string, any>).currentSubmissionId,
+        ),
+        canRestoreConversation: this.canRestoreConversationSession(s, processStatus),
       };
     });
   }
@@ -3442,31 +3654,186 @@ ${currentFields}
     };
   }
 
-  async deleteSession(sessionId: string, tenantId: string, userId: string): Promise<void> {
+  async deleteSession(
+    sessionId: string,
+    tenantId: string,
+    userId: string,
+    mode: 'archive' | 'purge' = 'archive',
+  ): Promise<{ mode: 'archive' | 'purge'; restorable: boolean; archivedAt?: string | null }> {
     const session = await this.prisma.chatSession.findFirst({
       where: { id: sessionId, tenantId, userId },
     });
     if (!session) {
-      return;
+      return { mode, restorable: false, archivedAt: null };
     }
 
     const metadata = ((session.metadata || {}) as Record<string, any>) || {};
-    const processStatus = metadata.processStatus as ProcessStatus | undefined;
-    if (processStatus && !isTerminalChatProcessStatus(processStatus)) {
-      throw new BadRequestException('当前流程未结束，请继续办理或等待审批完成后再删除会话');
+    const hasBusinessRecord = await this.hasRestorableBusinessRecord(session, metadata);
+    if (mode === 'archive' && hasBusinessRecord) {
+      const now = new Date();
+      const processStatus = metadata.processStatus as ProcessStatus | undefined;
+      const retentionWindow = shouldApplyChatRetention(processStatus)
+        ? buildChatRetentionWindow(now)
+        : null;
+      await this.prisma.chatSession.update({
+        where: { id: sessionId },
+        data: {
+          status: 'archived',
+          archivedAt: now,
+          archivedSource: 'chat',
+          archiveReason: 'user_removed_from_history',
+          restorableUntil: retentionWindow?.restoreExpiresAt || null,
+          retainedUntil: retentionWindow?.retainedUntil || null,
+        } as any,
+      });
+      this.logger.log(`Session archived: ${sessionId}`);
+      return {
+        mode: 'archive',
+        restorable: true,
+        archivedAt: now.toISOString(),
+      };
     }
 
-    // Delete all messages first
+    if (mode === 'purge' && hasBusinessRecord) {
+      throw new BadRequestException('该对话已关联业务记录，请使用“从历史中移除”，并通过“我的申请”恢复');
+    }
+
     await this.prisma.chatMessage.deleteMany({
       where: { sessionId },
     });
 
-    // Delete the session
     await this.prisma.chatSession.delete({
       where: { id: sessionId },
     });
 
-    this.logger.log(` Session deleted: ${sessionId}`);
+    this.logger.log(`Session permanently deleted: ${sessionId}`);
+    return { mode: 'purge', restorable: false, archivedAt: null };
+  }
+
+  async restoreSessionFromBusinessRecord(input: {
+    sessionId?: string | null;
+    submissionId?: string | null;
+    draftId?: string | null;
+    tenantId: string;
+    userId: string;
+  }) {
+    const candidateSessionId = (input.sessionId || '').trim();
+    if (candidateSessionId) {
+      const session = await this.prisma.chatSession.findFirst({
+        where: {
+          id: candidateSessionId,
+          tenantId: input.tenantId,
+          userId: input.userId,
+          status: { in: ['active', 'archived'] },
+        },
+      });
+      if (session) {
+        await this.restoreSession(session, input.submissionId || null);
+        return this.getMessages(session.id, input.tenantId, input.userId);
+      }
+    }
+
+    const candidateDraftId = (input.draftId || '').trim();
+    if (candidateDraftId) {
+      const draft = await this.prisma.processDraft.findFirst({
+        where: {
+          id: candidateDraftId,
+          tenantId: input.tenantId,
+          userId: input.userId,
+        },
+        include: {
+          template: true,
+        },
+      });
+      if (!draft) {
+        throw new BadRequestException('草稿记录不存在');
+      }
+
+      if (draft.sessionId) {
+        const session = await this.prisma.chatSession.findFirst({
+          where: {
+            id: draft.sessionId,
+            tenantId: input.tenantId,
+            userId: input.userId,
+            status: { in: ['active', 'archived'] },
+          },
+        });
+        if (session) {
+          await this.restoreSession(session, input.submissionId || null);
+          return this.getMessages(session.id, input.tenantId, input.userId);
+        }
+      }
+
+      return this.restoreDraftConversation({
+        draft,
+        tenantId: input.tenantId,
+        userId: input.userId,
+      });
+    }
+
+    if (!input.submissionId) {
+      throw new BadRequestException('缺少可恢复的业务记录');
+    }
+
+    const submission = await this.prisma.submission.findFirst({
+      where: {
+        id: input.submissionId,
+        tenantId: input.tenantId,
+        userId: input.userId,
+      },
+      include: {
+        template: true,
+      },
+    });
+    if (!submission) {
+      throw new BadRequestException('申请记录不存在');
+    }
+
+    const now = new Date();
+    const retentionWindow = buildChatRetentionWindow(now);
+    const restoredSession = await this.prisma.chatSession.create({
+      data: {
+        tenantId: input.tenantId,
+        userId: input.userId,
+        status: 'active',
+        recoverySubmissionId: submission.id,
+        restorableUntil: retentionWindow.restoreExpiresAt,
+        retainedUntil: retentionWindow.retainedUntil,
+        metadata: {
+          processId: submission.id,
+          processType: 'submission',
+          currentTemplateId: submission.templateId,
+          currentProcessCode: submission.template?.processCode || null,
+          currentProcessName: submission.template?.processName || null,
+          currentProcessCategory: submission.template?.processCategory || null,
+          currentFormData: (submission.formData as Record<string, any>) || {},
+          currentSubmissionId: submission.id,
+          currentOaSubmissionId: submission.oaSubmissionId || null,
+          processStatus: mapSubmissionStatusToChatProcessStatus(
+            normalizeSubmissionStatus(submission.status, { submitResult: submission.submitResult }),
+          ),
+          processUpdatedAt: now.toISOString(),
+        } as any,
+      } as any,
+    });
+
+    await this.prisma.chatMessage.create({
+      data: {
+        sessionId: restoredSession.id,
+        role: 'assistant',
+        content: `已为您恢复“${submission.template?.processName || '当前申请'}”的办理对话。`,
+        metadata: {
+          messageKind: 'text',
+          processStatus: mapSubmissionStatusToChatProcessStatus(
+            normalizeSubmissionStatus(submission.status, { submitResult: submission.submitResult }),
+          ),
+          submissionId: submission.id,
+          oaSubmissionId: submission.oaSubmissionId,
+        },
+      },
+    });
+
+    return this.getMessages(restoredSession.id, input.tenantId, input.userId);
   }
 
   async resetSession(sessionId: string, tenantId: string, userId: string): Promise<void> {
@@ -3917,7 +4284,9 @@ ${currentFields}
           content: message.content,
           createdAt: message.createdAt,
           messageKind: processCard ? 'process_card' : (messageMeta.messageKind || 'text'),
-          attachments: message.role === 'user' ? messageMeta.attachments : undefined,
+          attachments: message.role === 'user'
+            ? this.normalizeResponseAttachments(messageMeta.attachments)
+            : undefined,
           actionButtons: actionAvailable ? messageMeta.actionButtons : undefined,
           formData: messageMeta.formData,
           processStatus: processCard?.processStatus || messageMeta.processStatus,
@@ -3943,9 +4312,10 @@ ${currentFields}
           processCode,
         });
         const label = presentation.label;
+        const normalizedAttachmentValue = this.normalizeAttachmentFieldValue(value);
         // 文件类型字段显示文件名列表
-        if (Array.isArray(value) && value.length > 0 && value[0]?.fileName) {
-          const fileNames = value.map((f: any) => f.fileName).join('、');
+        if (Array.isArray(normalizedAttachmentValue) && normalizedAttachmentValue.length > 0 && normalizedAttachmentValue[0]?.fileName) {
+          const fileNames = normalizedAttachmentValue.map((f: any) => f.fileName).join('、');
           return `  ${label}: ${fileNames}`;
         }
         if (normalizedOptions.length > 0) {
@@ -3992,7 +4362,7 @@ ${currentFields}
     });
 
     return orderedKeys.map((key) => {
-      const value = formData[key];
+      const value = this.normalizeAttachmentFieldValue(formData[key]);
       const field = fields.find((item: any) => item.key === key);
       const normalizedOptions = this.normalizeFieldOptions(field?.options);
       const presentation = resolveAssistantFieldPresentation({
@@ -4031,12 +4401,179 @@ ${currentFields}
         displayValue,
         type: presentation.type,
         required: Boolean(field?.required),
+        description: typeof field?.description === 'string' ? field.description : undefined,
+        example: typeof field?.example === 'string' ? field.example : undefined,
+        multiple: field?.multiple === true,
         origin: fieldOrigins[key],
         tagLabel: originMeta?.tagLabel,
         tagTone: originMeta?.tagTone,
         hint: originMeta?.hint,
       };
     });
+  }
+
+  private normalizeAttachmentFieldValue(value: any) {
+    if (!Array.isArray(value) || value.length === 0 || !value[0]?.fileName) {
+      return value;
+    }
+
+    return value.map((item: any) => normalizeAttachmentRef(item) || item);
+  }
+
+  private normalizeResponseAttachments(attachments: any) {
+    if (!Array.isArray(attachments)) {
+      return attachments;
+    }
+
+    return attachments.map((item) => normalizeAttachmentRef(item) || item);
+  }
+
+  private async hasRestorableBusinessRecord(session: any, metadata: Record<string, any>) {
+    const pendingDraftId = typeof metadata.pendingDraftId === 'string' ? metadata.pendingDraftId.trim() : '';
+    if (pendingDraftId) {
+      return true;
+    }
+
+    const currentSubmissionId = typeof metadata.currentSubmissionId === 'string'
+      ? metadata.currentSubmissionId.trim()
+      : '';
+    if (currentSubmissionId) {
+      return true;
+    }
+
+    const linkedDraft = await this.prisma.processDraft.findFirst({
+      where: {
+        tenantId: session.tenantId,
+        userId: session.userId,
+        sessionId: session.id,
+      },
+      select: { id: true },
+    });
+    if (linkedDraft) {
+      return true;
+    }
+
+    return false;
+  }
+
+  private canRestoreConversationSession(session: any, processStatus?: string | null) {
+    return session.status === 'archived' && isConversationRestorable({
+      status: processStatus,
+      restoreStatus: getRestoreStatusForProcess(processStatus),
+      restoreExpiresAt: (session as any).restorableUntil || null,
+      retainedUntil: (session as any).retainedUntil || null,
+    });
+  }
+
+  private async restoreSession(session: any, submissionId?: string | null) {
+    if (session.status !== 'archived') {
+      return session;
+    }
+
+    await this.prisma.chatSession.update({
+      where: { id: session.id },
+      data: {
+        status: 'active',
+        archivedAt: null,
+        archivedSource: null,
+        archiveReason: null,
+        recoverySubmissionId: submissionId || (session as any).recoverySubmissionId || null,
+      } as any,
+    });
+
+    return {
+      ...session,
+      status: 'active',
+      archivedAt: null,
+      archivedSource: null,
+      archiveReason: null,
+      recoverySubmissionId: submissionId || (session as any).recoverySubmissionId || null,
+    };
+  }
+
+  private async restoreDraftConversation(input: {
+    draft: any;
+    tenantId: string;
+    userId: string;
+  }) {
+    const now = new Date();
+    const formData = (input.draft.formData as Record<string, any>) || {};
+    const processStatus = input.draft.status === 'ready'
+      ? ProcessStatus.PENDING_CONFIRMATION
+      : ProcessStatus.PARAMETER_COLLECTION;
+    const draftSession = await this.prisma.chatSession.create({
+      data: {
+        tenantId: input.tenantId,
+        userId: input.userId,
+        status: 'active',
+        metadata: {
+          processId: input.draft.id,
+          processType: 'draft',
+          currentTemplateId: input.draft.templateId,
+          currentProcessCode: input.draft.template?.processCode || null,
+          currentProcessName: input.draft.template?.processName || null,
+          currentProcessCategory: input.draft.template?.processCategory || null,
+          currentFormData: formData,
+          pendingDraftId: input.draft.id,
+          processStatus,
+          processUpdatedAt: now.toISOString(),
+          processCreatedAt: input.draft.createdAt?.toISOString?.() || now.toISOString(),
+        } as any,
+      } as any,
+    });
+
+    await this.prisma.processDraft.update({
+      where: { id: input.draft.id },
+      data: {
+        sessionId: draftSession.id,
+      },
+    });
+
+    const restoredCard = this.buildProcessCard({
+      processInstanceId: input.draft.id,
+      processCode: input.draft.template?.processCode || 'unknown_process',
+      processName: input.draft.template?.processName || '流程申请',
+      processCategory: input.draft.template?.processCategory || null,
+      processStatus,
+      template: input.draft.template,
+      formData,
+      draftId: input.draft.id,
+      actionButtons: input.draft.status === 'ready'
+        ? [
+            { label: '确认提交', action: 'confirm', type: 'primary' },
+            { label: '修改内容', action: 'modify', type: 'default' },
+            { label: '取消', action: 'cancel', type: 'danger' },
+          ]
+        : undefined,
+      actionState: input.draft.status === 'ready' ? 'available' : 'readonly',
+      canContinue: true,
+    });
+
+    await this.prisma.chatMessage.create({
+      data: {
+        sessionId: draftSession.id,
+        role: 'assistant',
+        content: input.draft.status === 'ready'
+          ? `已为您恢复“${input.draft.template?.processName || '当前流程'}”的待确认内容，可继续核对后提交。`
+          : `已为您恢复“${input.draft.template?.processName || '当前流程'}”的办理上下文，请继续补充信息。`,
+        metadata: {
+          messageKind: 'process_card',
+          processStatus,
+          draftId: input.draft.id,
+          formData,
+          processCard: restoredCard as any,
+          actionButtons: input.draft.status === 'ready'
+            ? [
+                { label: '确认提交', action: 'confirm', type: 'primary' },
+                { label: '修改内容', action: 'modify', type: 'default' },
+                { label: '取消', action: 'cancel', type: 'danger' },
+              ]
+            : undefined,
+        } as any,
+      },
+    });
+
+    return this.getMessages(draftSession.id, input.tenantId, input.userId);
   }
 
   private normalizeFieldOptions(options?: Array<{ label: string; value: string } | string>) {
@@ -4098,6 +4635,15 @@ ${currentFields}
     }
 
     return `已为您整理好“${processName}”，其中${notes.join('，')}，如需修改可直接告诉我。`;
+  }
+
+  private looksLikeAttachmentFieldLabel(value: unknown): boolean {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (!normalized) {
+      return false;
+    }
+
+    return /(附件|上传|材料|扫描件|图片|照片|证明|pdf|word|excel|压缩包|file|upload)/.test(normalized);
   }
 
   private resolveDisplayProcessName(

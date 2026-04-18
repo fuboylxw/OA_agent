@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import type { AgentResultPacket, DeliveryCapabilitySummary, TaskPacket } from '@uniflow/shared-types';
 import { PrismaService } from '../../common/prisma.service';
+import { normalizeSubmissionStatus } from '../../common/submission-status.util';
 
 export interface SessionOrchestrationContext {
   sessionId: string;
@@ -206,7 +207,9 @@ export class ContextManager {
         submissionId: submission.id,
         processCode: submission.template?.processCode || 'unknown',
         processName: submission.template?.processName || submission.template?.processCode || '未知流程',
-        status: submission.status,
+        status: normalizeSubmissionStatus(submission.status, {
+          submitResult: submission.submitResult,
+        }) || submission.status,
         submittedAt: (submission.submittedAt || submission.createdAt).toISOString(),
       })),
       preferences: {

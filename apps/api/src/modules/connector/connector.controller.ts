@@ -4,6 +4,11 @@ import type { Request } from 'express';
 import type { Response } from 'express';
 import { ConnectorService } from './connector.service';
 import { CreateConnectorDto, UpdateConnectorDto } from './dto';
+import {
+  ADMIN_ONLY_ROLES,
+  FLOW_MANAGER_ROLES,
+  requireRoles,
+} from '../common/access-role.util';
 import { RequestAuthService } from '../common/request-auth.service';
 import { AuthBindingService } from '../auth-binding/auth-binding.service';
 import { Public } from '../common/public.decorator';
@@ -24,6 +29,7 @@ export class ConnectorController {
     @Body() dto: CreateConnectorDto,
   ) {
     const auth = this.requestAuth.resolveTenant(req);
+    requireRoles(auth.roles, ADMIN_ONLY_ROLES, '只有超级管理员可以创建连接器');
     return this.connectorService.create(dto, auth.tenantId);
   }
 
@@ -34,6 +40,7 @@ export class ConnectorController {
     @Query('tenantId') tenantId: string,
   ) {
     const auth = this.requestAuth.resolveTenant(req, tenantId);
+    requireRoles(auth.roles, FLOW_MANAGER_ROLES, '只有管理员或流程管理员可以查看连接器');
     return this.connectorService.list(auth.tenantId);
   }
 
@@ -44,6 +51,7 @@ export class ConnectorController {
     @Param('id') id: string,
   ) {
     const auth = this.requestAuth.resolveTenant(req);
+    requireRoles(auth.roles, FLOW_MANAGER_ROLES, '只有管理员或流程管理员可以查看连接器');
     return this.connectorService.get(id, auth.tenantId);
   }
 
@@ -55,6 +63,7 @@ export class ConnectorController {
     @Body() dto: UpdateConnectorDto,
   ) {
     const auth = this.requestAuth.resolveTenant(req);
+    requireRoles(auth.roles, ADMIN_ONLY_ROLES, '只有超级管理员可以修改连接器');
     return this.connectorService.update(id, auth.tenantId, dto);
   }
 
@@ -65,6 +74,7 @@ export class ConnectorController {
     @Param('id') id: string,
   ) {
     const auth = this.requestAuth.resolveTenant(req);
+    requireRoles(auth.roles, ADMIN_ONLY_ROLES, '只有超级管理员可以删除连接器');
     return this.connectorService.delete(id, auth.tenantId);
   }
 
@@ -75,6 +85,7 @@ export class ConnectorController {
     @Param('id') id: string,
   ) {
     const auth = this.requestAuth.resolveTenant(req);
+    requireRoles(auth.roles, ADMIN_ONLY_ROLES, '只有超级管理员可以执行连接器健康检查');
     return this.connectorService.healthCheck(id, auth.tenantId);
   }
 

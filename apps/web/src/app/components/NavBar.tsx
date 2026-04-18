@@ -13,9 +13,9 @@ const NAV_ITEMS = [
   { href: '/', label: '首页' },
   { href: '/chat', label: '对话工作台' },
   { href: '/submissions', label: '我的申请' },
-  { href: '/processes', label: '流程库' },
+  { href: '/process-library', label: '流程库', roles: ['admin', 'flow_manager'] },
   { href: '/bootstrap', label: '初始化中心', roles: ['admin'] },
-  { href: '/connectors', label: '连接器管理', roles: ['admin', 'flow_manager'] },
+  { href: '/connectors', label: '连接器管理', roles: ['admin'] },
 ];
 
 export default function NavBar() {
@@ -26,7 +26,7 @@ export default function NavBar() {
     getClientAuthServerSnapshot,
   );
 
-  if (pathname.startsWith('/login')) {
+  if (pathname.startsWith('/login') || pathname.startsWith('/logout')) {
     return null;
   }
 

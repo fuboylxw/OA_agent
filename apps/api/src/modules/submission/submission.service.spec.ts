@@ -12,6 +12,9 @@ describe('SubmissionService', () => {
         findMany: jest.fn(),
         update: jest.fn(),
       },
+      processDraft: {
+        findMany: jest.fn(),
+      },
       processTemplate: {
         findMany: jest.fn(),
       },
@@ -116,6 +119,7 @@ describe('SubmissionService', () => {
     adapterRuntimeService.createAdapterForConnector.mockResolvedValue({
       queryStatus,
     });
+    prisma.processDraft.findMany.mockResolvedValue([]);
 
     const result = await service.listSubmissions('tenant-1', 'user-1');
     await flushBackgroundRefresh();
@@ -124,6 +128,7 @@ describe('SubmissionService', () => {
     expect(result).toEqual([
       expect.objectContaining({
         id: 'submission-1',
+        sourceType: 'submission',
         status: 'submitted',
         statusText: expect.any(String),
       }),
@@ -141,5 +146,127 @@ describe('SubmissionService', () => {
     expect((service as any).normalizeOaSubmissionId('RPA-LEAVE_REQUEST-123')).toBeUndefined();
     expect((service as any).normalizeOaSubmissionId('OA-REAL-123')).toBe('OA-REAL-123');
     expect((service as any).normalizeOaSubmissionId(10086)).toBe('10086');
+  });
+
+  it('normalizes historical pending draft-save submissions when listing records', async () => {
+    const { service, prisma, adapterRuntimeService } = createService();
+
+    prisma.submission.findMany.mockResolvedValue([
+      {
+        id: 'submission-draft-1',
+        tenantId: 'tenant-1',
+        userId: 'user-1',
+        templateId: 'template-1',
+        oaSubmissionId: null,
+        status: 'pending',
+        submitResult: {
+          metadata: {
+            request: {
+              completionKind: 'draft',
+            },
+          },
+        },
+        formData: { reason: 'seal' },
+        submittedAt: null,
+        createdAt: new Date('2026-04-17T16:42:43.957Z'),
+        user: {
+          id: 'user-1',
+          username: 'testuser',
+          displayName: 'Test User',
+        },
+      },
+    ]);
+    prisma.processTemplate.findMany.mockResolvedValue([
+      {
+        id: 'template-1',
+        connectorId: 'connector-1',
+        processCode: 'seal_apply',
+        processName: '用印申请',
+        processCategory: '行政',
+        schema: { fields: [] },
+      },
+    ]);
+    prisma.processDraft.findMany.mockResolvedValue([]);
+
+    const result = await service.listSubmissions('tenant-1', 'user-1');
+    await flushBackgroundRefresh();
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        id: 'submission-draft-1',
+        sourceType: 'submission',
+        status: 'draft_saved',
+        statusText: '已保存待发',
+      }),
+    ]);
+    expect(adapterRuntimeService.createAdapterForConnector).not.toHaveBeenCalled();
+  });
+
+  it('includes standalone drafts in the workbench list', async () => {
+    const { service, prisma, adapterRuntimeService } = createService();
+
+    prisma.submission.findMany.mockResolvedValue([]);
+    prisma.processTemplate.findMany.mockResolvedValue([]);
+    prisma.processDraft.findMany.mockResolvedValue([
+      {
+        id: 'draft-ready-1',
+        tenantId: 'tenant-1',
+        userId: 'user-1',
+        templateId: 'template-1',
+        sessionId: 'session-2',
+        formData: { reason: '待确认' },
+        status: 'ready',
+        createdAt: new Date('2026-04-18T11:00:00.000Z'),
+        updatedAt: new Date('2026-04-18T11:10:00.000Z'),
+        template: {
+          id: 'template-1',
+          processCode: 'seal_apply',
+          processName: '用印申请',
+          processCategory: '行政',
+          schema: { fields: [] },
+        },
+      },
+      {
+        id: 'draft-editing-1',
+        tenantId: 'tenant-1',
+        userId: 'user-1',
+        templateId: 'template-1',
+        sessionId: 'session-1',
+        formData: { reason: '补材料' },
+        status: 'editing',
+        createdAt: new Date('2026-04-18T10:00:00.000Z'),
+        updatedAt: new Date('2026-04-18T10:10:00.000Z'),
+        template: {
+          id: 'template-1',
+          processCode: 'seal_apply',
+          processName: '用印申请',
+          processCategory: '行政',
+          schema: { fields: [] },
+        },
+      },
+    ]);
+
+    const result = await service.listSubmissions('tenant-1', 'user-1');
+    await flushBackgroundRefresh();
+
+    expect(result).toEqual([
+      expect.objectContaining({
+        id: 'draft-ready-1',
+        sourceType: 'draft',
+        draftId: 'draft-ready-1',
+        status: 'draft_saved',
+        statusText: '待确认提交',
+        canRestoreConversation: true,
+      }),
+      expect.objectContaining({
+        id: 'draft-editing-1',
+        sourceType: 'draft',
+        draftId: 'draft-editing-1',
+        status: 'editing',
+        statusText: '待补充信息',
+        canRestoreConversation: true,
+      }),
+    ]);
+    expect(adapterRuntimeService.createAdapterForConnector).not.toHaveBeenCalled();
   });
 });

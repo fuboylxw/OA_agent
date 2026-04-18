@@ -152,6 +152,7 @@ export class BootstrapProcessor {
       const parsedProcesses = await this.runParsing(bootstrapJob, apiDoc);
 
       const totalEp = parsedProcesses.reduce((sum, process) => sum + process.endpoints.length, 0);
+      const pageFlowSummary = this.summarizePageFlowValidation(parsedProcesses);
       const report = await this.prisma.bootstrapReport.create({
         data: {
           bootstrapJobId: jobId,
@@ -162,7 +163,7 @@ export class BootstrapProcessor {
           evidence: [{
             type: this.isRpaOnlyBootstrap(bootstrapJob) ? 'rpa_analysis' : 'llm_analysis',
             description: this.isRpaOnlyBootstrap(bootstrapJob)
-              ? `RPA bootstrap identified ${parsedProcesses.length} business processes with ${totalEp} synthetic actions`
+              ? `${pageFlowSummary.label} identified ${parsedProcesses.length} business processes with ${totalEp} synthetic actions`
               : `LLM Agent identified ${parsedProcesses.length} business processes with ${totalEp} endpoints`,
             confidence: 0.5,
           }],
@@ -432,7 +433,7 @@ ${JSON.stringify(forms, null, 2)}
     if (!apiDoc) {
       const rpaDefinitions = this.getRpaDefinitions(bootstrapJob);
       if (rpaDefinitions.length > 0) {
-        this.logger.log(`No API doc found, building ${rpaDefinitions.length} RPA processes`);
+        this.logger.log(`No API doc found, building ${rpaDefinitions.length} page-flow processes`);
         return this.buildProcessesFromRpaDefinitions(rpaDefinitions);
       }
 
@@ -465,6 +466,8 @@ ${JSON.stringify(forms, null, 2)}
     reportId: string,
   ): Promise<ValidationSummary> {
     const validationResults = processes.map<ProcessValidationResult>((process) => {
+      const pageFlowKind = this.inferPageFlowKind(process);
+      const pageFlowLabel = this.describePageFlowLabel(pageFlowKind);
       const hasSubmit = process.endpoints.some((endpoint) => endpoint.category === 'submit');
       const hasStatusQuery = process.endpoints.some(
         (endpoint) => endpoint.category === 'query' || endpoint.category === 'status_query',
@@ -476,8 +479,8 @@ ${JSON.stringify(forms, null, 2)}
         failureType: hasSubmit ? undefined : 'missing_submit',
         repairable: false,
         reason: hasSubmit
-          ? `RPA flow validated with ${hasStatusQuery ? 'submit and status query' : 'submit-only'} capability`
-          : 'RPA flow does not define submit steps',
+          ? `${pageFlowLabel} validated with ${hasStatusQuery ? 'submit and status query' : 'submit-only'} capability`
+          : this.describeMissingSubmitReason(pageFlowKind),
         endpointChecks: process.endpoints.map((endpoint) => ({
           endpointName: endpoint.name,
           category: endpoint.category,
@@ -487,7 +490,9 @@ ${JSON.stringify(forms, null, 2)}
           checkedWith: 'core_validation',
           reachable: hasSubmit,
           usable: hasSubmit,
-          reason: hasSubmit ? 'Validated from uploaded RPA definition' : 'Missing submit action',
+          reason: hasSubmit
+            ? `Validated from uploaded ${pageFlowKind === 'direct_link' ? 'direct-link' : 'RPA'} definition`
+            : this.describeMissingSubmitEndpointReason(pageFlowKind),
         })),
       };
     });
@@ -503,10 +508,11 @@ ${JSON.stringify(forms, null, 2)}
       partialCount: validationResults.filter((item) => item.overall === 'partial').length,
       failedCount: validationResults.filter((item) => item.overall === 'failed').length,
     };
+    const pageFlowSummary = this.summarizePageFlowValidation(processes);
 
     await this.appendReportEvidence(reportId, [{
       type: 'rpa_validation',
-      description: `RPA validation: ${summary.passedCount} passed, ${summary.failedCount} failed`,
+      description: `${pageFlowSummary.label}: ${summary.passedCount} passed, ${summary.failedCount} failed`,
       confidence: summary.failedCount === 0 ? 0.75 : 0.4,
       passed: summary.passedCount,
       failed: summary.failedCount,
@@ -516,8 +522,8 @@ ${JSON.stringify(forms, null, 2)}
       confidence: summary.failedCount === 0 ? 0.75 : 0.4,
       risk: summary.failedCount === 0 ? 'medium' : 'high',
       recommendation: summary.failedCount === 0
-        ? 'Uploaded RPA definitions were accepted for publishing.'
-        : 'Some RPA definitions are missing submit actions and were not published.',
+        ? pageFlowSummary.successRecommendation
+        : pageFlowSummary.failureRecommendation,
     });
 
     return summary;
@@ -1917,12 +1923,77 @@ ${JSON.stringify(forms, null, 2)}
       case 'server_error':
         return 'Server error';
       case 'missing_submit':
-        return 'Missing submit context';
+        return 'Missing submit capability';
       case 'no_base_url':
         return 'No base URL';
       default:
         return 'Unknown failure';
     }
+  }
+
+  private inferPageFlowKind(process: BusinessProcess): 'direct_link' | 'text_guide' | 'page_flow' {
+    if (process.category === 'direct_link') {
+      return 'direct_link';
+    }
+    if (process.endpoints.some((endpoint) => String(endpoint.path || '').startsWith('url://'))) {
+      return 'direct_link';
+    }
+    if (process.category === 'rpa' || process.category === 'text_guide') {
+      return 'text_guide';
+    }
+    if (process.endpoints.some((endpoint) => String(endpoint.path || '').startsWith('rpa://'))) {
+      return 'text_guide';
+    }
+    return 'page_flow';
+  }
+
+  private describePageFlowLabel(kind: 'direct_link' | 'text_guide' | 'page_flow') {
+    if (kind === 'direct_link') return 'Direct-link flow';
+    if (kind === 'text_guide') return 'RPA flow';
+    return 'Page flow';
+  }
+
+  private describeMissingSubmitReason(kind: 'direct_link' | 'text_guide' | 'page_flow') {
+    if (kind === 'direct_link') {
+      return 'Direct-link flow does not define network submit steps';
+    }
+    if (kind === 'text_guide') {
+      return 'RPA flow does not define submit steps';
+    }
+    return 'Page flow does not define submit steps';
+  }
+
+  private describeMissingSubmitEndpointReason(kind: 'direct_link' | 'text_guide' | 'page_flow') {
+    if (kind === 'direct_link') {
+      return 'Missing direct-link submit definition';
+    }
+    if (kind === 'text_guide') {
+      return 'Missing submit action';
+    }
+    return 'Missing submit definition';
+  }
+
+  private summarizePageFlowValidation(processes: BusinessProcess[]) {
+    const kinds = new Set(processes.map((process) => this.inferPageFlowKind(process)));
+    if (kinds.size === 1 && kinds.has('direct_link')) {
+      return {
+        label: 'Direct-link validation',
+        successRecommendation: 'Uploaded direct-link definitions were accepted for publishing.',
+        failureRecommendation: 'Some direct-link definitions are missing network submit steps and were not published.',
+      };
+    }
+    if (kinds.size === 1 && kinds.has('text_guide')) {
+      return {
+        label: 'RPA validation',
+        successRecommendation: 'Uploaded RPA definitions were accepted for publishing.',
+        failureRecommendation: 'Some RPA definitions are missing submit actions and were not published.',
+      };
+    }
+    return {
+      label: 'Page-flow validation',
+      successRecommendation: 'Uploaded page-flow definitions were accepted for publishing.',
+      failureRecommendation: 'Some page-flow definitions are missing submit capability and were not published.',
+    };
   }
 
   /**
@@ -3054,6 +3125,7 @@ ${JSON.stringify(forms, null, 2)}
             where: { id: selectedConnector.id },
             data: {
               name: connectorName,
+              identityScope: bootstrapJob.identityScope || 'both',
               oaType: connectorOaType,
               baseUrl,
               authType,
@@ -3072,6 +3144,7 @@ ${JSON.stringify(forms, null, 2)}
             create: {
               tenantId: bootstrapJob.tenantId,
               name: connectorName,
+              identityScope: bootstrapJob.identityScope || 'both',
               oaType: connectorOaType,
               baseUrl,
               authType,
@@ -3080,6 +3153,7 @@ ${JSON.stringify(forms, null, 2)}
               status: 'active',
             },
             update: {
+              identityScope: bootstrapJob.identityScope || 'both',
               oaType: connectorOaType,
               baseUrl,
               authType,
@@ -3291,12 +3365,15 @@ ${JSON.stringify(forms, null, 2)}
           },
         });
 
+        const rpaDefinition = rpaDefinitionMap.get(proc.processCode);
+
         // 收集 body 参数作为表单 schema fields
         const schemaFields = proc.endpoints
           .flatMap((ep) => ep.parameters || [])
           .filter((p) => p.in === 'body')
           .reduce((acc, p) => {
             if (!acc.find((f: any) => f.key === p.name)) {
+              const sourceField = rpaDefinition?.fields?.find((field) => field.key === p.name) as Record<string, any> | undefined;
               const presentation = resolveAssistantFieldPresentation({
                 key: p.name,
                 label: p.description || p.name,
@@ -3308,10 +3385,19 @@ ${JSON.stringify(forms, null, 2)}
                 label: presentation.label,
                 type: presentation.type,
                 required: p.required || false,
+                ...(sourceField?.description ? { description: sourceField.description } : {}),
+                ...(sourceField?.example ? { example: sourceField.example } : {}),
+                ...(sourceField?.multiple !== undefined ? { multiple: Boolean(sourceField.multiple) } : {}),
               });
             }
             return acc;
           }, [] as any[]);
+
+        const isDirectLink = this.isDirectLinkDefinition(rpaDefinition);
+        const hasDirectLinkSubmit = isDirectLink && this.hasDirectLinkSubmitCapability(rpaDefinition);
+        const hasDirectLinkQuery = isDirectLink && this.hasDirectLinkStatusCapability(rpaDefinition);
+        const hasRpaSubmit = !isDirectLink && Boolean(rpaDefinition?.actions?.submit);
+        const hasRpaQuery = !isDirectLink && Boolean(rpaDefinition?.actions?.queryStatus);
 
         // 确定 FAL level
         const hasSubmit = proc.endpoints.some((e) => e.category === 'submit');
@@ -3338,15 +3424,29 @@ ${JSON.stringify(forms, null, 2)}
         const templateUiHints = {
           executionModes: {
             submit: proc.endpoints.some((endpoint) => endpoint.category === 'submit' && endpoint.method.toUpperCase() !== 'RPA')
-              ? ['api', ...(rpaDefinitionMap.has(proc.processCode) ? ['rpa'] : [])]
-              : (rpaDefinitionMap.has(proc.processCode) ? ['rpa'] : []),
+              ? [
+                  'api',
+                  ...(hasDirectLinkSubmit ? ['url'] : []),
+                  ...(hasRpaSubmit ? ['rpa'] : []),
+                ]
+              : [
+                  ...(hasDirectLinkSubmit ? ['url'] : []),
+                  ...(hasRpaSubmit ? ['rpa'] : []),
+                ],
             queryStatus: proc.endpoints.some((endpoint) =>
               ['query', 'status_query'].includes(endpoint.category) && endpoint.method.toUpperCase() !== 'RPA',
             )
-              ? ['api', ...(rpaDefinitionMap.has(proc.processCode) ? ['rpa'] : [])]
-              : (rpaDefinitionMap.has(proc.processCode) ? ['rpa'] : []),
+              ? [
+                  'api',
+                  ...(hasDirectLinkQuery ? ['url'] : []),
+                  ...(hasRpaQuery ? ['rpa'] : []),
+                ]
+              : [
+                  ...(hasDirectLinkQuery ? ['url'] : []),
+                  ...(hasRpaQuery ? ['rpa'] : []),
+                ],
           },
-          rpaDefinition: (rpaDefinitionMap.get(proc.processCode) || null) as any,
+          rpaDefinition: (rpaDefinition || null) as any,
           endpoints: proc.endpoints.map((e) => ({
             path: e.path,
             method: e.method,
@@ -3652,6 +3752,12 @@ ${JSON.stringify(forms, null, 2)}
         const runtime = {
           ...((definition.runtime as Record<string, any> | undefined) || {}),
         };
+        if (this.isDirectLinkDefinition(definition) && !this.hasNetworkRequest(runtime.networkSubmit)) {
+          const synthesizedSubmit = this.buildDefaultDirectLinkNetworkSubmit(runtime);
+          if (synthesizedSubmit) {
+            runtime.networkSubmit = synthesizedSubmit;
+          }
+        }
         const executorMode = String(rawPlatformConfig.executorMode || '').toLowerCase();
         if (!runtime.executorMode && ['browser', 'local', 'http', 'stub'].includes(executorMode)) {
           runtime.executorMode = executorMode;
@@ -3675,12 +3781,19 @@ ${JSON.stringify(forms, null, 2)}
     return definitions.map((definition) => {
       const endpoints: Endpoint[] = [];
       const fields = definition.fields || [];
+      const isDirectLink = this.isDirectLinkDefinition(definition);
+      const hasNetworkSubmit = isDirectLink && this.hasDirectLinkSubmitCapability(definition);
+      const hasNetworkStatus = isDirectLink && this.hasDirectLinkStatusCapability(definition);
+      const hasRpaSubmit = !isDirectLink && Boolean(definition.actions?.submit);
+      const hasRpaStatus = !isDirectLink && Boolean(definition.actions?.queryStatus);
 
-      if (definition.actions?.submit) {
+      if (hasRpaSubmit || hasNetworkSubmit) {
         endpoints.push({
           name: `${definition.processName} submit`,
           method: 'RPA',
-          path: `rpa://${definition.processCode}/submit`,
+          path: hasNetworkSubmit
+            ? `url://${definition.processCode}/submit`
+            : `rpa://${definition.processCode}/submit`,
           description: definition.description || `${definition.processName} submit flow`,
           category: 'submit',
           parameters: fields.map((field: NonNullable<RpaFlowDefinition['fields']>[number]) => ({
@@ -3698,17 +3811,19 @@ ${JSON.stringify(forms, null, 2)}
             message: 'message',
           },
           bodyTemplate: {
-            kind: 'rpa_submit',
+            kind: hasNetworkSubmit ? 'url_submit' : 'rpa_submit',
             processCode: definition.processCode,
           },
         });
       }
 
-      if (definition.actions?.queryStatus) {
+      if (hasRpaStatus || hasNetworkStatus) {
         endpoints.push({
           name: `${definition.processName} status query`,
           method: 'RPA',
-          path: `rpa://${definition.processCode}/status`,
+          path: hasNetworkStatus
+            ? `url://${definition.processCode}/status`
+            : `rpa://${definition.processCode}/status`,
           description: `${definition.processName} status query flow`,
           category: 'status_query',
           parameters: [{
@@ -3725,7 +3840,7 @@ ${JSON.stringify(forms, null, 2)}
             message: 'message',
           },
           bodyTemplate: {
-            kind: 'rpa_status_query',
+            kind: hasNetworkStatus ? 'url_status_query' : 'rpa_status_query',
             processCode: definition.processCode,
           },
         });
@@ -3734,11 +3849,111 @@ ${JSON.stringify(forms, null, 2)}
       return {
         processName: definition.processName,
         processCode: definition.processCode,
-        category: definition.category || 'rpa',
-        description: definition.description || `${definition.processName} RPA flow`,
+        category: definition.category || (isDirectLink ? 'direct_link' : 'rpa'),
+        description: definition.description || `${definition.processName} ${isDirectLink ? 'URL flow' : 'RPA flow'}`,
         endpoints,
       };
     });
+  }
+
+  private isDirectLinkDefinition(definition?: RpaFlowDefinition | null) {
+    if (!definition || typeof definition !== 'object') {
+      return false;
+    }
+
+    const metadata = (definition as Record<string, any>).metadata;
+    const accessMode = String(
+      (definition as Record<string, any>).accessMode
+      || (metadata && typeof metadata === 'object' ? metadata.accessMode : '')
+      || '',
+    ).trim().toLowerCase();
+    const sourceType = String(
+      (definition as Record<string, any>).sourceType
+      || (metadata && typeof metadata === 'object' ? metadata.sourceType : '')
+      || '',
+    ).trim().toLowerCase();
+
+    return accessMode === 'direct_link' || sourceType === 'direct_link';
+  }
+
+  private hasDirectLinkSubmitCapability(definition?: RpaFlowDefinition | null) {
+    if (!this.isDirectLinkDefinition(definition)) {
+      return false;
+    }
+
+    const runtime = ((definition?.runtime as Record<string, any> | undefined) || {});
+    return this.hasNetworkRequest(runtime.networkSubmit) || this.hasCaptureFormSubmitStep(runtime);
+  }
+
+  private hasDirectLinkStatusCapability(definition?: RpaFlowDefinition | null) {
+    if (!this.isDirectLinkDefinition(definition)) {
+      return false;
+    }
+
+    const runtime = ((definition?.runtime as Record<string, any> | undefined) || {});
+    return this.hasNetworkRequest(runtime.networkStatus);
+  }
+
+  private hasCaptureFormSubmitStep(runtime?: Record<string, any> | null) {
+    const steps = Array.isArray(runtime?.preflight?.steps)
+      ? runtime.preflight.steps
+      : [];
+
+    return steps.some((step: any) =>
+      step
+      && typeof step === 'object'
+      && (step as Record<string, any>).type === 'evaluate'
+      && (step as Record<string, any>).builtin === 'capture_form_submit',
+    );
+  }
+
+  private buildDefaultDirectLinkNetworkSubmit(runtime?: Record<string, any> | null) {
+    const steps = Array.isArray(runtime?.preflight?.steps)
+      ? runtime.preflight.steps
+      : [];
+    const captureStep = steps.find((step: any) =>
+      step
+      && typeof step === 'object'
+      && (step as Record<string, any>).type === 'evaluate'
+      && (step as Record<string, any>).builtin === 'capture_form_submit',
+    ) as Record<string, any> | undefined;
+
+    if (!captureStep) {
+      return null;
+    }
+
+    const output = (captureStep.options && typeof captureStep.options === 'object'
+      ? captureStep.options.output
+      : null) as Record<string, any> | null;
+    const captureKey = String(output?.captureKey || 'submitCapture').trim() || 'submitCapture';
+    const fieldsKey = String(output?.fieldsKey || 'submitFields').trim() || 'submitFields';
+    const bodyModeKey = String(output?.bodyModeKey || 'submitBodyMode').trim() || 'submitBodyMode';
+    const originKey = String(output?.originKey || 'submitOrigin').trim() || 'submitOrigin';
+
+    return {
+      url: `{{preflight.${captureKey}.action}}`,
+      method: `{{preflight.${captureKey}.method}}`,
+      bodyMode: `{{preflight.${bodyModeKey}}}`,
+      successMode: 'http2xx',
+      completionKind: 'draft',
+      headers: {
+        Origin: `{{preflight.${originKey}}}`,
+        Referer: '{{jumpUrl}}',
+      },
+      body: {
+        source: `preflight.${fieldsKey}`,
+      },
+    };
+  }
+
+  private hasNetworkRequest(value: unknown) {
+    return Boolean(
+      value
+      && typeof value === 'object'
+      && !Array.isArray(value)
+      && typeof (value as Record<string, any>).url === 'string'
+      && (value as Record<string, any>).url.trim(),
+    );
   }
 
   private sanitizeRepairedProcess(

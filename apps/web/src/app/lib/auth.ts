@@ -13,6 +13,7 @@ type AuthSessionClaims = {
   displayName: string;
   roles: string[];
   tenantId: string;
+  identityType?: string;
   iat: number;
   exp: number;
 };
@@ -158,6 +159,7 @@ export async function getServerAuth() {
         roles: verified.roles,
         displayName: verified.displayName,
         username: verified.username,
+        identityType: verified.identityType || '',
         sessionToken,
       };
     }
@@ -169,6 +171,7 @@ export async function getServerAuth() {
     roles: [] as string[],
     displayName: '',
     username: '',
+    identityType: '',
     sessionToken: '',
   };
 }

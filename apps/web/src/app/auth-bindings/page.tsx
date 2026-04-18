@@ -2,7 +2,7 @@ import AuthGuard from '../components/AuthGuard';
 
 export default function AuthBindingsPage() {
   return (
-    <AuthGuard>
+    <AuthGuard allowedRoles={['admin']}>
       <div className="mx-auto max-w-3xl px-6 py-16">
         <div className="rounded-3xl border border-amber-200 bg-amber-50 p-8 shadow-sm">
           <h1 className="text-2xl font-semibold text-amber-950">认证绑定已停用</h1>

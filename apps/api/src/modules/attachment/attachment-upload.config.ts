@@ -2,6 +2,7 @@ import { HttpException, HttpStatus } from '@nestjs/common';
 import { diskStorage } from 'multer';
 import { extname, join } from 'path';
 import { existsSync, mkdirSync } from 'fs';
+import { normalizeAttachmentFileName } from './attachment.utils';
 
 export const ATTACHMENT_ROOT_DIR = join(process.cwd(), 'uploads', 'attachments');
 export const ATTACHMENT_TEMP_DIR = join(ATTACHMENT_ROOT_DIR, 'tmp');
@@ -35,13 +36,13 @@ export const attachmentUploadInterceptorOptions = {
     },
     filename: (_req: any, file: Express.Multer.File, cb: (error: Error | null, filename: string) => void) => {
       const uniqueSuffix = `${Date.now()}-${Math.round(Math.random() * 1e9)}`;
-      const ext = extname(file.originalname).toLowerCase();
+      const ext = extname(normalizeAttachmentFileName(file.originalname) || file.originalname).toLowerCase();
       cb(null, `${uniqueSuffix}${ext}`);
     },
   }),
   limits: { fileSize: MAX_ATTACHMENT_FILE_SIZE, files: MAX_ATTACHMENT_FILES },
   fileFilter: (_req: any, file: Express.Multer.File, cb: (error: Error | null, acceptFile: boolean) => void) => {
-    const extension = extname(file.originalname).toLowerCase();
+    const extension = extname(normalizeAttachmentFileName(file.originalname) || file.originalname).toLowerCase();
     if (DEFAULT_ALLOWED_EXTENSIONS.includes(extension)) {
       cb(null, true);
       return;

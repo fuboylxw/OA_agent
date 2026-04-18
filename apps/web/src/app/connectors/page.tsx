@@ -3,7 +3,7 @@ import ConnectorsContent from './ConnectorsContent';
 
 export default function ConnectorsPage() {
   return (
-    <AuthGuard allowedRoles={['admin', 'flow_manager']}>
+    <AuthGuard allowedRoles={['admin']}>
       <ConnectorsContent initialConnectors={[]} />
     </AuthGuard>
   );

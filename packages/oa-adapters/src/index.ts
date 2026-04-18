@@ -52,7 +52,12 @@ export interface SubmitRequest {
   flowCode: string;
   formData: Record<string, any>;
   idempotencyKey: string;
-  attachments?: Array<{ filename: string; content: Buffer }>;
+  attachments?: Array<{
+    filename: string;
+    content: Buffer;
+    mimeType?: string;
+    fieldKey?: string | null;
+  }>;
 }
 
 export interface SubmitResult {

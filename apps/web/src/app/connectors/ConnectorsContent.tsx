@@ -8,6 +8,7 @@ import {
   type ResolvedAccessModeKey,
   resolvePublishedAccessMode,
 } from '../lib/connector-access-mode';
+import { IDENTITY_SCOPE_META, normalizeIdentityScope } from '../lib/identity-scope';
 
 const OA_TYPE_MAP: Record<string, { label: string; icon: string }> = {
   openapi: { label: '开放接口型', icon: 'fa-plug' },
@@ -179,6 +180,12 @@ export default function ConnectorsContent({ initialConnectors }: { initialConnec
                     <span className="text-gray-500">接入方式</span>
                     <span className="text-right font-medium text-gray-900">
                       {accessMode === 'unknown' ? '-' : RESOLVED_ACCESS_MODE_META[accessMode].label}
+                    </span>
+                  </div>
+                  <div className="flex items-center justify-between">
+                    <span className="text-gray-500">适用范围</span>
+                    <span className="text-right font-medium text-gray-900">
+                      {IDENTITY_SCOPE_META[normalizeIdentityScope(connector.identityScope)].label}
                     </span>
                   </div>
                   <div className="flex items-start justify-between">

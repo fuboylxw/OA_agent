@@ -18,6 +18,7 @@ export class ConnectorService {
         data: {
           tenantId,
           name: dto.name,
+          identityScope: dto.identityScope,
           oaType: dto.oaType,
           oaVendor: dto.oaVendor,
           oaVersion: dto.oaVersion,
@@ -121,6 +122,7 @@ export class ConnectorService {
         where: { id },
         data: {
           name: dto.name,
+          identityScope: dto.identityScope,
           oaType: dto.oaType,
           oaVendor: dto.oaVendor,
           oaVersion: dto.oaVersion,

@@ -1,7 +1,7 @@
 import { DeliveryCapabilityRouter } from './delivery-capability.router';
 
 describe('DeliveryCapabilityRouter', () => {
-  it('infers vision as a degraded browser capability when an rpa flow exists', () => {
+  it('infers vision as a degraded browser capability without inferring url from browser steps', () => {
     const router = new DeliveryCapabilityRouter({} as any);
     const summary = router.resolveForTemplateRecord({
       id: 'template-1',
@@ -67,12 +67,11 @@ describe('DeliveryCapabilityRouter', () => {
 
     expect(summary.api.available).toBe(true);
     expect(summary.api.submitEnabled).toBe(true);
-    expect(summary.url.available).toBe(true);
-    expect(summary.url.health).toBe('healthy');
+    expect(summary.url.available).toBe(false);
     expect(summary.vision.available).toBe(true);
     expect(summary.vision.submitEnabled).toBe(true);
     expect(summary.vision.health).toBe('degraded');
-    expect(summary.fallbackOrder).toEqual(['api', 'vision', 'url']);
+    expect(summary.fallbackOrder).toEqual(['api', 'vision']);
     expect(router.selectPrimaryPath(summary, 'submit')).toBe('api');
   });
 
@@ -129,7 +128,7 @@ describe('DeliveryCapabilityRouter', () => {
     expect(router.selectPrimaryPath(summary, 'submit')).toBe('vision');
   });
 
-  it('prefers vision before url when both capabilities are available', () => {
+  it('does not infer url capability from a browser-only flow definition', () => {
     const router = new DeliveryCapabilityRouter({} as any);
     const summary = router.resolveForTemplateRecord({
       id: 'template-3',
@@ -178,9 +177,9 @@ describe('DeliveryCapabilityRouter', () => {
       connector: null,
     } as any);
 
-    expect(summary.url.available).toBe(true);
+    expect(summary.url.available).toBe(false);
     expect(summary.vision.available).toBe(true);
-    expect(summary.fallbackOrder).toEqual(['vision', 'url']);
+    expect(summary.fallbackOrder).toEqual(['vision']);
     expect(router.selectPrimaryPath(summary, 'submit')).toBe('vision');
   });
 
@@ -207,6 +206,8 @@ describe('DeliveryCapabilityRouter', () => {
         rpaDefinition: {
           processCode: 'leave_apply_url_network',
           processName: '请假申请-URL网络模式',
+          accessMode: 'direct_link',
+          sourceType: 'direct_link',
           platform: {
             jumpUrlTemplate: 'https://oa.example.com/workflow/{processCode}',
           },

@@ -21,7 +21,12 @@ interface BasePageFlowExecutionInput {
 
 interface PageFlowSubmitInput extends BasePageFlowExecutionInput {
   formData: Record<string, any>;
-  attachments?: Array<{ filename: string; content: Buffer }>;
+  attachments?: Array<{
+    filename: string;
+    content: Buffer;
+    mimeType?: string;
+    fieldKey?: string | null;
+  }>;
   idempotencyKey: string;
 }
 
@@ -53,6 +58,8 @@ export class PageFlowDeliveryService {
       idempotencyKey: input.idempotencyKey,
       attachments: input.attachments?.map((attachment) => ({
         filename: attachment.filename,
+        mimeType: attachment.mimeType,
+        fieldKey: attachment.fieldKey,
         content: attachment.content.toString('base64'),
       })),
     }) as {

@@ -30,10 +30,16 @@ export class UrlDeliveryBootstrapService {
       tenantId: input.tenantId,
       userId: input.userId,
     });
-    const [rpaFlow] = await this.adapterRuntimeService.loadRpaFlowsForConnector(
+    const [loadedRpaFlow] = await this.adapterRuntimeService.loadRpaFlowsForConnector(
       input.connectorId,
       [{ flowCode: input.processCode, flowName: input.processName }],
     );
+    const rpaFlow = loadedRpaFlow?.rpaDefinition
+      ? {
+          ...loadedRpaFlow,
+          rpaDefinition: this.enrichFlowDefinitionForExecution(loadedRpaFlow.rpaDefinition, authConfig),
+        }
+      : loadedRpaFlow;
     const definition = rpaFlow?.rpaDefinition;
     authConfig = await this.refreshBackendLoginIfNeeded({
       connector,
@@ -154,6 +160,60 @@ export class UrlDeliveryBootstrapService {
     };
   }
 
+  private enrichFlowDefinitionForExecution(flow: any, authConfig: Record<string, any>) {
+    if (!flow || typeof flow !== 'object' || Array.isArray(flow)) {
+      return flow;
+    }
+
+    const platform = this.asRecord(flow.platform);
+    if (platform.portalSsoBridge && typeof platform.portalSsoBridge === 'object') {
+      return flow;
+    }
+
+    const runtime = this.asRecord(flow.runtime);
+    const requiresSessionBootstrap = Boolean(
+      runtime.preflight
+      || runtime.networkSubmit
+      || runtime.networkStatus,
+    );
+    if (!requiresSessionBootstrap) {
+      return flow;
+    }
+
+    const platformConfig = this.asRecord(authConfig.platformConfig);
+    const portalUrl = this.normalizeUrl(
+      platformConfig.entryUrl
+      || platform.entryUrl
+      || platformConfig.portalUrl,
+    );
+    const targetBaseUrl = this.normalizeUrl(
+      platform.businessBaseUrl
+      || platform.targetBaseUrl
+      || platform.targetSystem,
+    );
+
+    if (!portalUrl || !targetBaseUrl || this.sameOrigin(portalUrl, targetBaseUrl)) {
+      return flow;
+    }
+
+    const nextPlatform = {
+      ...platform,
+      portalSsoBridge: {
+        enabled: true,
+        mode: 'oa_info' as const,
+        portalUrl,
+        oaInfoUrl: '/gate/lobby/api/oa/info',
+        sourcePath: 'coordinateUrl',
+        required: true,
+      },
+    };
+
+    return {
+      ...flow,
+      platform: nextPlatform,
+    };
+  }
+
   private firstRecord(values: unknown[]) {
     for (const value of values) {
       if (value && typeof value === 'object' && !Array.isArray(value)) {
@@ -161,6 +221,22 @@ export class UrlDeliveryBootstrapService {
       }
     }
     return null;
+  }
+
+  private normalizeUrl(value: unknown) {
+    const raw = String(value || '').trim();
+    if (!raw) {
+      return '';
+    }
+    return raw;
+  }
+
+  private sameOrigin(left: string, right: string) {
+    try {
+      return new URL(left).origin === new URL(right).origin;
+    } catch {
+      return left === right;
+    }
   }
 
   private asRecord(value: unknown) {

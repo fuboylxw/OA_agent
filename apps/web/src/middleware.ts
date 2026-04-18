@@ -2,7 +2,10 @@ import { NextResponse } from 'next/server';
 import type { NextRequest } from 'next/server';
 
 function isPublicRoute(pathname: string) {
-  return pathname === '/login' || pathname.startsWith('/login/');
+  return pathname === '/login'
+    || pathname.startsWith('/login/')
+    || pathname === '/logout'
+    || pathname.startsWith('/logout/');
 }
 
 function normalizeReturnTo(value?: string | null) {

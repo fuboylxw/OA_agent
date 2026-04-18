@@ -80,6 +80,7 @@ describe('ConnectorService Integration', () => {
 
     await service.create({
       name: 'O2OA Connector',
+      identityScope: 'both',
       oaType: 'openapi',
       oaVendor: 'o2oa',
       oaVersion: 'v8',

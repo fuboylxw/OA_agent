@@ -132,7 +132,8 @@ export default function HomeContent() {
           <div className="text-xs text-gray-500">{stats.pendingSubmissions} 个待处理</div>
         </Link>
 
-        <Link href="/processes" className="bg-white rounded-xl shadow-sm p-6 border border-gray-200 hover:shadow-md transition-shadow cursor-pointer block">
+        {hasRequiredRole(snapshot.roles, ['admin', 'flow_manager']) ? (
+        <Link href="/process-library" className="bg-white rounded-xl shadow-sm p-6 border border-gray-200 hover:shadow-md transition-shadow cursor-pointer block">
           <div className="flex items-center justify-between mb-4">
             <div className="w-12 h-12 bg-purple-100 rounded-lg flex items-center justify-center">
               <i className="fas fa-book text-purple-600"></i>
@@ -143,6 +144,7 @@ export default function HomeContent() {
           <p className="text-gray-600 text-sm mb-4">浏览所有可用流程模板</p>
           <div className="text-xs text-gray-500">{stats.templateCount} 个流程</div>
         </Link>
+        ) : null}
 
         {hasRequiredRole(snapshot.roles, ['admin']) ? (
         <Link href="/bootstrap" className="bg-white rounded-xl shadow-sm p-6 border border-gray-200 hover:shadow-md transition-shadow cursor-pointer block">
@@ -154,6 +156,20 @@ export default function HomeContent() {
           </div>
           <h3 className="text-lg font-semibold text-gray-900 mb-2">初始化中心</h3>
           <p className="text-gray-600 text-sm mb-4">配置OA系统和流程发现</p>
+          <div className="text-xs text-gray-500">{stats.connectorCount} 个连接器</div>
+        </Link>
+        ) : null}
+
+        {hasRequiredRole(snapshot.roles, ['admin']) ? (
+        <Link href="/connectors" className="bg-white rounded-xl shadow-sm p-6 border border-gray-200 hover:shadow-md transition-shadow cursor-pointer block">
+          <div className="flex items-center justify-between mb-4">
+            <div className="w-12 h-12 bg-slate-100 rounded-lg flex items-center justify-center">
+              <i className="fas fa-plug text-slate-700"></i>
+            </div>
+            <i className="fas fa-arrow-right text-gray-400"></i>
+          </div>
+          <h3 className="text-lg font-semibold text-gray-900 mb-2">连接器管理</h3>
+          <p className="text-gray-600 text-sm mb-4">查看和维护已初始化的业务系统</p>
           <div className="text-xs text-gray-500">{stats.connectorCount} 个连接器</div>
         </Link>
         ) : null}

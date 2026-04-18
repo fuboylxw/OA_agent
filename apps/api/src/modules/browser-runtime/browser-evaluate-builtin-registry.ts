@@ -27,18 +27,194 @@ const toAbsoluteUrl = (value) => {
     return raw;
   }
 };
-const resolveNamedElement = (doc, target) => {
-  if (!doc || !target || typeof target !== 'object') {
+const getAccessibleWindows = () => {
+  const windows = [window];
+  const iframes = Array.from(document.querySelectorAll('iframe'));
+  for (const iframe of iframes) {
+    try {
+      const frameWindow = iframe.contentWindow;
+      const frameDocument = frameWindow?.document;
+      if (!frameWindow || !frameDocument) {
+        continue;
+      }
+      if (!windows.includes(frameWindow)) {
+        windows.push(frameWindow);
+      }
+    } catch {
+      // ignore cross-origin frames
+    }
+  }
+  return windows;
+};
+const getAccessibleDocuments = () => getAccessibleWindows()
+  .map((currentWindow) => {
+    try {
+      return currentWindow.document ? {
+        window: currentWindow,
+        document: currentWindow.document,
+      } : null;
+    } catch {
+      return null;
+    }
+  })
+  .filter(Boolean);
+const resolveDocuments = (frameOptions) => {
+  const docs = getAccessibleDocuments();
+  if (!frameOptions || typeof frameOptions !== 'object') {
+    return docs;
+  }
+  const matched = docs.filter((entry) => {
+    const currentWindow = entry.window;
+    const frameElement = currentWindow.frameElement;
+    if (frameOptions.selector) {
+      return frameElement?.matches?.(frameOptions.selector);
+    }
+    if (frameOptions.name) {
+      return currentWindow.name === frameOptions.name || frameElement?.name === frameOptions.name || frameElement?.id === frameOptions.name;
+    }
+    return false;
+  });
+  if (matched.length === 0) {
+    throw new Error('Configured iframe target is not ready');
+  }
+  return matched;
+};
+const extractElementLabel = (element) => {
+  if (!element) {
+    return '';
+  }
+  const labelNode = element.closest('label')
+    || (element.id ? element.ownerDocument.querySelector('label[for="' + element.id + '"]') : null)
+    || element.parentElement?.querySelector?.('label')
+    || null;
+  return normalizeText(
+    labelNode?.textContent
+    || element.getAttribute?.('aria-label')
+    || element.getAttribute?.('title')
+    || element.getAttribute?.('placeholder')
+    || element.getAttribute?.('name')
+    || element.getAttribute?.('id')
+    || ''
+  );
+};
+const isFileInputElement = (element) => {
+  if (!element) {
+    return false;
+  }
+  const typeAttr = normalizeText(element.getAttribute?.('type') || '');
+  const typeProp = normalizeText(element.type || '');
+  return typeAttr.toLowerCase() === 'file' || typeProp.toLowerCase() === 'file';
+};
+const resolveNamedElement = (documents, target, options = {}) => {
+  if (!Array.isArray(documents) || !target || typeof target !== 'object') {
     return null;
   }
-  if (target.selector) {
-    return doc.querySelector(target.selector);
+  const allowFileInput = options.allowFileInput !== false;
+  for (const entry of documents) {
+    const doc = entry.document;
+    if (!doc) {
+      continue;
+    }
+    if (target.selector) {
+      const selectorMatch = doc.querySelector(target.selector);
+      if (selectorMatch && (allowFileInput || !isFileInputElement(selectorMatch))) {
+        return { element: selectorMatch, document: doc, window: entry.window };
+      }
+    }
+    if (target.id) {
+      const idMatch = doc.getElementById(target.id);
+      if (idMatch && (allowFileInput || !isFileInputElement(idMatch))) {
+        return { element: idMatch, document: doc, window: entry.window };
+      }
+    }
+    if (target.name) {
+      const nameMatch = doc.getElementsByName(target.name)?.[0] || null;
+      if (nameMatch && (allowFileInput || !isFileInputElement(nameMatch))) {
+        return { element: nameMatch, document: doc, window: entry.window };
+      }
+    }
   }
-  if (target.id) {
-    return doc.getElementById(target.id);
+  const expectedLabel = normalizeText(target.label || target.text || target.placeholder || '');
+  if (!expectedLabel) {
+    return null;
   }
-  if (target.name) {
-    return doc.getElementsByName(target.name)?.[0] || null;
+  for (const entry of documents) {
+    const doc = entry.document;
+    const field = Array.from(doc.querySelectorAll('input, textarea, select')).find((element) => {
+      if (!allowFileInput && isFileInputElement(element)) {
+        return false;
+      }
+      return extractElementLabel(element).includes(expectedLabel);
+    });
+    if (field) {
+      return { element: field, document: doc, window: entry.window };
+    }
+  }
+  if (!allowFileInput) {
+    return null;
+  }
+  const uploadCandidates = [];
+  for (const entry of documents) {
+    const doc = entry.document;
+    const fileInputs = Array.from(doc.querySelectorAll('input[type="file"]'));
+    for (let index = 0; index < fileInputs.length; index += 1) {
+      const input = fileInputs[index];
+      const directMeta = normalizeText([
+        input.getAttribute?.('name'),
+        input.getAttribute?.('id'),
+        input.getAttribute?.('title'),
+        input.getAttribute?.('aria-label'),
+        input.getAttribute?.('placeholder'),
+        input.getAttribute?.('class'),
+      ].filter(Boolean).join(' '));
+      const nearbyText = normalizeText([
+        input.closest('label')?.textContent,
+        input.id ? doc.querySelector('label[for="' + input.id + '"]')?.textContent : '',
+        input.parentElement?.textContent,
+        input.closest('[class*="upload"], [class*="attach"], [id*="upload"], [id*="attach"]')?.textContent,
+        input.previousElementSibling?.textContent,
+        input.nextElementSibling?.textContent,
+      ].filter(Boolean).join(' '));
+      let score = 0;
+      if (directMeta.includes(expectedLabel)) {
+        score += 8;
+      }
+      if (nearbyText.includes(expectedLabel)) {
+        score += 6;
+      }
+      if (/附件|上传|file|attach|upload/i.test(expectedLabel)) {
+        if (/附件|上传|file|attach|upload/i.test(directMeta)) {
+          score += 4;
+        }
+        if (/附件|上传|file|attach|upload/i.test(nearbyText)) {
+          score += 3;
+        }
+      }
+      if (fileInputs.length === 1) {
+        score += 2;
+      }
+      if (score > 0) {
+        uploadCandidates.push({
+          element: input,
+          document: doc,
+          window: entry.window,
+          score,
+        });
+      }
+    }
+  }
+  uploadCandidates.sort((left, right) => right.score - left.score);
+  if (uploadCandidates[0]) {
+    return uploadCandidates[0];
+  }
+  const allFileInputs = documents.flatMap((entry) =>
+    Array.from(entry.document?.querySelectorAll?.('input[type="file"]') || []).map((element) => ({
+      element,
+      document: entry.document,
+      window: entry.window,
+    })));
+  if (allFileInputs.length === 1) {
+    return allFileInputs[0];
   }
   return null;
 };
@@ -63,78 +239,113 @@ const resolveSourceValue = (mapping) => {
   }
   return mapping?.defaultValue;
 };
-const resolveFrameDocument = (frameOptions) => {
-  if (!frameOptions || typeof frameOptions !== 'object') {
-    return document;
-  }
-  const iframe = frameOptions.selector
-    ? document.querySelector(frameOptions.selector)
-    : frameOptions.name
-      ? document.querySelector('iframe[name="' + frameOptions.name + '"], iframe#' + frameOptions.name)
-      : null;
-  const frameDocument = iframe?.contentWindow?.document;
-  if (!frameDocument) {
-    throw new Error('Configured iframe target is not ready');
-  }
-  return frameDocument;
-};
-const resolveTriggerElement = (trigger, frameDocument) => {
-  const scope = trigger?.scope === 'frame' ? frameDocument : document;
-  if (!scope) {
-    return null;
-  }
-  if (trigger?.selector) {
-    return scope.querySelector(trigger.selector);
+const resolveTriggerElement = (trigger, rootDocuments, frameDocuments) => {
+  const candidates = trigger?.scope === 'root'
+    ? rootDocuments
+    : trigger?.scope === 'frame'
+      ? frameDocuments
+      : [...frameDocuments, ...rootDocuments].filter(Boolean);
+  for (const entry of candidates) {
+    const scope = entry?.document;
+    if (!scope) {
+      continue;
+    }
+    if (trigger?.selector) {
+      const selectorMatch = scope.querySelector(trigger.selector);
+      if (selectorMatch) {
+        return { element: selectorMatch, document: scope, window: entry.window };
+      }
+    }
   }
   const expectedText = normalizeText(trigger?.text);
   if (!expectedText) {
     return null;
   }
   const exact = trigger?.exact !== false;
-  const nodes = Array.from(scope.querySelectorAll('button, a, span, div, input')).filter((element) => {
-    const text = normalizeText(
-      ('value' in element && typeof element.value === 'string' ? element.value : '')
-      || element.textContent
-      || element.getAttribute('title')
-      || element.getAttribute('aria-label')
-      || ''
-    );
-    return exact ? text === expectedText : text.includes(expectedText);
-  });
-  return nodes[0] || null;
+  for (const entry of candidates) {
+    const scope = entry?.document;
+    const nodes = Array.from(scope.querySelectorAll('button, a, span, div, input')).filter((element) => {
+      const text = normalizeText(
+        ('value' in element && typeof element.value === 'string' ? element.value : '')
+        || element.textContent
+        || element.getAttribute('title')
+        || element.getAttribute('aria-label')
+        || ''
+      );
+      return exact ? text === expectedText : text.includes(expectedText);
+    });
+    if (nodes[0]) {
+      return { element: nodes[0], document: scope, window: entry.window };
+    }
+  }
+  return null;
 };
-const ensureCaptureStore = (actionPattern) => {
+const ensureCaptureStore = (windows, actionPattern) => {
   const pattern = actionPattern ? new RegExp(String(actionPattern), 'i') : null;
   const store = window.__uniflowSubmitCaptureStore || {
     events: [],
     matches: [],
   };
-  if (!window.__uniflowSubmitCaptureStoreInstalled) {
-    const originalSubmit = HTMLFormElement.prototype.submit;
-    HTMLFormElement.prototype.submit = function () {
+  window.__uniflowSubmitCaptureStore = store;
+  for (const currentWindow of windows) {
+    if (currentWindow.__uniflowSubmitCaptureStoreInstalled) {
+      currentWindow.__uniflowSubmitCaptureStore = store;
+      continue;
+    }
+    const originalSubmit = currentWindow.HTMLFormElement?.prototype?.submit;
+    const originalRequestSubmit = currentWindow.HTMLFormElement?.prototype?.requestSubmit;
+    const recordSubmission = function (form) {
+      const ownerWindow = form?.ownerDocument?.defaultView || currentWindow;
+      const enctype = normalizeText(form?.getAttribute?.('enctype') || form?.enctype || '').toLowerCase();
+      const formData = new ownerWindow.FormData(form);
       const fields = Object.fromEntries(
-        Array.from(new FormData(this).entries()).map(([key, value]) => [
+        Array.from(formData.entries()).map(([key, value]) => [
           key,
           typeof value === 'string' ? value : value.name,
         ]),
       );
+      const action = toAbsoluteUrl(form?.getAttribute?.('action') || form?.action || ownerWindow.location?.href || '');
       const record = {
         type: 'form.submit',
-        action: toAbsoluteUrl(this.getAttribute('action') || this.action || ''),
-        method: normalizeText(this.getAttribute('method') || this.method || 'post').toLowerCase(),
+        action,
+        method: normalizeText(form?.getAttribute?.('method') || form?.method || 'post').toLowerCase(),
         fields,
+        enctype,
+        bodyMode: enctype.includes('multipart/form-data') ? 'multipart' : 'form',
+        origin: (() => {
+          try {
+            return new URL(action || ownerWindow.location?.href || ownerWindow.location?.origin || '', ownerWindow.location?.href || window.location.href).origin;
+          } catch {
+            return normalizeText(ownerWindow.location?.origin || '');
+          }
+        })(),
       };
       store.events.push(record);
       if (!pattern || pattern.test(record.action)) {
         store.matches.push(record);
       }
+    };
+    currentWindow.HTMLFormElement.prototype.submit = function () {
+      recordSubmission(this);
       return undefined;
     };
-    window.__uniflowSubmitCaptureStoreInstalled = true;
-    window.__uniflowSubmitCaptureStore = store;
-    window.__uniflowSubmitCaptureStoreRestore = () => {
-      HTMLFormElement.prototype.submit = originalSubmit;
-      window.__uniflowSubmitCaptureStoreInstalled = false;
+    currentWindow.HTMLFormElement.prototype.requestSubmit = function (submitter) {
+      recordSubmission(this);
+      if (typeof originalRequestSubmit === 'function') {
+        return originalRequestSubmit.call(this, submitter);
+      }
+      return undefined;
+    };
+    currentWindow.__uniflowSubmitCaptureStoreInstalled = true;
+    currentWindow.__uniflowSubmitCaptureStore = store;
+    currentWindow.__uniflowSubmitCaptureStoreRestore = () => {
+      if (typeof originalSubmit === 'function') {
+        currentWindow.HTMLFormElement.prototype.submit = originalSubmit;
+      }
+      if (typeof originalRequestSubmit === 'function') {
+        currentWindow.HTMLFormElement.prototype.requestSubmit = originalRequestSubmit;
+      }
+      currentWindow.__uniflowSubmitCaptureStoreInstalled = false;
     };
   }
   return store;
@@ -147,15 +358,27 @@ const fieldsKey = output.fieldsKey || 'submitFields';
 const csrfKey = output.csrfKey || 'csrfToken';
 const filledFieldsKey = output.filledFieldsKey || 'filledFields';
 const captureEventCountKey = output.captureEventCountKey || 'captureEventCount';
-const frameDocument = resolveFrameDocument(options.frame);
-const captureStore = ensureCaptureStore(options.capture?.actionPattern);
+const bodyModeKey = output.bodyModeKey || 'submitBodyMode';
+const originKey = output.originKey || 'submitOrigin';
+const attachmentFieldMapKey = output.attachmentFieldMapKey || 'attachmentFieldMap';
+const rootDocuments = getAccessibleDocuments().filter((entry) => entry.document === document);
+const frameDocuments = resolveDocuments(options.frame);
+const allWindows = getAccessibleWindows();
+const captureStore = ensureCaptureStore(allWindows, options.capture?.actionPattern);
 const previousMatchCount = captureStore.matches.length;
 const fieldMappings = Array.isArray(options.fieldMappings) ? options.fieldMappings : [];
+const fileMappings = Array.isArray(options.fileMappings) ? options.fileMappings : [];
 const filledFields = {};
+const attachmentFieldMap = {};
 
 for (const mapping of fieldMappings) {
-  const target = resolveNamedElement(frameDocument, mapping?.target);
-  const targetKey = mapping?.target?.id || mapping?.target?.name || mapping?.target?.selector || mapping?.fieldKey || 'unknown';
+  const targetMatch = resolveNamedElement(
+    frameDocuments.length > 0 ? frameDocuments : rootDocuments,
+    mapping?.target,
+    { allowFileInput: false },
+  );
+  const target = targetMatch?.element;
+  const targetKey = mapping?.target?.id || mapping?.target?.name || mapping?.target?.label || mapping?.target?.selector || mapping?.fieldKey || 'unknown';
   const resolvedValue = resolveSourceValue(mapping);
   if (!target || resolvedValue === undefined || resolvedValue === null) {
     filledFields[targetKey] = false;
@@ -176,8 +399,23 @@ for (const mapping of fieldMappings) {
   filledFields[targetKey] = true;
 }
 
+for (const mapping of fileMappings) {
+  const targetMatch = resolveNamedElement(
+    frameDocuments.length > 0 ? frameDocuments : rootDocuments,
+    mapping?.target,
+    { allowFileInput: true },
+  );
+  const target = targetMatch?.element;
+  const requestFieldName = normalizeText(target?.getAttribute?.('name') || target?.getAttribute?.('id') || '');
+  const fieldKey = normalizeText(mapping?.fieldKey || mapping?.source || '');
+  if (fieldKey && requestFieldName) {
+    attachmentFieldMap[fieldKey] = requestFieldName;
+  }
+}
+
 await wait(Number(options.beforeTriggerDelayMs || 500));
-const trigger = resolveTriggerElement(options.trigger, frameDocument);
+const triggerMatch = resolveTriggerElement(options.trigger, rootDocuments, frameDocuments);
+const trigger = triggerMatch?.element;
 if (!trigger) {
   throw new Error('Configured submit trigger not found');
 }
@@ -203,6 +441,9 @@ return {
   [fieldsKey]: matched?.fields || {},
   [filledFieldsKey]: filledFields,
   [captureEventCountKey]: Array.isArray(captureStore.events) ? captureStore.events.length : 0,
+  [bodyModeKey]: matched?.bodyMode || 'form',
+  [originKey]: matched?.origin || '',
+  [attachmentFieldMapKey]: attachmentFieldMap,
 };
 `.trim();
 

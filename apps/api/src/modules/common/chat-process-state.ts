@@ -4,6 +4,7 @@ export enum ChatProcessStatus {
   PARAMETER_COLLECTION = 'parameter_collection',
   PENDING_CONFIRMATION = 'pending_confirmation',
   EXECUTING = 'executing',
+  DRAFT_SAVED = 'draft_saved',
   SUBMITTED = 'submitted',
   REWORK_REQUIRED = 'rework_required',
   COMPLETED = 'completed',
@@ -24,6 +25,7 @@ export function requiresUserAction(status?: ChatProcessStatus | null) {
 
 export function isTerminalChatProcessStatus(status?: ChatProcessStatus | null) {
   return [
+    ChatProcessStatus.DRAFT_SAVED,
     ChatProcessStatus.COMPLETED,
     ChatProcessStatus.FAILED,
     ChatProcessStatus.CANCELLED,
@@ -32,6 +34,9 @@ export function isTerminalChatProcessStatus(status?: ChatProcessStatus | null) {
 
 export function mapSubmissionStatusToChatProcessStatus(submissionStatus?: string | null) {
   switch ((submissionStatus || '').toLowerCase()) {
+    case 'draft':
+    case 'draft_saved':
+      return ChatProcessStatus.DRAFT_SAVED;
     case 'pending':
       return ChatProcessStatus.EXECUTING;
     case 'submitted':

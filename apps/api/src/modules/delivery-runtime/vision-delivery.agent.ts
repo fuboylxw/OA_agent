@@ -34,7 +34,7 @@ export class VisionDeliveryAgent implements DeliveryAgent {
       uiHints: input.uiHints,
     });
 
-    if (!prepared.rpaFlow) {
+    if (!prepared.rpaFlow || !this.hasVisionCapability(prepared.rpaFlow.rpaDefinition, input.uiHints, 'submit')) {
       return {
         submitResult: {
           success: false,
@@ -91,7 +91,7 @@ export class VisionDeliveryAgent implements DeliveryAgent {
       uiHints: input.uiHints,
     });
 
-    if (!prepared.rpaFlow) {
+    if (!prepared.rpaFlow || !this.hasVisionCapability(prepared.rpaFlow.rpaDefinition, input.uiHints, 'queryStatus')) {
       return {
         statusResult: {
           status: 'error',
@@ -133,5 +133,41 @@ export class VisionDeliveryAgent implements DeliveryAgent {
       context: prepared,
       submissionId: input.submissionId,
     });
+  }
+
+  private hasVisionCapability(
+    definition: Record<string, any> | undefined,
+    uiHints: Record<string, any>,
+    action: 'submit' | 'queryStatus',
+  ) {
+    const executionModes = (uiHints.executionModes as Record<string, any> | undefined) || {};
+    const explicitRpa = Array.isArray(executionModes[action])
+      && executionModes[action].some((item) => String(item || '').trim().toLowerCase() === 'rpa');
+    if (explicitRpa) {
+      return true;
+    }
+
+    if (this.isDirectLinkDefinition(definition)) {
+      return false;
+    }
+
+    const actionDefinition = action === 'submit'
+      ? definition?.actions?.submit
+      : definition?.actions?.queryStatus;
+    return Array.isArray(actionDefinition?.steps) && actionDefinition.steps.length > 0;
+  }
+
+  private isDirectLinkDefinition(definition: Record<string, any> | undefined) {
+    if (!definition || typeof definition !== 'object') {
+      return false;
+    }
+
+    const metadata = definition.metadata && typeof definition.metadata === 'object'
+      ? definition.metadata as Record<string, any>
+      : {};
+    const accessMode = String(definition.accessMode || metadata.accessMode || '').trim().toLowerCase();
+    const sourceType = String(definition.sourceType || metadata.sourceType || '').trim().toLowerCase();
+
+    return accessMode === 'direct_link' || sourceType === 'direct_link';
   }
 }

@@ -39,6 +39,14 @@ describe('Bootstrap HTTP E2E', () => {
   let bootstrapService: jest.Mocked<BootstrapService>;
   let requestAuth: { resolveTenant: jest.Mock };
 
+  function mockAuth(roles: string[]) {
+    requestAuth.resolveTenant.mockReturnValue({
+      tenantId: 'tenant-1',
+      roles,
+      source: 'request',
+    });
+  }
+
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [BootstrapHttpTestModule],
@@ -60,11 +68,7 @@ describe('Bootstrap HTTP E2E', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    requestAuth.resolveTenant.mockReturnValue({
-      tenantId: 'tenant-1',
-      roles: [],
-      source: 'request',
-    });
+    mockAuth(['admin']);
   });
 
   it('validates and creates bootstrap jobs', async () => {
@@ -79,6 +83,7 @@ describe('Bootstrap HTTP E2E', () => {
         tenantId: 'tenant-1',
         name: '费用报销接入',
         oaUrl: 'https://oa.example.com',
+        identityScope: 'both',
         accessMode: 'backend_api',
         apiDocType: 'openapi',
         apiDocUrl: 'https://oa.example.com/openapi.json',
@@ -96,6 +101,7 @@ describe('Bootstrap HTTP E2E', () => {
       tenantId: 'tenant-1',
       name: '费用报销接入',
       oaUrl: 'https://oa.example.com',
+      identityScope: 'both',
       accessMode: 'backend_api',
       apiDocType: 'openapi',
       apiDocUrl: 'https://oa.example.com/openapi.json',
@@ -150,6 +156,7 @@ describe('Bootstrap HTTP E2E', () => {
         tenantId: 'tenant-1',
         name: '请假流程注册',
         oaUrl: 'https://oa.example.com',
+        identityScope: 'both',
         accessMode: 'text_guide',
         rpaFlowContent: textGuide,
         platformConfig: {
@@ -166,12 +173,71 @@ describe('Bootstrap HTTP E2E', () => {
       tenantId: 'tenant-1',
       name: '请假流程注册',
       oaUrl: 'https://oa.example.com',
+      identityScope: 'both',
       accessMode: 'text_guide',
       rpaFlowContent: textGuide,
       platformConfig: {
         entryUrl: 'https://oa.example.com/workbench',
         executorMode: 'browser',
       },
+    });
+  });
+
+  it('accepts direct-link bootstrap payloads using a multi-flow language template', async () => {
+    bootstrapService.createJob.mockResolvedValue({
+      id: 'job-direct-link',
+      status: 'PENDING',
+    } as any);
+
+    const directLinkGuide = [
+      '# 全局',
+      '认证入口: https://sso.example.com',
+      '系统网址: https://oa.example.com',
+      '执行方式: browser',
+      '## 流程: 请假申请',
+      '流程编码: leave_request',
+      '参数:',
+      '- 请假事由 | textarea | 必填',
+      '- 开始日期 | date | 必填',
+      '步骤:',
+      '- 访问 https://sso.example.com',
+      '- 访问 https://oa.example.com',
+      '- 访问 https://oa.example.com/leave/new',
+      '- 填写 请假事由',
+      '- 填写 开始日期',
+      '- 点击 提交',
+      '- 看到 提交成功 就结束',
+      '## 流程: 报销申请',
+      '流程编码: expense_submit',
+      '步骤:',
+      '- 访问 https://oa.example.com/expense/new',
+      '- 填写 金额',
+      '- 点击 提交',
+      '- 看到 提交成功 就结束',
+    ].join('\n');
+
+    await request(httpApp)
+      .post('/api/v1/bootstrap/jobs')
+      .send({
+        tenantId: 'tenant-1',
+        name: '综合 OA 初始化',
+        oaUrl: 'https://oa.example.com',
+        identityScope: 'both',
+        accessMode: 'direct_link',
+        rpaFlowContent: directLinkGuide,
+      })
+      .expect(201)
+      .expect(({ body }) => {
+        expect(body.id).toBe('job-direct-link');
+      });
+
+    expect(bootstrapService.createJob).toHaveBeenCalledWith({
+      tenantId: 'tenant-1',
+      name: '综合 OA 初始化',
+      oaUrl: 'https://oa.example.com',
+      identityScope: 'both',
+      accessMode: 'direct_link',
+      rpaFlowContent: directLinkGuide,
     });
   });
 
@@ -274,5 +340,30 @@ describe('Bootstrap HTTP E2E', () => {
       },
     });
     expect(bootstrapService.deleteJob).toHaveBeenCalledWith('job-1', 'tenant-1');
+  });
+
+  it('blocks non-admin users from bootstrap endpoints', async () => {
+    mockAuth(['flow_manager']);
+
+    await request(httpApp)
+      .get('/api/v1/bootstrap/jobs')
+      .query({ tenantId: 'tenant-1' })
+      .expect(403);
+
+    await request(httpApp)
+      .post('/api/v1/bootstrap/jobs')
+      .send({
+        tenantId: 'tenant-1',
+        name: '费用报销接入',
+        oaUrl: 'https://oa.example.com',
+        identityScope: 'both',
+        accessMode: 'backend_api',
+        apiDocType: 'openapi',
+        apiDocUrl: 'https://oa.example.com/openapi.json',
+      })
+      .expect(403);
+
+    expect(bootstrapService.listJobs).not.toHaveBeenCalled();
+    expect(bootstrapService.createJob).not.toHaveBeenCalled();
   });
 });

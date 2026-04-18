@@ -256,4 +256,76 @@ describe('PlaywrightBrowserEngineAdapter', () => {
     });
     expect(tab.artifacts.lastEvaluatedValue).toEqual(result);
   });
+
+  it('falls back to the only file input across frames for upload steps', async () => {
+    const engine = new PlaywrightBrowserEngineAdapter();
+    const uploadLocator = {
+      setInputFiles: jest.fn().mockResolvedValue(undefined),
+      evaluate: jest.fn().mockResolvedValue(''),
+    };
+    const emptyLocator = {
+      count: jest.fn().mockResolvedValue(0),
+      first: jest.fn().mockReturnThis(),
+      nth: jest.fn().mockReturnThis(),
+      evaluate: jest.fn().mockResolvedValue(''),
+    };
+    const fileLocatorCollection = {
+      count: jest.fn().mockResolvedValue(1),
+      nth: jest.fn().mockReturnValue(uploadLocator),
+      first: jest.fn().mockReturnValue(uploadLocator),
+    };
+    const mainFrame = {};
+    const childFrame = {
+      locator: jest.fn((selector: string) => {
+        if (selector === 'input[type="file"]') {
+          return fileLocatorCollection;
+        }
+        return emptyLocator;
+      }),
+      getByLabel: jest.fn(() => emptyLocator),
+      evaluate: jest.fn().mockResolvedValue({
+        index: 0,
+        requestFieldName: '',
+        score: 2,
+      }),
+      url: jest.fn(() => 'https://oa2023.xpu.edu.cn/custom-frame'),
+    };
+    const page = {
+      locator: jest.fn(() => emptyLocator),
+      getByLabel: jest.fn(() => emptyLocator),
+      frames: jest.fn(() => [mainFrame, childFrame]),
+      mainFrame: jest.fn(() => mainFrame),
+    };
+
+    (engine as any).sessions.set('session-upload', {
+      browser: {},
+      context: {},
+      page,
+    });
+
+    const tab = {
+      uploads: [],
+      extractedValues: {},
+    } as any;
+
+    await engine.upload(
+      { sessionId: 'session-upload' } as any,
+      tab,
+      {
+        ref: 'upload-1',
+        role: 'upload',
+        fieldKey: 'field_2',
+        label: '用印附件',
+      } as any,
+      '/tmp/test-upload.pdf',
+    );
+
+    expect(uploadLocator.setInputFiles).toHaveBeenCalledWith(['/tmp/test-upload.pdf']);
+    expect(tab.uploads).toEqual([
+      {
+        fieldKey: 'field_2',
+        filename: 'test-upload.pdf',
+      },
+    ]);
+  });
 });

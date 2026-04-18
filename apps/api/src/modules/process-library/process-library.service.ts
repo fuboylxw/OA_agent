@@ -4,12 +4,14 @@ import { createHash } from 'crypto';
 import { normalizeProcessName, parseRpaFlowDefinitions } from '@uniflow/shared-types';
 import { PrismaService } from '../common/prisma.service';
 import { CreateProcessTemplateDto } from './dto/create-process-template.dto';
+import { resolveAllowedIdentityScopes } from '../common/identity-scope.util';
 
 type ProcessLibraryItem = {
   id: string;
   processCode: string;
   processName: string;
   processCategory: string | null;
+  description: string | null;
   version: number;
   status: string;
   falLevel: string | null;
@@ -20,16 +22,48 @@ type ProcessLibraryItem = {
   connector?: {
     id: string;
     name: string;
+    identityScope: string;
     oaType: string;
     oclLevel: string;
   } | null;
+};
+
+type ProcessLibraryAccessContext = {
+  identityType?: string;
+  roles?: string[];
+};
+
+type ManualProcessTemplatePayload = {
+  connectorId: string;
+  processCode: string;
+  processName: string;
+  processCategory: string | null;
+  description: string | null;
+  falLevel: string;
+  definition: Record<string, any>;
+  schemaFields: Array<{
+    key: string;
+    label: string;
+    type: string;
+    required: boolean;
+  }>;
+  sourceHash: string;
+  hasUrlSubmit: boolean;
+  hasUrlQuery: boolean;
+  hasRpaQuery: boolean;
 };
 
 @Injectable()
 export class ProcessLibraryService {
   constructor(private readonly prisma: PrismaService) {}
 
-  async list(tenantId: string, category?: string, connectorId?: string) {
+  async list(
+    tenantId: string,
+    category?: string,
+    connectorId?: string,
+    access?: ProcessLibraryAccessContext,
+  ) {
+    const connectorScopeFilter = this.buildConnectorScopeFilter(access);
     const publishedTemplates = await this.prisma.processTemplate.findMany({
       where: {
         tenantId,
@@ -40,6 +74,7 @@ export class ProcessLibraryService {
             bootstrapJobs: {
               some: {},
             },
+            ...(connectorScopeFilter || {}),
           },
         },
         ...(category && { processCategory: category }),
@@ -50,6 +85,7 @@ export class ProcessLibraryService {
           select: {
             id: true,
             name: true,
+            identityScope: true,
             oaType: true,
             oclLevel: true,
           },
@@ -69,6 +105,7 @@ export class ProcessLibraryService {
         processCode: template.processCode,
       }),
       processCategory: template.processCategory || null,
+      description: template.description || null,
       version: template.version,
       status: template.status,
       falLevel: template.falLevel,
@@ -90,9 +127,226 @@ export class ProcessLibraryService {
   }
 
   async createManualProcessTemplate(tenantId: string, dto: CreateProcessTemplateDto) {
+    const connector = await this.getManageableConnector(tenantId, dto.connectorId);
+    const payload = this.buildManualTemplatePayload(dto);
+    return this.publishManualProcessTemplate(tenantId, connector, payload);
+  }
+
+  async updateManualProcessTemplate(tenantId: string, templateId: string, dto: CreateProcessTemplateDto) {
+    const existing = await this.prisma.processTemplate.findFirst({
+      where: {
+        id: templateId,
+        tenantId,
+      },
+      select: {
+        id: true,
+        connectorId: true,
+      },
+    });
+
+    if (!existing) {
+      throw new NotFoundException('要修改的流程不存在');
+    }
+
+    if (existing.connectorId !== dto.connectorId) {
+      throw new BadRequestException('修改流程时不允许变更所属连接器');
+    }
+
+    const connector = await this.getManageableConnector(tenantId, dto.connectorId);
+    const payload = this.buildManualTemplatePayload(dto);
+    return this.publishManualProcessTemplate(tenantId, connector, payload, templateId);
+  }
+
+  async archiveManualProcessTemplate(tenantId: string, templateId: string) {
+    const existing = await this.prisma.processTemplate.findFirst({
+      where: {
+        id: templateId,
+        tenantId,
+      },
+      select: {
+        id: true,
+        connectorId: true,
+        processCode: true,
+        remoteProcessId: true,
+        status: true,
+      },
+    });
+
+    if (!existing) {
+      throw new NotFoundException('要删除的流程不存在');
+    }
+
+    return this.prisma.$transaction(async (tx) => {
+      const archived = await tx.processTemplate.updateMany({
+        where: {
+          tenantId,
+          connectorId: existing.connectorId,
+          processCode: existing.processCode,
+          NOT: {
+            status: 'archived',
+          },
+        },
+        data: {
+          status: 'archived',
+        },
+      });
+
+      if (existing.remoteProcessId) {
+        await tx.remoteProcess.update({
+          where: {
+            id: existing.remoteProcessId,
+          },
+          data: {
+            latestTemplateId: null,
+            status: 'disabled',
+          },
+        });
+      }
+
+      return {
+        success: true,
+        archivedCount: archived.count,
+        processCode: existing.processCode,
+      };
+    });
+  }
+
+  async getByCode(
+    tenantId: string,
+    processCode: string,
+    version?: number,
+    access?: ProcessLibraryAccessContext,
+  ) {
+    const connectorScopeFilter = this.buildConnectorScopeFilter(access);
+    const template = await this.prisma.processTemplate.findFirst({
+      where: {
+        tenantId,
+        processCode,
+        status: 'published',
+        connector: {
+          is: {
+            tenantId,
+            bootstrapJobs: {
+              some: {},
+            },
+            ...(connectorScopeFilter || {}),
+          },
+        },
+        ...(version && { version }),
+      },
+      include: {
+        connector: true,
+      },
+      orderBy: {
+        version: 'desc',
+      },
+    });
+
+    if (!template) {
+      throw new NotFoundException('Process template not found');
+    }
+
+    return template;
+  }
+
+  async getById(id: string, tenantId: string, access?: ProcessLibraryAccessContext) {
+    const connectorScopeFilter = this.buildConnectorScopeFilter(access);
+    const template = await this.prisma.processTemplate.findFirst({
+      where: {
+        id,
+        tenantId,
+        connector: {
+          is: {
+            tenantId,
+            bootstrapJobs: {
+              some: {},
+            },
+            ...(connectorScopeFilter || {}),
+          },
+        },
+      },
+      include: {
+        connector: true,
+      },
+    });
+
+    if (!template) {
+      throw new NotFoundException('Process template not found');
+    }
+
+    return template;
+  }
+
+  async listVersions(tenantId: string, processCode: string, access?: ProcessLibraryAccessContext) {
+    const connectorScopeFilter = this.buildConnectorScopeFilter(access);
+    return this.prisma.processTemplate.findMany({
+      where: {
+        tenantId,
+        processCode,
+        connector: {
+          is: {
+            tenantId,
+            bootstrapJobs: {
+              some: {},
+            },
+            ...(connectorScopeFilter || {}),
+          },
+        },
+      },
+      orderBy: {
+        version: 'desc',
+      },
+    });
+  }
+
+  private normalizeProcessCode(value: string) {
+    return value
+      .trim()
+      .toLowerCase()
+      .replace(/[^a-z0-9_-]+/g, '_')
+      .replace(/^_+|_+$/g, '');
+  }
+
+  private buildConnectorScopeFilter(access?: ProcessLibraryAccessContext) {
+    if (access?.roles?.some((role) => role === 'admin' || role === 'flow_manager')) {
+      return undefined;
+    }
+
+    return {
+      identityScope: {
+        in: resolveAllowedIdentityScopes(access?.identityType),
+      },
+    } satisfies Prisma.ConnectorWhereInput;
+  }
+
+  private isDirectLinkDefinition(definition: Record<string, any> | null | undefined) {
+    if (!definition || typeof definition !== 'object') {
+      return false;
+    }
+
+    const metadata = definition.metadata && typeof definition.metadata === 'object'
+      ? definition.metadata as Record<string, any>
+      : {};
+    const accessMode = String(definition.accessMode || metadata.accessMode || '').trim().toLowerCase();
+    const sourceType = String(definition.sourceType || metadata.sourceType || '').trim().toLowerCase();
+
+    return accessMode === 'direct_link' || sourceType === 'direct_link';
+  }
+
+  private hasNetworkRequest(value: unknown) {
+    return Boolean(
+      value
+      && typeof value === 'object'
+      && !Array.isArray(value)
+      && typeof (value as Record<string, any>).url === 'string'
+      && (value as Record<string, any>).url.trim(),
+    );
+  }
+
+  private async getManageableConnector(tenantId: string, connectorId: string) {
     const connector = await this.prisma.connector.findFirst({
       where: {
-        id: dto.connectorId,
+        id: connectorId,
         tenantId,
         bootstrapJobs: {
           some: {},
@@ -101,6 +355,7 @@ export class ProcessLibraryService {
       select: {
         id: true,
         name: true,
+        identityScope: true,
         oaType: true,
         baseUrl: true,
       },
@@ -110,6 +365,10 @@ export class ProcessLibraryService {
       throw new NotFoundException('所属连接器不存在');
     }
 
+    return connector;
+  }
+
+  private buildManualTemplatePayload(dto: CreateProcessTemplateDto): ManualProcessTemplatePayload {
     const definitions = parseRpaFlowDefinitions(dto.rpaFlowContent);
     if (definitions.length !== 1) {
       throw new BadRequestException('单个添加流程只能提交一个流程定义');
@@ -135,14 +394,26 @@ export class ProcessLibraryService {
       processName,
       ...(processCategory ? { category: processCategory } : {}),
       ...(description ? { description } : {}),
-    };
+    } as Record<string, any>;
 
+    const directLinkDefinition = this.isDirectLinkDefinition(definition);
     const submitSteps = definition.actions?.submit?.steps;
-    if (!Array.isArray(submitSteps) || submitSteps.length === 0) {
-      throw new BadRequestException('流程定义必须包含可执行的提交步骤');
+    const hasRpaSubmit = !directLinkDefinition && Array.isArray(submitSteps) && submitSteps.length > 0;
+    const hasUrlSubmit = directLinkDefinition && this.hasNetworkRequest(definition.runtime?.networkSubmit);
+    if (!hasRpaSubmit && !hasUrlSubmit) {
+      throw new BadRequestException(
+        directLinkDefinition
+          ? '链接直达流程定义必须包含网络提交定义'
+          : '流程定义必须包含可执行的提交步骤',
+      );
     }
 
-    const schemaFields = (definition.fields || []).map((field, index) => ({
+    const hasRpaQuery = !directLinkDefinition
+      && Array.isArray(definition.actions?.queryStatus?.steps)
+      && definition.actions.queryStatus.steps.length > 0;
+    const hasUrlQuery = directLinkDefinition && this.hasNetworkRequest(definition.runtime?.networkStatus);
+
+    const schemaFields = (definition.fields || []).map((field: any, index: number) => ({
       key: String(field?.key || '').trim() || `field_${index + 1}`,
       label: String(field?.label || field?.key || `字段${index + 1}`).trim(),
       type: String(field?.type || 'text').trim() || 'text',
@@ -153,83 +424,116 @@ export class ProcessLibraryService {
       .update(JSON.stringify(definition))
       .digest('hex');
 
-    return this.prisma.$transaction(async (tx) => {
-      const remoteProcess = await tx.remoteProcess.upsert({
-        where: {
-          connectorId_remoteProcessId: {
-            connectorId: connector.id,
-            remoteProcessId: processCode,
-          },
-        },
-        create: {
-          tenantId,
-          connectorId: connector.id,
-          remoteProcessId: processCode,
-          remoteProcessCode: processCode,
-          remoteProcessName: processName,
-          processCategory,
-          sourceHash,
-          sourceVersion: '1',
-          status: 'active',
-          metadata: {
-            source: 'process_library_manual',
-            description,
-          },
-          lastSchemaSyncAt: new Date(),
-          lastDriftCheckAt: new Date(),
-        },
-        update: {
-          remoteProcessCode: processCode,
-          remoteProcessName: processName,
-          processCategory,
-          sourceHash,
-          status: 'active',
-          metadata: {
-            source: 'process_library_manual',
-            description,
-          },
-          lastSchemaSyncAt: new Date(),
-          lastDriftCheckAt: new Date(),
-        },
-      });
+    return {
+      connectorId: dto.connectorId,
+      processCode,
+      processName,
+      processCategory,
+      description,
+      falLevel: dto.falLevel || 'F2',
+      definition,
+      schemaFields,
+      sourceHash,
+      hasUrlSubmit,
+      hasUrlQuery,
+      hasRpaQuery,
+    };
+  }
 
+  private async publishManualProcessTemplate(
+    tenantId: string,
+    connector: {
+      id: string;
+      name: string;
+      identityScope: string | null;
+      oaType: string;
+      baseUrl: string | null;
+    },
+    payload: ManualProcessTemplatePayload,
+    expectedSupersedesId?: string,
+  ) {
+    return this.prisma.$transaction(async (tx) => {
       const latestTemplate = await tx.processTemplate.findFirst({
         where: {
           tenantId,
           connectorId: connector.id,
-          processCode,
+          processCode: payload.processCode,
         },
         orderBy: {
           version: 'desc',
         },
       });
 
+      if (expectedSupersedesId && latestTemplate && latestTemplate.id !== expectedSupersedesId) {
+        throw new BadRequestException('当前流程已有更新版本，请刷新后重试');
+      }
+
+      const remoteProcess = await tx.remoteProcess.upsert({
+        where: {
+          connectorId_remoteProcessId: {
+            connectorId: connector.id,
+            remoteProcessId: payload.processCode,
+          },
+        },
+        create: {
+          tenantId,
+          connectorId: connector.id,
+          remoteProcessId: payload.processCode,
+          remoteProcessCode: payload.processCode,
+          remoteProcessName: payload.processName,
+          processCategory: payload.processCategory,
+          sourceHash: payload.sourceHash,
+          sourceVersion: '1',
+          status: 'active',
+          metadata: {
+            source: 'process_library_manual',
+            description: payload.description,
+          },
+          lastSchemaSyncAt: new Date(),
+          lastDriftCheckAt: new Date(),
+        },
+        update: {
+          remoteProcessCode: payload.processCode,
+          remoteProcessName: payload.processName,
+          processCategory: payload.processCategory,
+          sourceHash: payload.sourceHash,
+          status: 'active',
+          metadata: {
+            source: 'process_library_manual',
+            description: payload.description,
+          },
+          lastSchemaSyncAt: new Date(),
+          lastDriftCheckAt: new Date(),
+        },
+      });
+
       const nextVersion = (latestTemplate?.version || 0) + 1;
       const uiHints = {
         executionModes: {
-          submit: ['rpa'],
-          queryStatus: definition.actions?.queryStatus ? ['rpa'] : [],
+          submit: payload.hasUrlSubmit ? ['url'] : ['rpa'],
+          queryStatus: payload.hasUrlQuery ? ['url'] : (payload.hasRpaQuery ? ['rpa'] : []),
         },
-        rpaDefinition: definition,
+        rpaDefinition: payload.definition,
         source: 'process_library_manual',
       } as unknown as Prisma.InputJsonValue;
+
       const template = await tx.processTemplate.create({
         data: {
           tenantId,
           connectorId: connector.id,
           remoteProcessId: remoteProcess.id,
-          processCode,
-          processName,
-          processCategory,
-          description,
+          processCode: payload.processCode,
+          processName: payload.processName,
+          processCategory: payload.processCategory,
+          description: payload.description,
           version: nextVersion,
           status: 'published',
-          falLevel: dto.falLevel || 'F2',
-          sourceHash,
+          falLevel: payload.falLevel,
+          sourceHash: payload.sourceHash,
           sourceVersion: String(nextVersion),
           supersedesId: latestTemplate?.id,
           schema: {
-            fields: schemaFields,
+            fields: payload.schemaFields,
           },
           rules: null,
           permissions: null,
@@ -253,7 +557,7 @@ export class ProcessLibraryService {
         where: {
           tenantId,
           connectorId: connector.id,
-          processCode,
+          processCode: payload.processCode,
           status: 'published',
           NOT: { id: template.id },
         },
@@ -272,90 +576,5 @@ export class ProcessLibraryService {
 
       return template;
     });
-  }
-
-  async getByCode(tenantId: string, processCode: string, version?: number) {
-    const template = await this.prisma.processTemplate.findFirst({
-      where: {
-        tenantId,
-        processCode,
-        status: 'published',
-        connector: {
-          is: {
-            tenantId,
-            bootstrapJobs: {
-              some: {},
-            },
-          },
-        },
-        ...(version && { version }),
-      },
-      include: {
-        connector: true,
-      },
-      orderBy: {
-        version: 'desc',
-      },
-    });
-
-    if (!template) {
-      throw new NotFoundException('Process template not found');
-    }
-
-    return template;
-  }
-
-  async getById(id: string, tenantId: string) {
-    const template = await this.prisma.processTemplate.findFirst({
-      where: {
-        id,
-        tenantId,
-        connector: {
-          is: {
-            tenantId,
-            bootstrapJobs: {
-              some: {},
-            },
-          },
-        },
-      },
-      include: {
-        connector: true,
-      },
-    });
-
-    if (!template) {
-      throw new NotFoundException('Process template not found');
-    }
-
-    return template;
-  }
-
-  async listVersions(tenantId: string, processCode: string) {
-    return this.prisma.processTemplate.findMany({
-      where: {
-        tenantId,
-        processCode,
-        connector: {
-          is: {
-            tenantId,
-            bootstrapJobs: {
-              some: {},
-            },
-          },
-        },
-      },
-      orderBy: {
-        version: 'desc',
-      },
-    });
-  }
-
-  private normalizeProcessCode(value: string) {
-    return value
-      .trim()
-      .toLowerCase()
-      .replace(/[^a-z0-9_-]+/g, '_')
-      .replace(/^_+|_+$/g, '');
   }
 }

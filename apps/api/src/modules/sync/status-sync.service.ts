@@ -9,6 +9,8 @@ import {
   isUnsupportedStatusQueryResult,
   mapExternalStatusToSubmissionStatus,
 } from '../common/submission-status.util';
+import { mapSubmissionStatusToChatProcessStatus } from '../common/chat-process-state';
+import { buildConversationRestoreState } from '../common/chat-retention.util';
 
 @Injectable()
 export class StatusSyncService {
@@ -97,6 +99,9 @@ export class StatusSyncService {
           where: { id: submission.id },
           data: {
             status: mappedStatus,
+            ...buildConversationRestoreState(
+              mapSubmissionStatusToChatProcessStatus(mappedStatus),
+            ),
           },
         });
 

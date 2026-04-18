@@ -22,11 +22,15 @@ const TextGuideFieldSchema = z.object({
   fieldKey: z.string().trim().min(1).optional(),
   type: z.enum(['text', 'number', 'date', 'select', 'file', 'textarea']).optional(),
   required: z.boolean().optional(),
+  description: z.string().trim().min(1).optional(),
+  example: z.string().trim().min(1).optional(),
+  multiple: z.boolean().optional(),
 });
 
 const TextGuideFlowSchema = z.object({
   processName: z.string().trim().min(1),
   processCode: z.string().trim().min(1).optional(),
+  description: z.string().trim().min(1).optional(),
   fields: z.array(TextGuideFieldSchema).default([]),
   testData: z.record(z.union([z.string(), z.number(), z.boolean()])).default({}),
   steps: z.array(z.string().trim().min(1)).min(1),
@@ -77,6 +81,7 @@ const TEXT_GUIDE_PARSE_TOOL: LLMToolDef = {
             properties: {
               processName: { type: 'string' },
               processCode: { type: 'string' },
+              description: { type: 'string' },
               fields: {
                 type: 'array',
                 items: {
@@ -91,6 +96,9 @@ const TEXT_GUIDE_PARSE_TOOL: LLMToolDef = {
                       enum: ['text', 'number', 'date', 'select', 'file', 'textarea'],
                     },
                     required: { type: 'boolean' },
+                    description: { type: 'string' },
+                    example: { type: 'string' },
+                    multiple: { type: 'boolean' },
                   },
                 },
               },
@@ -137,6 +145,8 @@ const SYSTEM_PROMPT = [
   'Preserve the user intent and wording as much as possible in each step so downstream rule parsers can still understand the steps.',
   'Support both single-flow and multi-flow guides.',
   'If the guide contains parameter definitions or test samples, preserve them separately as fields and testData.',
+  'For each declared parameter, preserve its explanation and sample value when present.',
+  'If the input contains explicit fields, placeholders, or a sample form that shows how many values the user needs to provide, the returned field count must match that source exactly. Do not add guessed fields and do not drop declared fields.',
   'When multiple flows clearly share login or navigation steps, put those reusable steps into sharedSteps.',
   'Do not invent APIs, selectors, credentials, hidden branches, or field keys.',
   'Do not inject test sample values into the executable steps unless the user explicitly wrote them as part of a step.',
@@ -207,6 +217,8 @@ export class TextGuideLlmParserService {
       '- If the guide only describes one process, return exactly one flow.',
       '- If a step is clearly shared by multiple flows, place it in sharedSteps.',
       '- If parameter definitions are present, store them in fields.',
+      '- Preserve parameter explanations, usage notes, and sample values in each field when the input provides them.',
+      '- If the guide contains explicit fields, placeholders, or an example form showing how many values need to be filled, the number of returned fields must match that source exactly.',
       '- If test/sample values are present, store them in testData instead of hard-coding them into executable steps.',
       '',
       `Connector hint: ${input.connectorName || '(none)'}`,
@@ -334,6 +346,9 @@ export class TextGuideLlmParserService {
           : {}),
         ...(field.type ? { type: field.type } : {}),
         ...(field.required !== undefined ? { required: field.required } : {}),
+        ...(field.description ? { description: String(field.description).trim() } : {}),
+        ...(field.example ? { example: String(field.example).trim() } : {}),
+        ...(field.multiple !== undefined ? { multiple: field.multiple } : {}),
       }))
       .filter((field) => field.label);
   }

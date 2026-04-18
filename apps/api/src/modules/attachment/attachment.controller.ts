@@ -17,6 +17,7 @@ import type { Request, Response } from 'express';
 import { AttachmentService } from './attachment.service';
 import { attachmentUploadInterceptorOptions } from './attachment-upload.config';
 import { RequestAuthService } from '../common/request-auth.service';
+import { normalizeAttachmentFileName } from './attachment.utils';
 
 @ApiTags('attachments')
 @Controller('attachments')
@@ -84,7 +85,7 @@ export class AttachmentController {
     res.setHeader('Content-Type', asset.mimeType || 'application/octet-stream');
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename*=UTF-8''${encodeURIComponent(asset.originalName)}`,
+      `attachment; filename*=UTF-8''${encodeURIComponent(normalizeAttachmentFileName(asset.originalName) || asset.originalName)}`,
     );
     stream.pipe(res);
   }

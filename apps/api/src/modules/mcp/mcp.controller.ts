@@ -6,6 +6,7 @@ import { MCPService } from './mcp.service';
 import { MCPExecutorService } from './mcp-executor.service';
 import { ApiUploadService } from './api-upload.service';
 import { ApiUploadJobService } from './api-upload-job.service';
+import { ADMIN_ONLY_ROLES, requireRoles } from '../common/access-role.util';
 import { RequestAuthService } from '../common/request-auth.service';
 
 @ApiTags('MCP Tools')
@@ -27,6 +28,7 @@ export class MCPController {
     @Query('category') category?: string,
   ) {
     const auth = await this.requestAuth.resolveUser(req, { requireUser: true });
+    requireRoles(auth.roles, ADMIN_ONLY_ROLES, '只有超级管理员可以查看 MCP 工具');
     return this.mcpService.listTools(auth.tenantId, connectorId, category);
   }
 
@@ -38,6 +40,7 @@ export class MCPController {
     @Query('connectorId') connectorId: string,
   ) {
     const auth = await this.requestAuth.resolveUser(req, { requireUser: true });
+    requireRoles(auth.roles, ADMIN_ONLY_ROLES, '只有超级管理员可以查看 MCP 工具');
     return this.mcpService.getTool(auth.tenantId, connectorId, toolName);
   }
 
@@ -49,6 +52,7 @@ export class MCPController {
     @Body() body: { connectorId: string; params: Record<string, any> },
   ) {
     const auth = await this.requestAuth.resolveUser(req, { requireUser: true });
+    requireRoles(auth.roles, ADMIN_ONLY_ROLES, '只有超级管理员可以执行 MCP 工具');
     return this.mcpExecutor.executeTool(
       toolName,
       body.params,
@@ -65,6 +69,7 @@ export class MCPController {
     @Query('connectorId') connectorId: string,
   ) {
     const auth = await this.requestAuth.resolveUser(req, { requireUser: true });
+    requireRoles(auth.roles, ADMIN_ONLY_ROLES, '只有超级管理员可以测试 MCP 工具');
     const tool = await this.mcpService.getTool(auth.tenantId, connectorId, toolName);
 
     if (!tool.testInput) {
@@ -100,6 +105,7 @@ export class MCPController {
       tenantId: body.tenantId,
       requireUser: true,
     });
+    requireRoles(auth.roles, ADMIN_ONLY_ROLES, '只有超级管理员可以上传接口文档');
     const docContent = file ? file.buffer.toString('utf-8') : '';
     const authConfig = JSON.parse(body.authConfig || '{}');
 
@@ -135,6 +141,7 @@ export class MCPController {
       tenantId: body.tenantId,
       requireUser: true,
     });
+    requireRoles(auth.roles, ADMIN_ONLY_ROLES, '只有超级管理员可以上传接口文档');
     return this.apiUploadJobService.uploadAndProcessWithRepair({
       ...body,
       tenantId: auth.tenantId,
@@ -162,6 +169,7 @@ export class MCPController {
       tenantId: body.tenantId,
       requireUser: true,
     });
+    requireRoles(auth.roles, ADMIN_ONLY_ROLES, '只有超级管理员可以创建接口上传任务');
 
     return this.apiUploadJobService.startJob({
       ...body,
@@ -181,6 +189,7 @@ export class MCPController {
       tenantId,
       requireUser: true,
     });
+    requireRoles(auth.roles, ADMIN_ONLY_ROLES, '只有超级管理员可以查看接口上传任务');
 
     return this.apiUploadJobService.getJob(jobId, auth.tenantId, {
       includeContent: includeContent === 'true',
@@ -199,6 +208,7 @@ export class MCPController {
       tenantId,
       requireUser: true,
     });
+    requireRoles(auth.roles, ADMIN_ONLY_ROLES, '只有超级管理员可以查看接口上传任务');
 
     return this.apiUploadJobService.getAttempts(jobId, auth.tenantId, {
       includeContent: includeContent === 'true',
@@ -216,6 +226,7 @@ export class MCPController {
       tenantId,
       requireUser: true,
     });
+    requireRoles(auth.roles, ADMIN_ONLY_ROLES, '只有超级管理员可以查看接口上传历史');
     return this.apiUploadService.getUploadHistory(auth.tenantId, connectorId);
   }
 }

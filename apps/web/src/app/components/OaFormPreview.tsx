@@ -9,6 +9,9 @@ export interface OaFormField {
   displayValue: any;
   type: string;
   required?: boolean;
+  description?: string;
+  example?: string;
+  multiple?: boolean;
   origin?: 'user' | 'derived' | 'prefill';
   tagLabel?: string;
   tagTone?: 'sky' | 'amber' | 'slate';
@@ -193,6 +196,21 @@ export default function OaFormPreview({
                   )}
                 </div>
                 <div className="text-sm leading-6">{renderFieldValue(field)}</div>
+                {field.description ? (
+                  <div className="mt-2 text-xs leading-5 text-slate-600">
+                    说明：{field.description}
+                  </div>
+                ) : null}
+                {field.example ? (
+                  <div className="mt-1 text-xs leading-5 text-slate-500">
+                    示例：{field.example}
+                  </div>
+                ) : null}
+                {field.type === 'file' && field.multiple ? (
+                  <div className="mt-1 text-xs leading-5 text-slate-500">
+                    支持上传多份文件
+                  </div>
+                ) : null}
                 {field.hint ? (
                   <div className="mt-2 text-xs leading-5 text-slate-500">{field.hint}</div>
                 ) : null}

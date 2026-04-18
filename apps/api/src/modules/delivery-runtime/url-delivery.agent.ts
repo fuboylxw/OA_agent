@@ -34,7 +34,7 @@ export class UrlDeliveryAgent implements DeliveryAgent {
       uiHints: input.uiHints,
     });
 
-    if (!prepared.rpaFlow) {
+    if (!prepared.rpaFlow || !this.hasUrlCapability(prepared.rpaFlow.rpaDefinition, input.uiHints, 'submit')) {
       return {
         submitResult: {
           success: false,
@@ -92,7 +92,7 @@ export class UrlDeliveryAgent implements DeliveryAgent {
       uiHints: input.uiHints,
     });
 
-    if (!prepared.rpaFlow) {
+    if (!prepared.rpaFlow || !this.hasUrlCapability(prepared.rpaFlow.rpaDefinition, input.uiHints, 'queryStatus')) {
       return {
         statusResult: {
           status: 'error',
@@ -135,5 +135,45 @@ export class UrlDeliveryAgent implements DeliveryAgent {
       context: prepared,
       submissionId: input.submissionId,
     });
+  }
+
+  private hasUrlCapability(
+    definition: Record<string, any> | undefined,
+    uiHints: Record<string, any>,
+    action: 'submit' | 'queryStatus',
+  ) {
+    const executionModes = (uiHints.executionModes as Record<string, any> | undefined) || {};
+    const explicitUrl = Array.isArray(executionModes[action])
+      && executionModes[action].some((item) => String(item || '').trim().toLowerCase() === 'url');
+    const runtime = definition?.runtime as Record<string, any> | undefined;
+    const networkRequest = action === 'submit'
+      ? this.hasNetworkRequest(runtime?.networkSubmit)
+      : this.hasNetworkRequest(runtime?.networkStatus);
+
+    return explicitUrl || (this.isDirectLinkDefinition(definition) && networkRequest);
+  }
+
+  private isDirectLinkDefinition(definition: Record<string, any> | undefined) {
+    if (!definition || typeof definition !== 'object') {
+      return false;
+    }
+
+    const metadata = definition.metadata && typeof definition.metadata === 'object'
+      ? definition.metadata as Record<string, any>
+      : {};
+    const accessMode = String(definition.accessMode || metadata.accessMode || '').trim().toLowerCase();
+    const sourceType = String(definition.sourceType || metadata.sourceType || '').trim().toLowerCase();
+
+    return accessMode === 'direct_link' || sourceType === 'direct_link';
+  }
+
+  private hasNetworkRequest(value: unknown) {
+    return Boolean(
+      value
+      && typeof value === 'object'
+      && !Array.isArray(value)
+      && typeof (value as Record<string, any>).url === 'string'
+      && (value as Record<string, any>).url.trim(),
+    );
   }
 }

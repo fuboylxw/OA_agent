@@ -13,8 +13,8 @@
     "prisma:generate": "corepack pnpm exec prisma generate --schema ../../prisma/schema.prisma",
     "prisma:migrate": "corepack pnpm exec prisma migrate dev --schema ../../prisma/schema.prisma",
     "prisma:seed": "corepack pnpm exec tsx ../../prisma/seed.ts",
-    "seed:xpu-connector": "corepack pnpm exec tsx scripts/ensure-xpu-whitelist-connector.ts",
-    "verify:xpu-whitelist-login": "corepack pnpm exec tsx scripts/verify-xpu-whitelist-login.ts"
+    "debug:xpu:seed-connector": "corepack pnpm exec tsx scripts/ensure-xpu-whitelist-connector.ts",
+    "debug:xpu:verify-whitelist-login": "corepack pnpm exec tsx scripts/verify-xpu-whitelist-login.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",

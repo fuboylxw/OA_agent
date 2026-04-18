@@ -17,14 +17,24 @@ import { AdapterRuntimeService } from '../adapter-runtime/adapter-runtime.servic
 import { ChatSessionProcessService } from '../common/chat-session-process.service';
 import { AttachmentBindingService } from '../attachment/attachment-binding.service';
 import { AttachmentService } from '../attachment/attachment.service';
+import { normalizeAttachmentRef } from '../attachment/attachment.utils';
 import { DeliveryOrchestratorService } from '../delivery-runtime/delivery-orchestrator.service';
 import { normalizeExternalSubmissionId } from '../delivery-runtime/rpa-submit-confirmation.util';
 import {
+  buildConversationRestoreState,
+  buildChatRetentionWindow,
+  getRestoreStatusForProcess,
+  isConversationRestorable,
+} from '../common/chat-retention.util';
+import {
+  inferSubmissionCompletionKind,
   getSubmissionStatusText,
   isActiveSubmissionStatus,
   isUnsupportedStatusQueryResult,
   mapExternalStatusToSubmissionStatus,
+  normalizeSubmissionStatus,
 } from '../common/submission-status.util';
+import { mapSubmissionStatusToChatProcessStatus } from '../common/chat-process-state';
 
 export interface SubmissionStatusEvent {
   submissionId: string;
@@ -32,6 +42,44 @@ export interface SubmissionStatusEvent {
   userId: string;
   status: string;
   statusText: string;
+}
+
+export interface SubmissionWorkbenchItem {
+  id: string;
+  sourceType: 'submission' | 'draft';
+  draftId?: string | null;
+  submissionId?: string | null;
+  oaSubmissionId?: string | null;
+  processCode?: string;
+  processName?: string;
+  processCategory?: string;
+  sessionId?: string | null;
+  restoreStatus?: string | null;
+  restoreExpiresAt?: Date | string | null;
+  retainedUntil?: Date | string | null;
+  canRestoreConversation?: boolean;
+  status: string;
+  statusText?: string;
+  formData: Record<string, any>;
+  formDataWithLabels?: Array<{
+    key: string;
+    label: string;
+    value: any;
+    displayValue: any;
+    type: string;
+    required?: boolean;
+  }>;
+  user?: { id: string; username: string; displayName: string };
+  submittedAt?: Date | null;
+  createdAt: Date;
+  updatedAt?: Date;
+}
+
+function toFormDataRecord(value: unknown): Record<string, any> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+  return value as Record<string, any>;
 }
 
 interface SubmitInput {
@@ -183,6 +231,11 @@ export class SubmissionService {
         idempotencyKey: input.idempotencyKey,
         formData: draft.formData,
         status: 'pending',
+        sessionId: draft.sessionId || null,
+        statusCategory: 'active',
+        restoreStatus: 'available',
+        restoreExpiresAt: null,
+        retainedUntil: null,
       },
     });
     await this.createSubmissionEvent({
@@ -300,9 +353,11 @@ export class SubmissionService {
       });
       const completionKind = this.resolveCompletionKind(result);
       const nextSubmissionStatus = result.success
-        ? (completionKind === 'draft' ? 'pending' : 'submitted')
+        ? (completionKind === 'draft' ? 'draft_saved' : 'submitted')
         : 'failed';
       const normalizedOaSubmissionId = this.normalizeOaSubmissionId(result.submissionId);
+      const nextProcessStatus = mapSubmissionStatusToChatProcessStatus(nextSubmissionStatus);
+      const restoreState = buildConversationRestoreState(nextProcessStatus);
 
       // Update submission
       await this.prisma.submission.update({
@@ -313,6 +368,10 @@ export class SubmissionService {
           submitResult: persistedResult as any,
           errorMsg: result.errorMessage,
           submittedAt: result.success && completionKind !== 'draft' ? new Date() : undefined,
+          statusCategory: restoreState.statusCategory,
+          restoreStatus: restoreState.restoreStatus,
+          restoreExpiresAt: restoreState.restoreExpiresAt,
+          retainedUntil: restoreState.retainedUntil,
         },
       });
       const persisted = await this.prisma.submission.findUnique({
@@ -336,6 +395,13 @@ export class SubmissionService {
           status: persisted.status,
           payload: persisted.submitResult as Record<string, any> | undefined,
         });
+        this.statusUpdates$.next({
+          submissionId,
+          tenantId: persisted.tenantId,
+          userId: originalSubmission.userId,
+          status: persisted.status,
+          statusText: getSubmissionStatusText(persisted.status),
+        });
       }
 
       await this.chatSessionProcessService.syncSubmissionStatusToSession({
@@ -357,6 +423,7 @@ export class SubmissionService {
         data: {
           status: 'failed',
           errorMsg: error.message,
+          ...buildConversationRestoreState(mapSubmissionStatusToChatProcessStatus('failed')),
         },
       });
       await this.createSubmissionEvent({
@@ -366,6 +433,13 @@ export class SubmissionService {
         eventSource: 'internal',
         status: 'failed',
         payload: { errorMessage: error.message },
+      });
+      this.statusUpdates$.next({
+        submissionId,
+        tenantId: failedSubmission.tenantId,
+        userId: failedSubmission.userId,
+        status: 'failed',
+        statusText: getSubmissionStatusText('failed'),
       });
 
       await this.chatSessionProcessService.syncSubmissionStatusToSession({
@@ -403,19 +477,45 @@ export class SubmissionService {
 
     if (!submission) return null;
 
-    const template = await this.prisma.processTemplate.findUnique({
-      where: { id: submission.templateId },
+    const [template, draft] = await Promise.all([
+      this.prisma.processTemplate.findUnique({
+        where: { id: submission.templateId },
+      }),
+      submission.draftId
+        ? this.prisma.processDraft.findUnique({
+            where: { id: submission.draftId },
+            select: { sessionId: true },
+          })
+        : Promise.resolve(null),
+    ]);
+
+    const effectiveStatus = normalizeSubmissionStatus(submission.status, {
+      submitResult: submission.submitResult,
     });
+    const processStatus = mapSubmissionStatusToChatProcessStatus(effectiveStatus);
+    const sessionId = (submission as any).sessionId || draft?.sessionId || null;
+    const restoreStatus = ((submission as any).restoreStatus || getRestoreStatusForProcess(processStatus)) as string;
 
     // Fire-and-forget: don't block the detail response waiting for external OA
     void this.refreshTrackedSubmissionStatuses([submission], new Map([[submission.templateId, template]])).catch(() => {});
 
     return {
       ...submission,
+      status: effectiveStatus,
       processCode: template?.processCode,
       processName: template?.processName,
       processCategory: template?.processCategory,
-      statusText: getSubmissionStatusText(submission.status),
+      statusText: getSubmissionStatusText(effectiveStatus),
+      sessionId,
+      restoreStatus,
+      restoreExpiresAt: (submission as any).restoreExpiresAt || null,
+      retainedUntil: (submission as any).retainedUntil || null,
+      canRestoreConversation: Boolean(sessionId) && isConversationRestorable({
+        status: effectiveStatus,
+        restoreStatus,
+        restoreExpiresAt: (submission as any).restoreExpiresAt || null,
+        retainedUntil: (submission as any).retainedUntil || null,
+      }),
       formDataWithLabels: this.buildFormDataWithLabels(
         submission.formData as Record<string, any>,
         template,
@@ -424,6 +524,10 @@ export class SubmissionService {
   }
 
   async listSubmissions(tenantId: string, userId?: string) {
+    return this.listWorkbenchItems(tenantId, userId);
+  }
+
+  async listWorkbenchItems(tenantId: string, userId?: string): Promise<SubmissionWorkbenchItem[]> {
     const submissions = await this.prisma.submission.findMany({
       where: {
         tenantId,
@@ -447,27 +551,120 @@ export class SubmissionService {
     // Fire-and-forget: refresh statuses in background, don't block the list response
     void this.refreshTrackedSubmissionStatuses(submissions, templateMap).catch(() => {});
 
-    return submissions.map(s => {
+    const draftIds = submissions.map((s) => s.draftId).filter((value): value is string => Boolean(value));
+    const drafts = draftIds.length > 0
+      ? await this.prisma.processDraft.findMany({
+          where: { id: { in: draftIds } },
+          select: { id: true, sessionId: true },
+        })
+      : [];
+    const draftSessionMap = new Map(drafts.map((draft) => [draft.id, draft.sessionId || null]));
+    const submissionItems: SubmissionWorkbenchItem[] = submissions.map(s => {
       const template = templateMap.get(s.templateId);
+      const effectiveStatus = normalizeSubmissionStatus(s.status, {
+        submitResult: s.submitResult,
+      });
+      const sessionId = s.sessionId || (s.draftId ? draftSessionMap.get(s.draftId) || null : null);
+      const processStatus = mapSubmissionStatusToChatProcessStatus(effectiveStatus);
+      const restoreStatus = (s.restoreStatus || getRestoreStatusForProcess(processStatus)) as string;
+      const canRestoreConversation = Boolean(sessionId) && isConversationRestorable({
+        status: effectiveStatus,
+        restoreStatus,
+        restoreExpiresAt: s.restoreExpiresAt,
+        retainedUntil: s.retainedUntil,
+      });
 
       return {
         id: s.id,
+        sourceType: 'submission',
+        draftId: s.draftId || null,
+        submissionId: s.id,
         oaSubmissionId: s.oaSubmissionId,
         processCode: template?.processCode,
         processName: template?.processName,
         processCategory: template?.processCategory,
-        status: s.status,
-        statusText: getSubmissionStatusText(s.status),
-        formData: s.formData,
+        status: effectiveStatus,
+        statusText: getSubmissionStatusText(effectiveStatus),
+        formData: toFormDataRecord(s.formData),
+        sessionId,
+        restoreStatus,
+        restoreExpiresAt: s.restoreExpiresAt,
+        retainedUntil: s.retainedUntil,
+        canRestoreConversation,
         formDataWithLabels: this.buildFormDataWithLabels(
-          s.formData as Record<string, any>,
+          toFormDataRecord(s.formData),
           template,
         ),
         user: s.user,
         submittedAt: s.submittedAt,
         createdAt: s.createdAt,
+        updatedAt: s.updatedAt,
       };
     });
+
+    const submissionDraftIds = new Set(
+      submissions
+        .map((submission) => submission.draftId)
+        .filter((value): value is string => Boolean(value)),
+    );
+    const draftsOnly = await this.prisma.processDraft.findMany({
+      where: {
+        tenantId,
+        ...(userId && { userId }),
+        status: { in: ['editing', 'ready'] },
+        ...(submissionDraftIds.size > 0 ? { id: { notIn: [...submissionDraftIds] } } : {}),
+      },
+      include: {
+        template: true,
+      },
+      orderBy: { updatedAt: 'desc' },
+      take: 50,
+    });
+
+    const draftItems: SubmissionWorkbenchItem[] = draftsOnly.map((draft) => {
+      const processStatus = draft.status === 'ready'
+        ? mapSubmissionStatusToChatProcessStatus('draft_saved')
+        : mapSubmissionStatusToChatProcessStatus('pending');
+      const restoreStatus = getRestoreStatusForProcess(processStatus);
+      const draftWorkbenchStatus = draft.status === 'ready' ? 'draft_saved' : 'editing';
+      return {
+        id: draft.id,
+        sourceType: 'draft',
+        draftId: draft.id,
+        submissionId: null,
+        oaSubmissionId: null,
+        processCode: draft.template?.processCode,
+        processName: draft.template?.processName,
+        processCategory: draft.template?.processCategory,
+        status: draftWorkbenchStatus,
+        statusText: draft.status === 'ready' ? '待确认提交' : '待补充信息',
+        formData: toFormDataRecord(draft.formData),
+        sessionId: draft.sessionId || null,
+        restoreStatus,
+        restoreExpiresAt: null,
+        retainedUntil: null,
+        canRestoreConversation: Boolean(draft.sessionId) && isConversationRestorable({
+          status: processStatus,
+          restoreStatus,
+          restoreExpiresAt: null,
+          retainedUntil: null,
+        }),
+        formDataWithLabels: this.buildFormDataWithLabels(
+          toFormDataRecord(draft.formData),
+          draft.template,
+        ),
+        createdAt: draft.createdAt,
+        updatedAt: draft.updatedAt,
+      };
+    });
+
+    return [...submissionItems, ...draftItems]
+      .sort((a, b) => {
+        const left = new Date(a.submittedAt || a.updatedAt || a.createdAt).getTime();
+        const right = new Date(b.submittedAt || b.updatedAt || b.createdAt).getTime();
+        return right - left;
+      })
+      .slice(0, 50);
   }
 
   private buildFormDataWithLabels(
@@ -479,7 +676,11 @@ export class SubmissionService {
 
     return Object.entries(formData || {}).map(([key, value]) => {
       const field = fields.find((f: any) => f.key === key);
-      let displayValue = value;
+      const normalizedValue = this.normalizeAttachmentFieldValue(value);
+      let displayValue = normalizedValue;
+      if (Array.isArray(normalizedValue) && normalizedValue.length > 0 && normalizedValue[0]?.fileName) {
+        displayValue = normalizedValue.map((file: any) => file.fileName).join('、');
+      }
       if (field?.options && Array.isArray(field.options)) {
         const option = field.options.find((o: any) => o.value === value);
         if (option) displayValue = option.label;
@@ -487,12 +688,20 @@ export class SubmissionService {
       return {
         key,
         label: field?.label || key,
-        value,
+        value: normalizedValue,
         displayValue,
         type: field?.type || 'text',
         required: Boolean(field?.required),
       };
     });
+  }
+
+  private normalizeAttachmentFieldValue(value: any) {
+    if (!Array.isArray(value) || value.length === 0 || !value[0]?.fileName) {
+      return value;
+    }
+
+    return value.map((item: any) => normalizeAttachmentRef(item) || item);
   }
 
   async cancel(submissionId: string, tenantId: string, userId: string, traceId: string) {
@@ -505,7 +714,7 @@ export class SubmissionService {
       throw new BadRequestException('You can only cancel your own submissions');
     }
 
-    if (!['pending', 'submitted'].includes(submission.status)) {
+    if (!['pending', 'submitted', 'draft_saved'].includes(submission.status)) {
       throw new BadRequestException('Submission cannot be cancelled in current status');
     }
 
@@ -798,9 +1007,7 @@ export class SubmissionService {
   }
 
   private resolveCompletionKind(result: Record<string, any>) {
-    const completionKind = ((result.metadata as Record<string, any> | undefined)?.request?.completionKind)
-      || ((result.metadata as Record<string, any> | undefined)?.completionKind);
-    return completionKind === 'draft' ? 'draft' : 'submitted';
+    return inferSubmissionCompletionKind(result) === 'draft' ? 'draft' : 'submitted';
   }
 
   private async refreshTrackedSubmissionStatuses(

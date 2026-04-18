@@ -423,6 +423,8 @@ describe('UrlNetworkSubmitService', () => {
           csrfToken: '',
           saveDraft: {
             action: 'https://oa2023.xpu.edu.cn/seeyon/collaboration/collaboration.do?method=saveDraft',
+            method: 'post',
+            bodyMode: 'form',
             fields: {
               _json_params: '{"demo":true}',
             },
@@ -459,14 +461,11 @@ describe('UrlNetworkSubmitService', () => {
           },
           networkSubmit: {
             url: '{{preflight.saveDraft.action}}',
-            method: 'POST',
-            bodyMode: 'form',
+            method: '{{preflight.saveDraft.method}}',
+            bodyMode: '{{preflight.saveDraft.bodyMode}}',
             successMode: 'http2xx',
             completionKind: 'draft',
-            body: {
-              CSRFTOKEN: { source: 'preflight.csrfToken', default: '' },
-              _json_params: { source: 'preflight.saveDraft.fields._json_params' },
-            },
+            body: { source: 'preflight.saveDraft.fields' },
           },
         },
         navigation: {},
@@ -488,11 +487,118 @@ describe('UrlNetworkSubmitService', () => {
         Cookie: 'JSESSIONID=oa-session',
         'Content-Type': 'application/x-www-form-urlencoded',
       }),
-      data: 'CSRFTOKEN=&_json_params=%7B%22demo%22%3Atrue%7D',
+      data: '_json_params=%7B%22demo%22%3Atrue%7D',
     }));
     expect(result.submitResult).toMatchObject({
       success: true,
     });
     expect(result.summary).toBe('请假申请 draft saved through URL network runtime');
+  });
+
+  it('supports multipart submit by merging captured fields with uploaded attachments', async () => {
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      data: {
+        ok: true,
+      },
+    });
+    mockedAxios.create.mockReturnValue({
+      request,
+    } as any);
+
+    const service = new UrlNetworkSubmitService({
+      run: jest.fn().mockResolvedValue({
+        success: true,
+        extractedValues: {
+          submitCapture: {
+            action: 'https://oa.example.com/form/seal/submit',
+            method: 'post',
+            bodyMode: 'multipart',
+            fields: {
+              subject: '印章申请',
+              attachmentRealField: 'seal.pdf',
+            },
+          },
+          attachmentFieldMap: {
+            sealAttachment: 'attachmentRealField',
+          },
+        },
+      }),
+    } as any);
+
+    await service.execute({
+      action: 'submit',
+      connectorId: 'connector-1',
+      processCode: 'expense_submit',
+      processName: '西安工程大学用印申请单',
+      payload: {
+        formData: {
+          subject: '印章申请',
+        },
+        attachments: [
+          {
+            filename: 'seal.pdf',
+            mimeType: 'application/pdf',
+            fieldKey: 'sealAttachment',
+            content: Buffer.from('seal-file-content').toString('base64'),
+          },
+        ],
+      },
+      context: {
+        path: 'url',
+        action: 'submit',
+        authConfig: {
+          cookie: 'SESSION=abc123',
+        },
+        ticket: {
+          jumpUrl: 'https://oa.example.com/form/seal/new',
+        },
+        runtime: {
+          preflight: {
+            steps: [
+              { type: 'evaluate', builtin: 'capture_form_submit' },
+            ],
+          },
+          networkSubmit: {
+            url: '{{preflight.submitCapture.action}}',
+            method: '{{preflight.submitCapture.method}}',
+            bodyMode: '{{preflight.submitCapture.bodyMode}}',
+            successMode: 'http2xx',
+            body: { source: 'preflight.submitCapture.fields' },
+          },
+        },
+        navigation: {},
+        rpaFlow: {
+          processCode: 'expense_submit',
+          processName: '西安工程大学用印申请单',
+          rpaDefinition: {
+            processCode: 'expense_submit',
+            processName: '西安工程大学用印申请单',
+          },
+        },
+      } as any,
+    });
+
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({
+      method: 'POST',
+      url: 'https://oa.example.com/form/seal/submit',
+      headers: expect.not.objectContaining({
+        'Content-Type': expect.anything(),
+      }),
+      data: expect.anything(),
+    }));
+
+    const formData = request.mock.calls[0][0].data as any;
+    expect(Array.from((formData as any).entries())).toEqual(
+      expect.arrayContaining([
+        ['subject', '印章申请'],
+        [
+          'attachmentRealField',
+          expect.objectContaining({
+            name: 'seal.pdf',
+          }),
+        ],
+      ]),
+    );
   });
 });

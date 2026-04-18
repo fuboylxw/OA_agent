@@ -202,7 +202,7 @@ export class BrowserActionExecutor {
       role: this.mapStepRole(step),
       selector: step.target?.kind === 'selector' ? step.target.value : step.selector,
       fieldKey: step.fieldKey,
-      label: step.description,
+      label: step.target?.label || step.target?.value || step.description,
       text: step.target?.kind === 'text' ? step.target.value : undefined,
       targetHints: step.target ? [step.target] : undefined,
     };

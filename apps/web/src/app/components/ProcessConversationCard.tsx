@@ -14,14 +14,22 @@ export interface ProcessCard {
   processName: string;
   processCategory?: string | null;
   processStatus?: string;
-  stage: 'collecting' | 'confirming' | 'executing' | 'submitted' | 'rework' | 'completed' | 'failed' | 'cancelled';
+  stage: 'collecting' | 'confirming' | 'executing' | 'draft' | 'submitted' | 'rework' | 'completed' | 'failed' | 'cancelled';
   actionState: 'available' | 'readonly';
   canContinue: boolean;
   statusText: string;
   summary?: string;
   formData?: Record<string, any>;
   fields: OaFormField[];
-  missingFields?: Array<{ key: string; label: string; question: string; type?: string }>;
+  missingFields?: Array<{
+    key: string;
+    label: string;
+    question: string;
+    type?: string;
+    description?: string;
+    example?: string;
+    multiple?: boolean;
+  }>;
   actionButtons?: ActionButton[];
   needsAttachment?: boolean;
   draftId?: string;
@@ -40,6 +48,8 @@ function getTone(stage: ProcessCard['stage']): 'blue' | 'amber' | 'green' | 'red
       return 'amber';
     case 'executing':
       return 'blue';
+    case 'draft':
+      return 'amber';
     case 'submitted':
       return 'blue';
     case 'rework':
@@ -70,11 +80,13 @@ export default function ProcessConversationCard({
   card,
   actionButtons,
   onAction,
+  onUploadField,
   disabled = false,
 }: {
   card: ProcessCard;
   actionButtons?: ActionButton[];
   onAction?: (action: string) => void;
+  onUploadField?: (fieldKey: string) => void;
   disabled?: boolean;
 }) {
   const effectiveButtons = card.actionState === 'available' ? (actionButtons || card.actionButtons || []) : [];
@@ -110,6 +122,16 @@ export default function ProcessConversationCard({
                   {index + 1}
                 </span>
                 {field.question}
+                {field.type === 'file' ? (
+                  <button
+                    type="button"
+                    onClick={() => onUploadField?.(field.key)}
+                    disabled={disabled}
+                    className="ml-3 rounded-full border border-sky-200 bg-white px-3 py-1 text-xs font-medium text-sky-700 transition-colors hover:bg-sky-50 disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    上传{field.label}
+                  </button>
+                ) : null}
               </li>
             ))}
           </ol>
@@ -137,6 +159,8 @@ export default function ProcessConversationCard({
               ? card.stage === 'rework'
                 ? '当前申请已被退回，请根据驳回原因在对话框继续处理。'
                 : '当前流程可继续办理，请在对话框继续补充信息。'
+              : card.stage === 'draft'
+                ? '当前申请已保存到 OA 待发箱，尚未正式送审。'
               : card.stage === 'submitted'
                 ? '当前申请已提交到 OA，等待审批结果。'
                 : '历史记录仅供查看，不能再次操作。'}

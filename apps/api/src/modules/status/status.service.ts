@@ -12,7 +12,10 @@ import { DeliveryOrchestratorService } from '../delivery-runtime/delivery-orches
 import {
   isUnsupportedStatusQueryResult,
   mapExternalStatusToSubmissionStatus,
+  normalizeSubmissionStatus,
 } from '../common/submission-status.util';
+import { mapSubmissionStatusToChatProcessStatus } from '../common/chat-process-state';
+import { buildConversationRestoreState } from '../common/chat-retention.util';
 
 @Injectable()
 export class StatusService {
@@ -48,7 +51,9 @@ export class StatusService {
 
     // If we have an OA submission ID, query the OA system
     let oaStatus = null;
-    let effectiveStatus = submission.status;
+    let effectiveStatus = normalizeSubmissionStatus(submission.status, {
+      submitResult: submission.submitResult,
+    }) || submission.status;
     let effectiveStatusRecords = submission.statusRecords;
     let effectiveEvents = submission.events;
     if (submission.oaSubmissionId) {
@@ -124,6 +129,9 @@ export class StatusService {
           where: { id: submission.id },
           data: {
             status: mappedStatus,
+            ...buildConversationRestoreState(
+              mapSubmissionStatusToChatProcessStatus(mappedStatus),
+            ),
           },
         });
 
@@ -182,7 +190,9 @@ export class StatusService {
     return submissions.map(s => ({
       id: s.id,
       templateId: s.templateId,
-      status: s.status,
+      status: normalizeSubmissionStatus(s.status, {
+        submitResult: s.submitResult,
+      }) || s.status,
       oaSubmissionId: s.oaSubmissionId,
       createdAt: s.createdAt,
       submittedAt: s.submittedAt,
@@ -249,10 +259,13 @@ export class StatusService {
 
     if (submission.events) {
       for (const event of submission.events) {
+        const description = event.eventType === 'draft_saved'
+          ? '事件: 已保存到 OA 待发箱'
+          : `事件: ${event.eventType}`;
         timeline.push({
           timestamp: event.eventTime,
           status: event.status,
-          description: `事件: ${event.eventType}`,
+          description,
         });
       }
     }

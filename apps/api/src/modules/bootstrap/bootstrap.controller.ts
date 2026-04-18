@@ -3,6 +3,7 @@ import { ApiTags, ApiOperation } from '@nestjs/swagger';
 import type { Request } from 'express';
 import { BootstrapService } from './bootstrap.service';
 import { CreateBootstrapJobDto } from './dto/create-bootstrap-job.dto';
+import { ADMIN_ONLY_ROLES, requireRoles } from '../common/access-role.util';
 import { RequestAuthService } from '../common/request-auth.service';
 
 @ApiTags('bootstrap')
@@ -20,6 +21,7 @@ export class BootstrapController {
     @Body() dto: CreateBootstrapJobDto,
   ) {
     const auth = this.requestAuth.resolveTenant(req, dto.tenantId);
+    requireRoles(auth.roles, ADMIN_ONLY_ROLES, '只有超级管理员可以创建初始化任务');
     return this.bootstrapService.createJob({
       ...dto,
       tenantId: auth.tenantId,
@@ -33,6 +35,7 @@ export class BootstrapController {
     @Param('id') id: string,
   ) {
     const auth = this.requestAuth.resolveTenant(req);
+    requireRoles(auth.roles, ADMIN_ONLY_ROLES, '只有超级管理员可以查看初始化任务');
     return this.bootstrapService.getJob(id, auth.tenantId);
   }
 
@@ -43,6 +46,7 @@ export class BootstrapController {
     @Query('tenantId') tenantId: string,
   ) {
     const auth = this.requestAuth.resolveTenant(req, tenantId);
+    requireRoles(auth.roles, ADMIN_ONLY_ROLES, '只有超级管理员可以查看初始化任务');
     return this.bootstrapService.listJobs(auth.tenantId);
   }
 
@@ -53,6 +57,7 @@ export class BootstrapController {
     @Param('id') id: string,
   ) {
     const auth = this.requestAuth.resolveTenant(req);
+    requireRoles(auth.roles, ADMIN_ONLY_ROLES, '只有超级管理员可以查看初始化报告');
     return this.bootstrapService.getReport(id, auth.tenantId);
   }
 
@@ -72,10 +77,12 @@ export class BootstrapController {
       accessMode?: 'backend_api' | 'direct_link' | 'text_guide';
       bootstrapMode?: 'api_only' | 'rpa_only' | 'hybrid';
       oaUrl?: string;
+      identityScope?: 'teacher' | 'student' | 'both';
       authConfig?: Record<string, any>;
     },
   ) {
     const auth = this.requestAuth.resolveTenant(req);
+    requireRoles(auth.roles, ADMIN_ONLY_ROLES, '只有超级管理员可以重新激活初始化任务');
     return this.bootstrapService.reactivate(id, auth.tenantId, body.mode, {
       apiDocContent: body.apiDocContent,
       apiDocUrl: body.apiDocUrl,
@@ -86,6 +93,7 @@ export class BootstrapController {
       accessMode: body.accessMode,
       bootstrapMode: body.bootstrapMode,
       oaUrl: body.oaUrl,
+      identityScope: body.identityScope,
       authConfig: body.authConfig,
     });
   }
@@ -97,6 +105,7 @@ export class BootstrapController {
     @Param('id') id: string,
   ) {
     const auth = this.requestAuth.resolveTenant(req);
+    requireRoles(auth.roles, ADMIN_ONLY_ROLES, '只有超级管理员可以删除初始化任务');
     return this.bootstrapService.deleteJob(id, auth.tenantId);
   }
 }

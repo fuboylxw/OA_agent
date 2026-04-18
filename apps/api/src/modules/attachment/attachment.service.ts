@@ -13,6 +13,7 @@ import { AttachmentStorageService } from './attachment-storage.service';
 import type { AttachmentBindScope, AttachmentPayloadItem, AttachmentRef } from './attachment.types';
 import {
   collectAttachmentRefs,
+  normalizeAttachmentFileName,
   normalizeAttachmentRef,
   omitAttachmentFields,
 } from './attachment.utils';
@@ -44,7 +45,12 @@ export class AttachmentService {
 
     for (const file of input.files) {
       const assetId = uuidv4();
-      const persisted = await this.storageService.persistUploadedFile(file, assetId);
+      const originalName = normalizeAttachmentFileName(file.originalname) || file.originalname || `${assetId}.bin`;
+      const normalizedFile = {
+        ...file,
+        originalname: originalName,
+      } as Express.Multer.File;
+      const persisted = await this.storageService.persistUploadedFile(normalizedFile, assetId);
       const previewStatus = this.previewService.getInitialPreviewStatus(file.mimetype, persisted.extension);
 
       const asset = await this.prisma.attachmentAsset.create({
@@ -54,7 +60,7 @@ export class AttachmentService {
           uploaderId: input.userId,
           storageType: this.storageService.getStorageType(),
           storageKey: persisted.storageKey,
-          originalName: file.originalname,
+          originalName,
           extension: persisted.extension,
           mimeType: file.mimetype || 'application/octet-stream',
           size: file.size,
@@ -215,12 +221,13 @@ export class AttachmentService {
     for (const entry of refs) {
       const asset = await this.getAccessibleAsset(entry.ref.attachmentId, input.tenantId, input.userId);
       const exists = await this.storageService.exists(asset.storageKey);
+      const originalName = normalizeAttachmentFileName(asset.originalName) || asset.originalName;
       if (!exists) {
-        throw new BadRequestException(`附件文件不存在：${asset.originalName}`);
+        throw new BadRequestException(`附件文件不存在：${originalName}`);
       }
 
       attachments.push({
-        filename: asset.originalName,
+        filename: originalName,
         mimeType: asset.mimeType,
         content: await this.storageService.readBuffer(asset.storageKey),
         fieldKey: entry.fieldKey,
@@ -262,11 +269,12 @@ export class AttachmentService {
       asset.extension,
     )) as any;
     const apiBaseUrl = this.getApiBaseUrl();
+    const originalName = normalizeAttachmentFileName(asset.originalName) || asset.originalName;
 
     return {
       attachmentId: asset.id,
       fileId: asset.id,
-      fileName: asset.originalName,
+      fileName: originalName,
       fileSize: asset.size,
       mimeType: asset.mimeType,
       fieldKey: overrides?.fieldKey || null,

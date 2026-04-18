@@ -5,6 +5,7 @@ import {
   ReworkHint,
   mapSubmissionStatusToChatProcessStatus,
 } from './chat-process-state';
+import { normalizeSubmissionStatus } from './submission-status.util';
 
 @Injectable()
 export class ChatSessionProcessService {
@@ -40,7 +41,10 @@ export class ChatSessionProcessService {
     const metadata = ((session.metadata || {}) as Record<string, any>) || {};
     const reason = this.extractStatusReason(input.payload);
     const reworkHint = this.deriveReworkHint(reason, input.payload);
-    const nextProcessStatus = mapSubmissionStatusToChatProcessStatus(submission.status);
+    const effectiveSubmissionStatus = normalizeSubmissionStatus(submission.status, {
+      submitResult: submission.submitResult,
+    }) || submission.status;
+    const nextProcessStatus = mapSubmissionStatusToChatProcessStatus(effectiveSubmissionStatus);
     const nextMetadata = {
       ...metadata,
       processId: metadata.processId || submission.draftId || session.id,
@@ -52,7 +56,7 @@ export class ChatSessionProcessService {
       currentFormData: (submission.formData as Record<string, any>) || metadata.currentFormData || {},
       currentSubmissionId: submission.id,
       currentOaSubmissionId: submission.oaSubmissionId || null,
-      lastSubmissionStatus: submission.status,
+      lastSubmissionStatus: effectiveSubmissionStatus,
       processStatus: nextProcessStatus,
       processUpdatedAt: new Date().toISOString(),
       missingFields: [],
@@ -129,6 +133,8 @@ export class ChatSessionProcessService {
     const submissionLine = input.oaSubmissionId ? `\n申请编号：${input.oaSubmissionId}` : '';
 
     switch (input.processStatus) {
+      case ChatProcessStatus.DRAFT_SAVED:
+        return `${input.processName}已保存到 OA 待发箱，尚未正式送审。${submissionLine}`;
       case ChatProcessStatus.COMPLETED:
         return `${input.processName}已在 OA 系统审批通过，当前申请已完成。${submissionLine}`;
       case ChatProcessStatus.CANCELLED:

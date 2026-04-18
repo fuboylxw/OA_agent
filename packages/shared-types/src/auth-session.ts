@@ -7,6 +7,7 @@ export interface AuthSessionClaims {
   displayName: string;
   roles: string[];
   tenantId: string;
+  identityType?: string;
   iat: number;
   exp: number;
 }
@@ -17,6 +18,7 @@ export interface IssueAuthSessionInput {
   displayName: string;
   roles: string[];
   tenantId: string;
+  identityType?: string;
 }
 
 export function issueAuthSessionToken(
@@ -32,6 +34,7 @@ export function issueAuthSessionToken(
     displayName: input.displayName,
     roles: input.roles,
     tenantId: input.tenantId,
+    ...(input.identityType ? { identityType: input.identityType } : {}),
     iat: now,
     exp: now + ttlSeconds,
   };

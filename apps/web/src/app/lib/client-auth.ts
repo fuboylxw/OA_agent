@@ -212,6 +212,15 @@ export function buildLoginHref(returnTo?: string | null) {
   return `/login?returnTo=${encodeURIComponent(normalized)}`;
 }
 
+export function buildLoggedOutLoginHref(returnTo?: string | null) {
+  const normalized = normalizeClientReturnTo(returnTo);
+  if (normalized === '/') {
+    return '/login?loggedOut=1';
+  }
+
+  return `/login?loggedOut=1&returnTo=${encodeURIComponent(normalized)}`;
+}
+
 export function clearClientAuth() {
   if (typeof window === 'undefined') {
     return;

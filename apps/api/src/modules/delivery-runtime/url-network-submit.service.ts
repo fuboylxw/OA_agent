@@ -28,6 +28,14 @@ interface UrlNetworkStatusInput extends UrlNetworkBaseInput {
 
 type UrlNetworkExecutionInput = UrlNetworkSubmitInput | UrlNetworkStatusInput;
 
+interface UrlNetworkAttachmentPayload {
+  filename?: string;
+  name?: string;
+  content?: string | Buffer;
+  mimeType?: string;
+  fieldKey?: string | null;
+}
+
 interface PreflightResult {
   extractedValues: Record<string, any>;
   session?: {
@@ -196,6 +204,7 @@ export class UrlNetworkSubmitService {
       auth,
       authPlatform: platformConfig,
       formData: input.payload.formData || {},
+      attachments: Array.isArray(input.payload.attachments) ? input.payload.attachments : [],
       payload: input.payload,
       preflight: preflightValues,
       page: preflightValues,
@@ -208,9 +217,10 @@ export class UrlNetworkSubmitService {
     context: Record<string, any>,
     deliveryContext: UrlDeliveryExecutionContext,
   ): AxiosRequestConfig {
-    const method = String(definition.method || 'POST').toUpperCase();
+    const method = String(this.interpolateTemplate(String(definition.method || 'POST'), context) || 'POST').toUpperCase();
     const url = this.interpolateTemplate(definition.url, context);
     const params = this.applyMapping(definition.query, context);
+    const bodyMode = this.resolveBodyMode(definition.bodyMode, context);
     const headers = {
       ...this.normalizeStringMap(deliveryContext.runtime.headers || {}, context),
       ...this.normalizeStringMap(definition.headers || {}, context),
@@ -227,7 +237,11 @@ export class UrlNetworkSubmitService {
     };
 
     if (!['GET', 'DELETE'].includes(method)) {
-      if (definition.bodyMode === 'form') {
+      if (bodyMode === 'multipart') {
+        const multipart = this.buildMultipartRequestBody(context, definition.body);
+        config.data = multipart;
+        delete (config.headers as Record<string, string>)['Content-Type'];
+      } else if (bodyMode === 'form') {
         const body = this.buildRequestBody(context, definition.body);
         const searchParams = new URLSearchParams();
         for (const [key, value] of Object.entries(this.flattenUndefined(body))) {
@@ -259,8 +273,17 @@ export class UrlNetworkSubmitService {
       return template;
     }
 
+    if (this.isMappingRule(template)) {
+      return this.resolveRule(template as RpaNetworkMappingRule, context);
+    }
+
     if (Array.isArray(template)) {
       return template.map((item) => this.buildRequestBody(context, item));
+    }
+
+    const mergeSources = this.resolveMergeSources(template, context);
+    if (mergeSources) {
+      return mergeSources;
     }
 
     const result: Record<string, any> = {};
@@ -276,6 +299,81 @@ export class UrlNetworkSubmitService {
       }
     }
     return this.flattenUndefined(result);
+  }
+
+  private buildMultipartRequestBody(context: Record<string, any>, template: any) {
+    const body = this.buildRequestBody(context, template);
+    const FormDataCtor = (globalThis as any).FormData;
+    const BlobCtor = (globalThis as any).Blob;
+    if (typeof FormDataCtor !== 'function' || typeof BlobCtor !== 'function') {
+      throw new Error('Runtime multipart form support is unavailable');
+    }
+
+    const form = new FormDataCtor();
+    const requestFieldNamesWithFiles = new Set<string>();
+    const attachmentFieldMap = this.asRecord(context.preflight?.attachmentFieldMap);
+    const attachments = Array.isArray(context.attachments)
+      ? context.attachments.map((attachment) => this.normalizeAttachmentPayload(attachment))
+      : [];
+
+    for (const attachment of attachments) {
+      if (!attachment) {
+        continue;
+      }
+      const targetFieldKey = this.normalizeString(attachment.fieldKey);
+      const requestFieldName = this.normalizeString(
+        (targetFieldKey && attachmentFieldMap[targetFieldKey])
+        || targetFieldKey,
+      );
+      if (!requestFieldName) {
+        continue;
+      }
+
+      form.append(
+        requestFieldName,
+        new BlobCtor([attachment.buffer], {
+          type: attachment.mimeType || 'application/octet-stream',
+        }),
+        attachment.filename,
+      );
+      requestFieldNamesWithFiles.add(requestFieldName);
+    }
+
+    this.appendMultipartFields(form, body, requestFieldNamesWithFiles);
+    return form;
+  }
+
+  private appendMultipartFields(
+    form: any,
+    value: any,
+    requestFieldNamesWithFiles: Set<string>,
+    prefix?: string,
+  ) {
+    if (value === undefined || value === null) {
+      return;
+    }
+
+    if (Array.isArray(value)) {
+      value.forEach((item, index) => {
+        const nextPrefix = prefix ? `${prefix}[${index}]` : String(index);
+        this.appendMultipartFields(form, item, requestFieldNamesWithFiles, nextPrefix);
+      });
+      return;
+    }
+
+    if (typeof value === 'object') {
+      for (const [key, item] of Object.entries(value)) {
+        const nextPrefix = prefix ? `${prefix}.${key}` : key;
+        this.appendMultipartFields(form, item, requestFieldNamesWithFiles, nextPrefix);
+      }
+      return;
+    }
+
+    if (!prefix || requestFieldNamesWithFiles.has(prefix)) {
+      return;
+    }
+
+    form.append(prefix, String(value));
   }
 
   private applyMapping(
@@ -335,6 +433,17 @@ export class UrlNetworkSubmitService {
       default:
         return value;
     }
+  }
+
+  private resolveBodyMode(
+    value: RpaNetworkRequestDefinition['bodyMode'],
+    context: Record<string, any>,
+  ) {
+    const resolved = this.interpolateTemplate(String(value || 'json'), context).trim().toLowerCase();
+    if (resolved === 'form' || resolved === 'multipart') {
+      return resolved as 'form' | 'multipart';
+    }
+    return 'json';
   }
 
   private mapResponse(definition: RpaNetworkRequestDefinition, responseBody: any) {
@@ -450,6 +559,23 @@ export class UrlNetworkSubmitService {
     });
   }
 
+  private resolveMergeSources(template: Record<string, any>, context: Record<string, any>) {
+    const candidate = template.$merge ?? template.__merge__;
+    if (!Array.isArray(candidate) || candidate.length === 0) {
+      return undefined;
+    }
+
+    return candidate.reduce<Record<string, any>>((acc, source) => {
+      const resolved = typeof source === 'string'
+        ? this.getNestedValue(context, source)
+        : this.buildRequestBody(context, source);
+      if (resolved && typeof resolved === 'object' && !Array.isArray(resolved)) {
+        Object.assign(acc, resolved);
+      }
+      return acc;
+    }, {});
+  }
+
   private getNestedValue(value: any, path: string) {
     return path.split('.').reduce((current, key) => current?.[key], value);
   }
@@ -460,6 +586,29 @@ export class UrlNetworkSubmitService {
     }
     const normalized = typeof value === 'string' ? value.trim() : String(value);
     return normalized || undefined;
+  }
+
+  private normalizeAttachmentPayload(value: UrlNetworkAttachmentPayload | null | undefined) {
+    if (!value) {
+      return null;
+    }
+
+    const content = value.content;
+    let buffer: Buffer;
+    if (Buffer.isBuffer(content)) {
+      buffer = content;
+    } else if (typeof content === 'string') {
+      buffer = Buffer.from(content, 'base64');
+    } else {
+      return null;
+    }
+
+    return {
+      filename: this.normalizeString(value.filename || value.name) || 'upload.bin',
+      mimeType: this.normalizeString(value.mimeType) || 'application/octet-stream',
+      fieldKey: this.normalizeString(value.fieldKey) || undefined,
+      buffer,
+    };
   }
 
   private parseStorageState(value: unknown) {

@@ -5,6 +5,7 @@ import { useParams } from 'next/navigation';
 import Link from 'next/link';
 import AuthGuard from '../../components/AuthGuard';
 import { apiClient } from '../../lib/api-client';
+import { IDENTITY_SCOPE_META, normalizeIdentityScope } from '../../lib/identity-scope';
 
 function formatDate(value?: string | null) {
   if (!value) return '-';
@@ -82,10 +83,16 @@ function BootstrapJobDetail() {
           </span>
         </div>
 
-        <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-3">
+        <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-4">
           <div className="rounded-xl border border-gray-200 bg-white p-5">
             <div className="text-sm text-gray-500">OA 地址</div>
             <div className="mt-2 break-all text-sm text-gray-900">{job.oaUrl || '-'}</div>
+          </div>
+          <div className="rounded-xl border border-gray-200 bg-white p-5">
+            <div className="text-sm text-gray-500">适用范围</div>
+            <div className="mt-2 break-all text-sm text-gray-900">
+              {IDENTITY_SCOPE_META[normalizeIdentityScope(job.identityScope)].label}
+            </div>
           </div>
           <div className="rounded-xl border border-gray-200 bg-white p-5">
             <div className="text-sm text-gray-500">来源文档</div>

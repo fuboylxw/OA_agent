@@ -4,7 +4,7 @@ import { Queue } from 'bull';
 import { PrismaService } from '../common/prisma.service';
 import { CreateBootstrapJobDto } from './dto/create-bootstrap-job.dto';
 import axios from 'axios';
-import { randomUUID } from 'crypto';
+import { createHash, randomUUID } from 'crypto';
 import { WorkerAvailabilityService } from './worker-availability.service';
 import { parseRpaFlowDefinitions } from '@uniflow/shared-types';
 import { TextGuideLlmParserService } from './text-guide-llm-parser.service';
@@ -13,6 +13,7 @@ import {
   detectAuthCredentialFieldKind,
   isAuthCredentialField,
 } from '../common/auth-field.util';
+import { normalizeIdentityScope } from '../common/identity-scope.util';
 
 type BootstrapAccessMode = 'backend_api' | 'direct_link' | 'text_guide';
 type InternalBootstrapMode = 'api_only' | 'rpa_only' | 'hybrid';
@@ -66,6 +67,7 @@ const VALID_RPA_STEP_TYPES = new Set([
   'select',
   'upload',
   'extract',
+  'evaluate',
   'download',
   'screenshot',
 ]);
@@ -98,6 +100,7 @@ export class BootstrapService {
             id: true,
             name: true,
             baseUrl: true,
+            identityScope: true,
             authConfig: true,
           },
         })
@@ -108,6 +111,14 @@ export class BootstrapService {
 
     const effectiveName = (selectedConnector?.name || dto.name || '').trim() || undefined;
     const effectiveOaUrl = (selectedConnector?.baseUrl || dto.oaUrl || '').trim() || undefined;
+    const requestedIdentityScope = typeof dto.identityScope === 'string' ? dto.identityScope.trim() : '';
+    const effectiveIdentityScope = normalizeIdentityScope(selectedConnector?.identityScope || dto.identityScope);
+    if (!selectedConnector && !effectiveOaUrl) {
+      throw new BadRequestException('创建新连接器时必须提供系统网址');
+    }
+    if (!selectedConnector && !requestedIdentityScope) {
+      throw new BadRequestException('创建新连接器时必须指定适用身份范围');
+    }
     const now = new Date();
     const accessMode = this.resolveAccessMode({
       accessMode: dto.accessMode,
@@ -179,6 +190,7 @@ export class BootstrapService {
         tenantId,
         connectorId: selectedConnector?.id,
         name: effectiveName,
+        identityScope: effectiveIdentityScope,
         status: 'CREATED',
         currentStage: 'CREATED',
         stageStartedAt: now,
@@ -318,6 +330,7 @@ export class BootstrapService {
       accessMode?: BootstrapAccessMode;
       bootstrapMode?: InternalBootstrapMode;
       oaUrl?: string;
+      identityScope?: 'teacher' | 'student' | 'both';
       authConfig?: Record<string, any>;
     },
   ) {
@@ -334,6 +347,7 @@ export class BootstrapService {
 
     let docUrlToPersist = job.openApiUrl;
     const existingAuthConfig = ((job.authConfig as Record<string, any> | null) || {});
+    const nextIdentityScope = normalizeIdentityScope(newDoc?.identityScope || job.identityScope);
     const currentAccessMode = this.resolveAccessMode({
       accessMode: existingAuthConfig.accessMode,
       bootstrapMode: existingAuthConfig.bootstrapMode,
@@ -489,6 +503,7 @@ export class BootstrapService {
         completedAt: null,
         connectorId: null,
         oaUrl: newDoc?.oaUrl || job.oaUrl,
+        identityScope: nextIdentityScope,
         openApiUrl: docUrlToPersist,
         authConfig: nextAuthConfig as any,
       },
@@ -544,10 +559,19 @@ export class BootstrapService {
   ): Promise<{ content: string; guideText?: string }> {
     const definitions = parseRpaFlowDefinitions(rpaFlowContent);
     if (definitions.length > 0) {
-      return { content: rpaFlowContent };
+      const normalized = this.normalizeParsedPageAutomationSource(
+        definitions as Array<Record<string, any>>,
+        input,
+      );
+      return { content: JSON.stringify(normalized) };
     }
 
-    if (input.accessMode !== 'text_guide') {
+    const trimmedContent = rpaFlowContent.trim();
+    if (input.accessMode === 'direct_link' && /^[{\[]/.test(trimmedContent)) {
+      throw new BadRequestException('页面流程内容无效，无法识别可执行步骤');
+    }
+
+    if (input.accessMode !== 'text_guide' && input.accessMode !== 'direct_link') {
       throw new BadRequestException('页面流程内容无效，无法识别可执行步骤');
     }
 
@@ -557,11 +581,71 @@ export class BootstrapService {
         oaUrl: input.oaUrl,
         platformConfig: input.platformConfig,
       });
-    this.validateGeneratedTextGuideFlowBundle(generated);
+
+    const finalized = this.applyGuideAccessMode(
+      generated,
+      input.accessMode,
+      {
+        oaUrl: input.oaUrl,
+        platformConfig: input.platformConfig,
+      },
+    );
+    this.validateGeneratedTextGuideFlowBundle(finalized, {
+      accessMode: input.accessMode,
+      oaUrl: input.oaUrl,
+      platformConfig: input.platformConfig,
+    });
     return {
-      content: JSON.stringify(generated),
+      content: JSON.stringify(finalized),
       guideText: rpaFlowContent,
     };
+  }
+
+  private normalizeParsedPageAutomationSource(
+    definitions: Array<Record<string, any>>,
+    input: {
+      accessMode?: BootstrapAccessMode;
+      oaUrl?: string;
+      platformConfig?: Record<string, any>;
+    },
+  ) {
+    const bundle = {
+      flows: definitions.map((definition) => JSON.parse(JSON.stringify(definition))),
+    };
+
+    if (input.accessMode === 'direct_link') {
+      const normalized = this.applyGuideAccessMode(bundle, input.accessMode, {
+        oaUrl: input.oaUrl,
+        platformConfig: input.platformConfig,
+      });
+      this.validateGeneratedTextGuideFlowBundle(normalized, {
+        accessMode: input.accessMode,
+        oaUrl: input.oaUrl,
+        platformConfig: input.platformConfig,
+      });
+      return normalized;
+    }
+
+    if (
+      input.accessMode === 'text_guide'
+      && definitions.some((definition) =>
+        this.isDirectLinkDefinition(definition)
+        || this.hasNetworkRequest((definition as Record<string, any>)?.runtime?.networkSubmit)
+        || this.hasNetworkRequest((definition as Record<string, any>)?.runtime?.networkStatus),
+      )
+    ) {
+      throw new BadRequestException('文字示教接入不能使用链接直达流程定义，请改为链接直达模式');
+    }
+
+    if (input.accessMode === 'text_guide') {
+      this.validateGeneratedTextGuideFlowBundle(bundle, {
+        accessMode: input.accessMode,
+        oaUrl: input.oaUrl,
+        platformConfig: input.platformConfig,
+      });
+    }
+
+    return bundle;
   }
 
   private resolveBootstrapMode(input: {
@@ -884,7 +968,7 @@ export class BootstrapService {
   private inferFieldType(label: string, sampleValue?: string) {
     const text = `${label} ${sampleValue || ''}`.toLowerCase();
     if (text.includes('日期') || /\d{4}-\d{1,2}-\d{1,2}/.test(text)) return 'date';
-    if (text.includes('附件') || text.includes('文件')) return 'file';
+    if (this.looksLikeAttachmentField(text)) return 'file';
     if (text.includes('原因') || text.includes('说明') || text.includes('备注')) return 'textarea';
     return 'text';
   }
@@ -902,7 +986,15 @@ export class BootstrapService {
       .toLowerCase()
       .replace(/[^a-z0-9]+/g, '_')
       .replace(/^_+|_+$/g, '');
-    return ascii || 'text_guided_flow';
+    if (ascii) {
+      return ascii;
+    }
+
+    const stableSuffix = createHash('sha1')
+      .update(String(name || '').trim() || 'text_guided_flow')
+      .digest('hex')
+      .slice(0, 8);
+    return `flow_${stableSuffix}`;
   }
 
   private buildTextGuideFlowBundleFromDescription(
@@ -935,6 +1027,7 @@ export class BootstrapService {
       flows: parsedDocument.flows.map((flow, index) => this.buildTextGuideFlowFromStepLines({
         processName: flow.processName || `${defaultProcessName}_${index + 1}`,
         processCode: this.normalizeProcessCode(flow.processCode),
+        description: flow.description,
         stepSource: [...parsedDocument.sharedSteps, ...flow.steps],
         fieldDefinitions: flow.fields,
         testData: flow.testData,
@@ -977,6 +1070,7 @@ export class BootstrapService {
         flows: parsedDocument.flows.map((flow, index) => this.buildTextGuideFlowFromStepLines({
           processName: flow.processName || `${defaultProcessName}_${index + 1}`,
           processCode: this.normalizeProcessCode(flow.processCode),
+          description: flow.description,
           stepSource: [...parsedDocument.sharedSteps, ...flow.steps],
           fieldDefinitions: flow.fields,
           testData: flow.testData,
@@ -993,7 +1087,312 @@ export class BootstrapService {
     }
   }
 
-  private validateGeneratedTextGuideFlowBundle(bundle: { flows?: Array<Record<string, any>> }) {
+  private applyGuideAccessMode(
+    bundle: { flows?: Array<Record<string, any>> },
+    accessMode: BootstrapAccessMode | undefined,
+    input: {
+      oaUrl?: string;
+      platformConfig?: Record<string, any>;
+    },
+  ) {
+    if (!Array.isArray(bundle.flows) || bundle.flows.length === 0) {
+      return bundle;
+    }
+
+    if (accessMode !== 'direct_link') {
+      return bundle;
+    }
+
+    return {
+      ...bundle,
+      flows: bundle.flows.map((flow) => {
+        const metadata = flow?.metadata && typeof flow.metadata === 'object'
+          ? { ...(flow.metadata as Record<string, any>) }
+          : {};
+        const platform = flow?.platform && typeof flow.platform === 'object'
+          ? { ...(flow.platform as Record<string, any>) }
+          : {};
+
+        if (!platform.businessBaseUrl && input.platformConfig?.businessBaseUrl) {
+          platform.businessBaseUrl = input.platformConfig.businessBaseUrl;
+        }
+        if (!platform.targetBaseUrl && input.platformConfig?.targetBaseUrl) {
+          platform.targetBaseUrl = input.platformConfig.targetBaseUrl;
+        }
+        if (!platform.businessBaseUrl && !platform.targetBaseUrl && input.oaUrl) {
+          platform.businessBaseUrl = input.oaUrl;
+          platform.targetBaseUrl = input.oaUrl;
+        }
+
+        return {
+          ...this.buildDirectLinkRuntimeFlow({
+            ...flow,
+            platform,
+          }),
+          accessMode: 'direct_link',
+          sourceType: 'direct_link',
+          description: flow?.description === '根据文字示教自动生成的页面流程'
+            ? '根据链接直达模板自动生成的页面流程'
+            : (flow?.description || '根据链接直达模板自动生成的页面流程'),
+          metadata: {
+            ...metadata,
+            accessMode: 'direct_link',
+            sourceType: 'direct_link',
+          },
+        };
+      }),
+    };
+  }
+
+  private buildDirectLinkRuntimeFlow(flow: Record<string, any>) {
+    const platform = flow?.platform && typeof flow.platform === 'object'
+      ? { ...(flow.platform as Record<string, any>) }
+      : {};
+    const runtime = flow?.runtime && typeof flow.runtime === 'object'
+      ? { ...(flow.runtime as Record<string, any>) }
+      : {};
+    const existingNetworkSubmit = runtime.networkSubmit && typeof runtime.networkSubmit === 'object'
+      ? { ...(runtime.networkSubmit as Record<string, any>) }
+      : {};
+    const submitSteps = Array.isArray(flow?.actions?.submit?.steps)
+      ? flow.actions.submit.steps as Array<Record<string, any>>
+      : [];
+    const preflightSteps = this.buildDirectLinkPreflightSteps(flow, submitSteps);
+    const queryStatus = flow?.actions?.queryStatus;
+    const inferredJumpUrlTemplate = this.inferDirectLinkJumpUrlTemplate({
+      platform,
+      submitSteps,
+      preflightSteps,
+    });
+
+    return {
+      ...flow,
+      platform: {
+        ...platform,
+        ...(!platform.jumpUrlTemplate && inferredJumpUrlTemplate
+          ? { jumpUrlTemplate: inferredJumpUrlTemplate }
+          : {}),
+      },
+      ...(queryStatus
+        ? {
+            actions: {
+              queryStatus,
+            },
+          }
+        : {
+            actions: undefined,
+          }),
+      runtime: {
+        ...runtime,
+        executorMode: 'http',
+        browserProvider: runtime.browserProvider || 'playwright',
+        headless: false,
+        snapshotMode: runtime.snapshotMode || 'structured-text',
+        preflight: {
+          steps: preflightSteps,
+        },
+        networkSubmit: {
+          url: existingNetworkSubmit.url || '{{preflight.submitCapture.action}}',
+          method: existingNetworkSubmit.method || '{{preflight.submitCapture.method}}',
+          bodyMode: existingNetworkSubmit.bodyMode || '{{preflight.submitBodyMode}}',
+          successMode: existingNetworkSubmit.successMode || 'http2xx',
+          completionKind: existingNetworkSubmit.completionKind || this.inferDirectLinkCompletionKind(submitSteps),
+          headers: {
+            Origin: '{{preflight.submitOrigin}}',
+            Referer: '{{jumpUrl}}',
+            ...((existingNetworkSubmit.headers as Record<string, any> | undefined) || {}),
+          },
+          body: existingNetworkSubmit.body || {
+            source: 'preflight.submitFields',
+          },
+          responseMapping: existingNetworkSubmit.responseMapping,
+        },
+      },
+    };
+  }
+
+  private inferDirectLinkJumpUrlTemplate(input: {
+    platform: Record<string, any>;
+    submitSteps: Array<Record<string, any>>;
+    preflightSteps: Array<Record<string, any>>;
+  }) {
+    const businessOrigin = this.tryGetUrlOrigin(
+      input.platform.businessBaseUrl,
+      input.platform.targetBaseUrl,
+      input.platform.targetSystem,
+    );
+    const entryUrl = String(input.platform.entryUrl || '').trim();
+    const stepUrls = this.collectDirectLinkStepUrls([
+      ...input.submitSteps,
+      ...input.preflightSteps,
+    ]);
+
+    if (stepUrls.length === 0) {
+      return undefined;
+    }
+
+    if (businessOrigin) {
+      const matchedBusinessUrl = [...stepUrls]
+        .reverse()
+        .find((value) => this.safeSameOrigin(value, businessOrigin));
+      if (matchedBusinessUrl) {
+        return matchedBusinessUrl;
+      }
+    }
+
+    const matchedBusinessPath = [...stepUrls]
+      .reverse()
+      .find((value) => {
+        const normalized = this.normalizeDirectLinkStepUrl(value);
+        if (!normalized) {
+          return false;
+        }
+        if (entryUrl && normalized === entryUrl) {
+          return false;
+        }
+        return !this.safeSameOrigin(normalized, entryUrl);
+      });
+    if (matchedBusinessPath) {
+      return matchedBusinessPath;
+    }
+
+    return stepUrls[stepUrls.length - 1];
+  }
+
+  private collectDirectLinkStepUrls(steps: Array<Record<string, any>>) {
+    return steps
+      .filter((step) => String(step?.type || '').trim().toLowerCase() === 'goto')
+      .map((step) => this.normalizeDirectLinkStepUrl(step?.value))
+      .filter((value): value is string => Boolean(value));
+  }
+
+  private normalizeDirectLinkStepUrl(value: unknown) {
+    const raw = String(value || '').trim();
+    if (!/^https?:\/\//i.test(raw)) {
+      return undefined;
+    }
+    return raw;
+  }
+
+  private tryGetUrlOrigin(...values: unknown[]) {
+    for (const value of values) {
+      const raw = String(value || '').trim();
+      if (!raw) {
+        continue;
+      }
+      try {
+        return new URL(raw).origin;
+      } catch {
+        continue;
+      }
+    }
+    return undefined;
+  }
+
+  private safeSameOrigin(left: string, right: string) {
+    if (!left || !right) {
+      return false;
+    }
+    try {
+      return new URL(left).origin === new URL(right).origin;
+    } catch {
+      return left === right;
+    }
+  }
+
+  private buildDirectLinkPreflightSteps(
+    flow: Record<string, any>,
+    submitSteps: Array<Record<string, any>>,
+  ) {
+    const triggerIndex = this.findDirectLinkSubmitTriggerIndex(submitSteps);
+    const preparationSteps = (triggerIndex >= 0 ? submitSteps.slice(0, triggerIndex) : submitSteps)
+      .filter((step) => !['input', 'select'].includes(String(step?.type || '').trim().toLowerCase()))
+      .map((step) => ({ ...step }));
+    return [
+      ...preparationSteps,
+      this.buildDirectLinkCaptureStep(flow, submitSteps[triggerIndex]),
+    ];
+  }
+
+  private findDirectLinkSubmitTriggerIndex(steps: Array<Record<string, any>>) {
+    for (let index = steps.length - 1; index >= 0; index -= 1) {
+      if (String(steps[index]?.type || '').trim().toLowerCase() === 'click') {
+        return index;
+      }
+    }
+
+    return -1;
+  }
+
+  private buildDirectLinkCaptureStep(
+    flow: Record<string, any>,
+    triggerStep?: Record<string, any>,
+  ) {
+    const fields = Array.isArray(flow?.fields) ? flow.fields as Array<Record<string, any>> : [];
+    const triggerLabel = String(
+      triggerStep?.target?.label
+      || triggerStep?.target?.value
+      || triggerStep?.value
+      || '提交',
+    ).trim() || '提交';
+
+    return {
+      type: 'evaluate',
+      builtin: 'capture_form_submit',
+      description: `捕获“${triggerLabel}”对应的网络提交请求`,
+      options: {
+        fieldMappings: fields
+          .filter((field) => String(field?.type || '').trim().toLowerCase() !== 'file')
+          .map((field) => ({
+            fieldKey: field.key,
+            sources: [field.key, field.label].filter(Boolean),
+            target: {
+              label: field.label,
+            },
+          })),
+        fileMappings: fields
+          .filter((field) => String(field?.type || '').trim().toLowerCase() === 'file')
+          .map((field) => ({
+            fieldKey: field.key,
+            target: {
+              label: field.label,
+            },
+          })),
+        trigger: {
+          text: triggerLabel,
+          exact: true,
+        },
+        output: {
+          captureKey: 'submitCapture',
+          fieldsKey: 'submitFields',
+          csrfKey: 'csrfToken',
+          filledFieldsKey: 'filledFields',
+          captureEventCountKey: 'captureEventCount',
+          bodyModeKey: 'submitBodyMode',
+          originKey: 'submitOrigin',
+          attachmentFieldMapKey: 'attachmentFieldMap',
+        },
+      },
+    };
+  }
+
+  private inferDirectLinkCompletionKind(steps: Array<Record<string, any>>) {
+    const clickLabels = steps
+      .filter((step) => String(step?.type || '').trim().toLowerCase() === 'click')
+      .map((step) => String(step?.target?.label || step?.target?.value || step?.value || '').trim())
+      .filter(Boolean);
+    const triggerLabel = clickLabels[clickLabels.length - 1] || '';
+    return /保存|草稿|待发/u.test(triggerLabel) ? 'draft' : 'submitted';
+  }
+
+  private validateGeneratedTextGuideFlowBundle(
+    bundle: { flows?: Array<Record<string, any>> },
+    input?: {
+      accessMode?: BootstrapAccessMode;
+      oaUrl?: string;
+      platformConfig?: Record<string, any>;
+    },
+  ) {
     const definitions = parseRpaFlowDefinitions(bundle);
     if (definitions.length === 0 || !Array.isArray(bundle.flows) || bundle.flows.length === 0) {
       throw new BadRequestException('Invalid text-guide output: no executable steps');
@@ -1001,22 +1400,106 @@ export class BootstrapService {
 
     for (const flow of bundle.flows) {
       const submitSteps = flow?.actions?.submit?.steps;
-      if (!Array.isArray(submitSteps) || submitSteps.length === 0) {
+      const preflightSteps = flow?.runtime?.preflight?.steps;
+      const hasDirectLinkRuntime = input?.accessMode === 'direct_link'
+        && Array.isArray(preflightSteps)
+        && preflightSteps.length > 0
+        && typeof flow?.runtime?.networkSubmit?.url === 'string'
+        && flow.runtime.networkSubmit.url.trim();
+      if ((!Array.isArray(submitSteps) || submitSteps.length === 0) && !hasDirectLinkRuntime) {
         throw new BadRequestException('Invalid text-guide output: no executable steps');
       }
 
-      const invalidStep = submitSteps.find(
+      const stepsToValidate = Array.isArray(submitSteps) && submitSteps.length > 0
+        ? submitSteps
+        : preflightSteps;
+      const invalidStep = stepsToValidate.find(
         (step) => !VALID_RPA_STEP_TYPES.has(String(step?.type || '')),
       );
       if (invalidStep) {
         throw new BadRequestException('Invalid text-guide output: unsupported step type');
       }
+
+      if (input?.accessMode === 'direct_link' && !this.hasDirectLinkNavigationContext(flow, input)) {
+        throw new BadRequestException('链接直达接入的文字模板必须至少包含一个可访问链接（如系统网址、流程页面或步骤中的 URL）');
+      }
     }
+  }
+
+  private hasDirectLinkNavigationContext(
+    flow: Record<string, any>,
+    input?: {
+      oaUrl?: string;
+      platformConfig?: Record<string, any>;
+    },
+  ) {
+    const platform = flow?.platform && typeof flow.platform === 'object'
+      ? flow.platform as Record<string, any>
+      : {};
+    const portalSsoBridge = platform.portalSsoBridge && typeof platform.portalSsoBridge === 'object'
+      ? platform.portalSsoBridge as Record<string, any>
+      : {};
+    const hasPlatformUrl = [
+      platform.entryUrl,
+      platform.jumpUrlTemplate,
+      platform.businessBaseUrl,
+      platform.targetBaseUrl,
+      portalSsoBridge.portalUrl,
+      input?.platformConfig?.entryUrl,
+      input?.platformConfig?.jumpUrlTemplate,
+      input?.platformConfig?.businessBaseUrl,
+      input?.platformConfig?.targetBaseUrl,
+      input?.oaUrl,
+    ].some((value) => /^https?:\/\//i.test(String(value || '').trim()));
+
+    if (hasPlatformUrl) {
+      return true;
+    }
+
+    const actions = flow?.actions && typeof flow.actions === 'object'
+      ? flow.actions as Record<string, any>
+      : {};
+    const runtime = flow?.runtime && typeof flow.runtime === 'object'
+      ? flow.runtime as Record<string, any>
+      : {};
+    const stepGroups = [actions.submit?.steps, actions.queryStatus?.steps, runtime.preflight?.steps]
+      .filter(Array.isArray)
+      .flat() as Array<Record<string, any>>;
+
+    return stepGroups.some((step) =>
+      String(step?.type || '').trim().toLowerCase() === 'goto'
+      && /^https?:\/\//i.test(String(step?.value || '').trim()),
+    );
+  }
+
+  private isDirectLinkDefinition(definition: Record<string, any> | null | undefined) {
+    if (!definition || typeof definition !== 'object') {
+      return false;
+    }
+
+    const metadata = definition.metadata && typeof definition.metadata === 'object'
+      ? definition.metadata as Record<string, any>
+      : {};
+    const accessMode = String(definition.accessMode || metadata.accessMode || '').trim().toLowerCase();
+    const sourceType = String(definition.sourceType || metadata.sourceType || '').trim().toLowerCase();
+
+    return accessMode === 'direct_link' || sourceType === 'direct_link';
+  }
+
+  private hasNetworkRequest(value: unknown) {
+    return Boolean(
+      value
+      && typeof value === 'object'
+      && !Array.isArray(value)
+      && typeof (value as Record<string, any>).url === 'string'
+      && (value as Record<string, any>).url.trim(),
+    );
   }
 
   private buildTextGuideFlowFromStepLines(input: {
     processName: string;
     processCode?: string;
+    description?: string;
     stepSource: string | string[];
     fieldDefinitions?: Array<{
       label?: string;
@@ -1033,7 +1516,10 @@ export class BootstrapService {
       throw new BadRequestException('文字示教接入必须填写非空步骤说明');
     }
 
-    const entryUrl = String(input.platformConfig?.entryUrl || input.oaUrl || '').trim();
+    const entryUrl = this.resolveGuideEntryUrl({
+      platformConfig: input.platformConfig,
+      oaUrl: input.oaUrl,
+    });
     const processName = input.processName.trim() || '文字示教流程';
     const processCode = this.normalizeProcessCode(input.processCode) || this.toProcessCode(processName);
     const steps: Array<Record<string, any>> = [];
@@ -1198,17 +1684,26 @@ export class BootstrapService {
     return {
       processCode,
       processName,
-      description: '根据文字示教自动生成的页面流程',
+      description: input.description?.trim() || '根据文字示教自动生成的页面流程',
+      accessMode: 'text_guide',
+      sourceType: 'text_guide',
       fields,
       ...(Object.keys(normalizedTestData).length > 0
         ? {
             metadata: {
+              accessMode: 'text_guide',
+              sourceType: 'text_guide',
               textGuide: {
                 sampleData: normalizedTestData,
               },
             },
           }
-        : {}),
+        : {
+            metadata: {
+              accessMode: 'text_guide',
+              sourceType: 'text_guide',
+            },
+          }),
       actions: {
         submit: {
           steps,
@@ -1224,6 +1719,8 @@ export class BootstrapService {
       },
       platform: {
         ...(entryUrl ? { entryUrl } : {}),
+        ...(input.platformConfig?.businessBaseUrl ? { businessBaseUrl: input.platformConfig.businessBaseUrl } : {}),
+        ...(input.platformConfig?.targetBaseUrl ? { targetBaseUrl: input.platformConfig.targetBaseUrl } : {}),
         ...(input.platformConfig?.targetSystem ? { targetSystem: input.platformConfig.targetSystem } : {}),
         ...(input.platformConfig?.jumpUrlTemplate ? { jumpUrlTemplate: input.platformConfig.jumpUrlTemplate } : {}),
         ...(input.platformConfig?.ticketBrokerUrl ? { ticketBrokerUrl: input.platformConfig.ticketBrokerUrl } : {}),
@@ -1248,6 +1745,20 @@ export class BootstrapService {
       .filter(Boolean);
   }
 
+  private resolveGuideEntryUrl(input: {
+    platformConfig?: Record<string, any>;
+    oaUrl?: string;
+  }) {
+    return String(
+      input.platformConfig?.entryUrl
+      || input.platformConfig?.jumpUrlTemplate
+      || input.platformConfig?.targetBaseUrl
+      || input.platformConfig?.businessBaseUrl
+      || input.oaUrl
+      || '',
+    ).trim();
+  }
+
   private parseStructuredTextGuideDocument(guideText: string) {
     const rawLines = guideText
       .split(/\r?\n/)
@@ -1264,12 +1775,16 @@ export class BootstrapService {
     const flows: Array<{
       processName: string;
       processCode?: string;
+      description?: string;
       steps: string[];
       fields: Array<{
         label: string;
         fieldKey?: string;
         type?: string;
         required?: boolean;
+        description?: string;
+        example?: string;
+        multiple?: boolean;
       }>;
       testData: Record<string, string>;
       platformConfig: Record<string, any>;
@@ -1285,12 +1800,16 @@ export class BootstrapService {
     let currentFlow: {
       processName: string;
       processCode?: string;
+      description?: string;
       steps: string[];
       fields: Array<{
         label: string;
         fieldKey?: string;
         type?: string;
         required?: boolean;
+        description?: string;
+        example?: string;
+        multiple?: boolean;
       }>;
       testData: Record<string, string>;
       platformConfig: Record<string, any>;
@@ -1361,6 +1880,12 @@ export class BootstrapService {
         const explicitProcessCode = this.parseGuideProcessCodeLine(line);
         if (explicitProcessCode) {
           currentFlow.processCode = explicitProcessCode;
+          continue;
+        }
+
+        const description = this.parseGuideDescriptionLine(line);
+        if (description) {
+          currentFlow.description = description;
           continue;
         }
 
@@ -1452,6 +1977,18 @@ export class BootstrapService {
     return this.normalizeProcessCode(match[1]) || null;
   }
 
+  private parseGuideDescriptionLine(line: string) {
+    const match = line.match(/^(?:描述|说明|简介|流程描述|description)\s*[:：]\s*(.+)$/iu);
+    if (!match) {
+      return null;
+    }
+
+    const description = match[1]
+      ?.trim()
+      ?.replace(/["“”'‘’]/gu, '');
+    return description || null;
+  }
+
   private normalizeProcessCode(value?: string) {
     const normalized = String(value || '')
       .trim()
@@ -1483,11 +2020,15 @@ export class BootstrapService {
         .map((segment) => this.normalizeGuideFieldTypeValue(segment))
         .find(Boolean);
       const required = this.parseGuideRequiredFlag(pipeSegments);
+      const description = this.extractGuideFieldDescription(pipeSegments.slice(1));
+      const example = this.extractGuideFieldExample(pipeSegments.slice(1));
 
       return {
         label,
         ...(type ? { type } : {}),
         ...(required !== undefined ? { required } : {}),
+        ...(description ? { description } : {}),
+        ...(example ? { example } : {}),
       };
     }
 
@@ -1506,11 +2047,15 @@ export class BootstrapService {
         .map((token) => this.normalizeGuideFieldTypeValue(token))
         .find(Boolean);
       const required = this.parseGuideRequiredFlag(tokens);
+      const description = this.extractGuideFieldDescription(tokens);
+      const example = this.extractGuideFieldExample(tokens);
 
       return {
         label,
         ...(type ? { type } : {}),
         ...(required !== undefined ? { required } : {}),
+        ...(description ? { description } : {}),
+        ...(example ? { example } : {}),
       };
     }
 
@@ -1545,6 +2090,30 @@ export class BootstrapService {
     return { label, value };
   }
 
+  private extractGuideFieldDescription(tokens: string[]) {
+    for (const token of tokens) {
+      const match = String(token || '').trim().match(/^(?:说明|解释|描述|含义|用途|description|desc)\s*[:：=]\s*(.+)$/iu);
+      const value = match?.[1]?.trim();
+      if (value) {
+        return value;
+      }
+    }
+
+    return undefined;
+  }
+
+  private extractGuideFieldExample(tokens: string[]) {
+    for (const token of tokens) {
+      const match = String(token || '').trim().match(/^(?:示例|样例|例子|参考值|example|sample)\s*[:：=]\s*(.+)$/iu);
+      const value = match?.[1]?.trim();
+      if (value) {
+        return value;
+      }
+    }
+
+    return undefined;
+  }
+
   private normalizeGuideStructuredLine(line: string) {
     return String(line || '')
       .trim()
@@ -1576,7 +2145,7 @@ export class BootstrapService {
     if (['textarea', '多行文本', '备注', '说明'].includes(normalized)) return 'textarea';
     if (['date', '日期', '时间', 'datetime'].includes(normalized)) return 'date';
     if (['select', '下拉', '枚举', '选项'].includes(normalized)) return 'select';
-    if (['file', '附件', '文件', 'upload'].includes(normalized)) return 'file';
+    if (['file', '附件', 'upload'].includes(normalized)) return 'file';
     if (['number', '数字', '金额', '整数', '小数'].includes(normalized)) return 'number';
     return undefined;
   }
@@ -1589,6 +2158,9 @@ export class BootstrapService {
       fieldKey?: string;
       type?: string;
       required?: boolean;
+      description?: string;
+      example?: string;
+      multiple?: boolean;
     }>;
     testData?: Record<string, any>;
   }) {
@@ -1616,6 +2188,15 @@ export class BootstrapService {
       if (field && definition.required !== undefined) {
         field.required = definition.required;
       }
+      if (field && definition.description) {
+        field.description = String(definition.description).trim();
+      }
+      if (field && definition.example) {
+        field.example = String(definition.example).trim();
+      }
+      if (field && definition.multiple !== undefined) {
+        field.multiple = Boolean(definition.multiple);
+      }
     }
 
     for (const [rawLabel, rawValue] of Object.entries(rawTestData)) {
@@ -1634,6 +2215,10 @@ export class BootstrapService {
         label,
         this.inferFieldTypeV2(label, value),
       );
+      const field = input.fields.find((item) => item.key === fieldKey);
+      if (field && !field.example) {
+        field.example = value;
+      }
       normalizedTestData[fieldKey] = value;
     }
 
@@ -1641,7 +2226,7 @@ export class BootstrapService {
   }
 
   private tryAssignGuidePlatformConfig(target: Record<string, any>, line: string) {
-    const match = line.match(/^(入口链接|入口地址|入口URL|入口Url|入口url|打开地址|OA地址|OA 地址|执行方式|目标系统|跳转链接模板|票据服务地址)\s*[:：]\s*(.+)$/u);
+    const match = line.match(/^(入口链接|入口地址|入口URL|入口Url|入口url|打开地址|OA地址|OA 地址|认证入口|登录入口|门户地址|门户首页|系统网址|系统地址|业务系统网址|业务系统地址|流程页面|页面链接|流程链接|目标页面|跳转页面|执行方式|目标系统|跳转链接模板|票据服务地址)\s*[:：]\s*(.+)$/u);
     if (!match) {
       return false;
     }
@@ -1652,8 +2237,19 @@ export class BootstrapService {
       return true;
     }
 
-    if (['入口链接', '入口地址', '入口URL', '入口Url', '入口url', '打开地址', 'OA地址', 'OA地址'].includes(rawKey)) {
+    if (['入口链接', '入口地址', '入口URL', '入口Url', '入口url', '打开地址', 'OA地址', '认证入口', '登录入口', '门户地址', '门户首页'].includes(rawKey)) {
       target.entryUrl = value;
+      return true;
+    }
+
+    if (['系统网址', '系统地址', '业务系统网址', '业务系统地址'].includes(rawKey)) {
+      target.businessBaseUrl = value;
+      target.targetBaseUrl = value;
+      return true;
+    }
+
+    if (['流程页面', '页面链接', '流程链接', '目标页面', '跳转页面'].includes(rawKey)) {
+      target.jumpUrlTemplate = value;
       return true;
     }
 
@@ -1705,6 +2301,7 @@ export class BootstrapService {
       label,
       type,
       required: true,
+      multiple: type === 'file' ? false : undefined,
     });
     fieldKeyByLabel.set(label, fieldKey);
     return fieldKey;
@@ -1765,9 +2362,56 @@ export class BootstrapService {
   private inferFieldTypeV2(label: string, sampleValue?: string) {
     const text = `${label} ${sampleValue || ''}`.toLowerCase();
     if (text.includes('日期') || text.includes('时间') || /\d{4}-\d{1,2}-\d{1,2}/.test(text)) return 'date';
-    if (text.includes('附件') || text.includes('文件')) return 'file';
-    if (text.includes('原因') || text.includes('说明') || text.includes('备注') || text.includes('内容')) return 'textarea';
+    if (this.looksLikeAttachmentField(text)) return 'file';
+    if (this.looksLikeNumericField(text)) return 'number';
+    if (text.includes('原因') || text.includes('说明') || text.includes('备注') || text.includes('内容') || text.includes('事由')) return 'textarea';
     return 'text';
+  }
+
+  private looksLikeAttachmentField(text: string) {
+    const normalized = String(text || '').toLowerCase();
+    if (!normalized) {
+      return false;
+    }
+
+    if (normalized.includes('附件')) {
+      return true;
+    }
+
+    if (/(upload|上传)/.test(normalized)) {
+      return true;
+    }
+
+    if (normalized.includes('文件')) {
+      return /(附件|上传|扫描件|图片|照片|pdf|word|excel|压缩包)/.test(normalized);
+    }
+
+    return false;
+  }
+
+  private looksLikeNumericField(text: string) {
+    const normalized = String(text || '').toLowerCase();
+    if (!normalized) {
+      return false;
+    }
+
+    if (normalized.includes('金额') || normalized.includes('预算')) {
+      return true;
+    }
+
+    if (normalized.includes('数量') && !normalized.includes('文件类型')) {
+      return true;
+    }
+
+    if (normalized.includes('天数') || normalized.includes('次数') || normalized.includes('时长')) {
+      return true;
+    }
+
+    if (normalized.includes('份数')) {
+      return !normalized.includes('文件类型') && !normalized.includes('名称');
+    }
+
+    return false;
   }
 
   private normalizeExecutorModeValue(value: unknown) {

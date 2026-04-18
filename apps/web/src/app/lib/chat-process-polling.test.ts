@@ -26,4 +26,20 @@ describe('chat process polling', () => {
     expect(getChatPollingStage(sessionState, messages)).toBe('submitted');
     expect(shouldPollChatSession(sessionState, messages)).toBe(false);
   });
+
+  it('does not keep polling after the session reaches draft-saved', () => {
+    const sessionState = {
+      hasActiveProcess: false,
+      stage: 'draft',
+      activeProcessCard: {
+        stage: 'draft',
+      },
+    };
+    const messages = [
+      { role: 'assistant', processCard: { stage: 'executing' } },
+    ];
+
+    expect(getChatPollingStage(sessionState, messages)).toBe('draft');
+    expect(shouldPollChatSession(sessionState, messages)).toBe(false);
+  });
 });

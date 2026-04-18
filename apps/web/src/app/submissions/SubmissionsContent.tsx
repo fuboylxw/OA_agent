@@ -2,12 +2,15 @@
 
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
+import { useRouter } from 'next/navigation';
 import OaFormPreview from '../components/OaFormPreview';
 import { authFetch } from '../lib/api-client';
 import { withBrowserApiBase } from '../lib/browser-api-base-url';
 import { getClientSessionToken } from '../lib/client-auth';
 
 const STATUS_MAP: Record<string, { label: string; bgClass: string; textClass: string }> = {
+  editing: { label: '待补充', bgClass: 'bg-sky-100', textClass: 'text-sky-700' },
+  draft_saved: { label: '已保存待发', bgClass: 'bg-amber-100', textClass: 'text-amber-700' },
   pending: { label: '待处理', bgClass: 'bg-orange-100', textClass: 'text-orange-600' },
   submitted: { label: '已提交', bgClass: 'bg-blue-100', textClass: 'text-blue-600' },
   approved: { label: '已通过', bgClass: 'bg-green-100', textClass: 'text-green-600' },
@@ -27,10 +30,18 @@ interface FieldWithLabel {
 
 interface Submission {
   id: string;
+  sourceType?: 'submission' | 'draft';
+  draftId?: string | null;
+  submissionId?: string | null;
   oaSubmissionId?: string;
   processCode?: string;
   processName?: string;
   processCategory?: string;
+  sessionId?: string | null;
+  restoreStatus?: string | null;
+  restoreExpiresAt?: string | null;
+  retainedUntil?: string | null;
+  canRestoreConversation?: boolean;
   status: string;
   statusText?: string;
   formData: Record<string, any>;
@@ -38,6 +49,7 @@ interface Submission {
   user?: { id: string; username: string; displayName: string };
   submittedAt?: string;
   createdAt: string;
+  updatedAt?: string;
 }
 
 export default function SubmissionsContent({
@@ -45,13 +57,18 @@ export default function SubmissionsContent({
 }: {
   initialSubmissions: Submission[];
 }) {
+  const router = useRouter();
   const [submissions, setSubmissions] = useState<Submission[]>(initialSubmissions);
   const [expandedId, setExpandedId] = useState<string | null>(null);
+  const [restoringId, setRestoringId] = useState<string | null>(null);
 
   const getStatus = (status: string) => STATUS_MAP[status] || { label: status, bgClass: 'bg-blue-100', textClass: 'text-blue-600' };
   const toggleExpand = (id: string) => setExpandedId(expandedId === id ? null : id);
   const getTone = (status: string): 'blue' | 'amber' | 'green' | 'red' | 'gray' => {
     switch (status) {
+      case 'editing':
+      case 'draft_saved':
+        return 'amber';
       case 'submitted':
       case 'pending':
         return 'blue';
@@ -64,6 +81,41 @@ export default function SubmissionsContent({
         return 'gray';
       default:
         return 'amber';
+    }
+  };
+
+  const handleRestoreConversation = async (submission: Submission) => {
+    setRestoringId(submission.id);
+    try {
+      const response = await authFetch(withBrowserApiBase('/api/v1/assistant/sessions/restore'), {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          sessionId: submission.sessionId || undefined,
+          submissionId: submission.sourceType === 'submission'
+            ? (submission.submissionId || submission.id)
+            : undefined,
+          draftId: submission.sourceType === 'draft'
+            ? (submission.draftId || submission.id)
+            : undefined,
+        }),
+      });
+      if (!response.ok) {
+        throw new Error('restore failed');
+      }
+      const data = await response.json();
+      const nextSessionId = data?.session?.id || data?.sessionId || submission.sessionId;
+      if (nextSessionId) {
+        router.push(`/chat?sessionId=${encodeURIComponent(nextSessionId)}`);
+        return;
+      }
+      router.push('/chat');
+    } catch (error) {
+      console.error('Failed to restore conversation:', error);
+    } finally {
+      setRestoringId(null);
     }
   };
 
@@ -174,7 +226,7 @@ export default function SubmissionsContent({
             <div>
               <p className="text-sm font-medium text-gray-600">待处理</p>
               <p className="text-2xl font-bold text-orange-600">
-                {submissions.filter((s) => s.status === 'pending' || s.status === 'submitted').length}
+                {submissions.filter((s) => s.status === 'editing' || s.status === 'draft_saved' || s.status === 'pending' || s.status === 'submitted').length}
               </p>
             </div>
             <div className="w-10 h-10 bg-orange-100 rounded-lg flex items-center justify-center">
@@ -227,6 +279,13 @@ export default function SubmissionsContent({
               {submissions.map((submission) => {
                 const status = getStatus(submission.status);
                 const isExpanded = expandedId === submission.id;
+                const rowId = submission.oaSubmissionId
+                  || (submission.sourceType === 'draft'
+                    ? `草稿 ${submission.id.substring(0, 8)}`
+                    : submission.id.substring(0, 8));
+                const displayTime = submission.sourceType === 'draft'
+                  ? (submission.updatedAt || submission.createdAt)
+                  : (submission.submittedAt || submission.createdAt);
                 return (
                   <tr key={submission.id} className="border-b border-gray-200">
                     <td colSpan={6} className="p-0">
@@ -236,7 +295,7 @@ export default function SubmissionsContent({
                       >
                         <div className="px-6 py-4 flex-shrink-0" style={{ width: '16.66%' }}>
                           <span className="text-sm font-mono text-gray-500">
-                            {submission.oaSubmissionId || submission.id.substring(0, 8)}
+                            {rowId}
                           </span>
                         </div>
                         <div className="px-6 py-4 flex-shrink-0" style={{ width: '16.66%' }}>
@@ -256,7 +315,7 @@ export default function SubmissionsContent({
                         </div>
                         <div className="px-6 py-4 flex-shrink-0" style={{ width: '16.66%' }}>
                           <span className="text-sm text-gray-500">
-                            {new Date(submission.submittedAt || submission.createdAt).toLocaleString('zh-CN')}
+                            {new Date(displayTime).toLocaleString('zh-CN')}
                           </span>
                         </div>
                         <div className="px-6 py-4 flex-shrink-0 text-right" style={{ width: '16.66%' }}>
@@ -265,6 +324,18 @@ export default function SubmissionsContent({
                               <i className={`fas fa-chevron-${isExpanded ? 'up' : 'down'} text-xs mr-1`}></i>
                               {isExpanded ? '收起' : '详情'}
                             </button>
+                            {submission.canRestoreConversation && (
+                              <button
+                                onClick={(event) => {
+                                  event.stopPropagation();
+                                  void handleRestoreConversation(submission);
+                                }}
+                                disabled={restoringId === submission.id}
+                                className="text-sm text-sky-600 hover:text-sky-800 disabled:cursor-not-allowed disabled:opacity-50"
+                              >
+                                {restoringId === submission.id ? '恢复中...' : '恢复对话'}
+                              </button>
+                            )}
                             {submission.status === 'submitted' && (
                               <button className="text-sm text-orange-600 hover:text-orange-800">催办</button>
                             )}
@@ -279,7 +350,7 @@ export default function SubmissionsContent({
                             subtitle={[
                               submission.processCategory || null,
                               submission.oaSubmissionId ? `单号 ${submission.oaSubmissionId}` : null,
-                              `提交于 ${new Date(submission.submittedAt || submission.createdAt).toLocaleString('zh-CN')}`,
+                              `${submission.sourceType === 'draft' ? '更新于' : '提交于'} ${new Date(displayTime).toLocaleString('zh-CN')}`,
                             ].filter(Boolean).join(' · ')}
                             statusLabel={submission.statusText || status.label}
                             tone={getTone(submission.status)}
@@ -289,6 +360,9 @@ export default function SubmissionsContent({
                               <div className="flex flex-wrap items-center gap-3 text-sm text-gray-500">
                                 <span>状态：{submission.statusText || status.label}</span>
                                 {submission.user?.displayName ? <span>提交人：{submission.user.displayName}</span> : null}
+                                {submission.canRestoreConversation && submission.restoreExpiresAt ? (
+                                  <span>对话可恢复至：{new Date(submission.restoreExpiresAt).toLocaleDateString('zh-CN')}</span>
+                                ) : null}
                               </div>
                             }
                           />

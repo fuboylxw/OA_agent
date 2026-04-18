@@ -62,6 +62,15 @@ describe('MCP HTTP E2E', () => {
   };
   let requestAuth: { resolveUser: jest.Mock };
 
+  function mockAuth(roles: string[]) {
+    requestAuth.resolveUser.mockResolvedValue({
+      tenantId: 'tenant-1',
+      userId: 'user-1',
+      roles,
+      source: 'session',
+    });
+  }
+
   beforeAll(async () => {
     const moduleFixture: TestingModule = await Test.createTestingModule({
       imports: [MCPHttpTestModule],
@@ -85,12 +94,7 @@ describe('MCP HTTP E2E', () => {
 
   beforeEach(() => {
     jest.clearAllMocks();
-    requestAuth.resolveUser.mockResolvedValue({
-      tenantId: 'tenant-1',
-      userId: 'user-1',
-      roles: ['user'],
-      source: 'session',
-    });
+    mockAuth(['admin']);
   });
 
   it('routes tool and upload endpoints with tenant-scoped auth', async () => {
@@ -188,5 +192,29 @@ describe('MCP HTTP E2E', () => {
       includeContent: true,
     });
     expect(apiUploadService.getUploadHistory).toHaveBeenCalledWith('tenant-1', 'connector-1');
+  });
+
+  it('blocks non-admin users from MCP admin endpoints', async () => {
+    mockAuth(['flow_manager']);
+
+    await request(app.getHttpServer())
+      .get('/api/v1/mcp/tools')
+      .query({ connectorId: 'connector-1' })
+      .expect(403);
+
+    await request(app.getHttpServer())
+      .post('/api/v1/mcp/upload-api-json')
+      .send({
+        tenantId: 'tenant-1',
+        connectorId: 'connector-1',
+        docType: 'openapi',
+        docContent: '{"openapi":"3.0.0"}',
+        oaUrl: 'https://oa.example.com',
+        authConfig: {},
+      })
+      .expect(403);
+
+    expect(mcpService.listTools).not.toHaveBeenCalled();
+    expect(apiUploadJobService.uploadAndProcessWithRepair).not.toHaveBeenCalled();
   });
 });

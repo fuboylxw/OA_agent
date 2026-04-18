@@ -586,6 +586,7 @@ export class UrlPortalSsoBridgeService {
     const target = String(
       bridge.targetPathTemplate
       || input.ticket.jumpUrl
+      || this.inferTargetPathTemplateFromFlow(input)
       || '',
     ).replace(/\{([^}]+)\}/g, (_match, key: string) => String(values[key as keyof typeof values] ?? ''));
 
@@ -597,6 +598,97 @@ export class UrlPortalSsoBridgeService {
       return new URL(target).toString();
     } catch {
       return new URL(target, sourceUrl).toString();
+    }
+  }
+
+  private inferTargetPathTemplateFromFlow(input: UrlPortalSsoBridgeInput) {
+    const platform = this.asRecord(input.flow?.platform);
+    const runtime = this.asRecord(input.flow?.runtime);
+    const portalUrl = String(
+      platform.portalSsoBridge && typeof platform.portalSsoBridge === 'object'
+        ? this.asRecord(platform.portalSsoBridge).portalUrl
+        : platform.entryUrl,
+    ).trim();
+    const preferredOrigin = this.tryGetOrigin(
+      platform.businessBaseUrl,
+      platform.targetBaseUrl,
+      platform.targetSystem,
+      input.authConfig?.platformConfig && typeof input.authConfig.platformConfig === 'object'
+        ? this.asRecord(input.authConfig.platformConfig).targetBaseUrl
+        : undefined,
+      input.authConfig?.platformConfig && typeof input.authConfig.platformConfig === 'object'
+        ? this.asRecord(input.authConfig.platformConfig).businessBaseUrl
+        : undefined,
+    );
+    const candidates = this.collectFlowNavigationUrls([
+      ...this.normalizeSteps(runtime.preflight?.steps),
+      ...this.normalizeSteps(this.asRecord(input.flow?.actions).submit?.steps),
+      ...this.normalizeSteps(this.asRecord(input.flow?.actions).queryStatus?.steps),
+    ]);
+
+    if (candidates.length === 0) {
+      return undefined;
+    }
+
+    if (preferredOrigin) {
+      const preferredCandidate = [...candidates]
+        .reverse()
+        .find((value) => this.sameOrigin(value, preferredOrigin));
+      if (preferredCandidate) {
+        return preferredCandidate;
+      }
+    }
+
+    const nonPortalCandidate = [...candidates]
+      .reverse()
+      .find((value) => !portalUrl || !this.sameOrigin(value, portalUrl));
+    if (nonPortalCandidate) {
+      return nonPortalCandidate;
+    }
+
+    return candidates[candidates.length - 1];
+  }
+
+  private normalizeSteps(value: unknown) {
+    return Array.isArray(value)
+      ? value.filter((step): step is Record<string, any> => Boolean(step && typeof step === 'object' && !Array.isArray(step)))
+      : [];
+  }
+
+  private collectFlowNavigationUrls(steps: Array<Record<string, any>>) {
+    return steps
+      .filter((step) => String(step?.type || '').trim().toLowerCase() === 'goto')
+      .map((step) => this.normalizeAbsoluteUrl(step?.value))
+      .filter((value): value is string => Boolean(value));
+  }
+
+  private normalizeAbsoluteUrl(value: unknown) {
+    const raw = String(value || '').trim();
+    return /^https?:\/\//i.test(raw)
+      ? raw
+      : undefined;
+  }
+
+  private tryGetOrigin(...values: unknown[]) {
+    for (const value of values) {
+      const raw = this.normalizeAbsoluteUrl(value);
+      if (!raw) {
+        continue;
+      }
+      try {
+        return new URL(raw).origin;
+      } catch {
+        continue;
+      }
+    }
+    return undefined;
+  }
+
+  private sameOrigin(left: string, right: string) {
+    try {
+      return new URL(left).origin === new URL(right).origin;
+    } catch {
+      return left === right;
     }
   }
 

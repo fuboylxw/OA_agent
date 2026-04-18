@@ -17,6 +17,7 @@ export interface ResolvedRequestAuth {
   roles: string[];
   username?: string;
   displayName?: string;
+  identityType?: string;
   sessionToken?: string;
   source: 'session' | 'request';
 }
@@ -30,7 +31,7 @@ export class RequestAuthService {
   resolveTenant(
     req: Request,
     explicitTenantId?: string | null,
-  ): Pick<ResolvedRequestAuth, 'tenantId' | 'roles' | 'username' | 'displayName' | 'sessionToken' | 'source'> {
+  ): Pick<ResolvedRequestAuth, 'tenantId' | 'roles' | 'username' | 'displayName' | 'identityType' | 'sessionToken' | 'source'> {
     const session = this.resolveSession(req);
     if (session) {
       return {
@@ -38,6 +39,7 @@ export class RequestAuthService {
         roles: session.claims.roles,
         username: session.claims.username,
         displayName: session.claims.displayName,
+        identityType: session.claims.identityType,
         sessionToken: session.token,
         source: 'session',
       };
@@ -78,6 +80,7 @@ export class RequestAuthService {
         roles: session.claims.roles,
         username: session.claims.username,
         displayName: session.claims.displayName,
+        identityType: session.claims.identityType,
         sessionToken: session.token,
         source: 'session',
       };
@@ -115,6 +118,7 @@ export class RequestAuthService {
       roles: this.parseRoles(user.roles),
       username: user.username,
       displayName: user.displayName,
+      identityType: typeof user.identityType === 'string' ? user.identityType : undefined,
       source: 'request',
     };
   }

@@ -11,6 +11,7 @@ import {
   formatExecutionModes,
   resolvePublishedAccessMode,
 } from '../../lib/connector-access-mode';
+import { IDENTITY_SCOPE_META, normalizeIdentityScope } from '../../lib/identity-scope';
 
 function formatDate(value?: string | null) {
   if (!value) return '-';
@@ -97,7 +98,7 @@ function ConnectorDetail() {
           </span>
         </div>
 
-        <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-4">
+        <div className="mb-6 grid grid-cols-1 gap-4 md:grid-cols-5">
           <div className="rounded-xl border border-gray-200 bg-white p-5">
             <div className="text-sm text-gray-500">基础地址</div>
             <div className="mt-2 break-all text-sm text-gray-900">{connector.baseUrl}</div>
@@ -106,6 +107,12 @@ function ConnectorDetail() {
             <div className="text-sm text-gray-500">接入方式</div>
             <div className="mt-2 text-sm text-gray-900">
               {connectorAccessMode === 'unknown' ? '-' : RESOLVED_ACCESS_MODE_META[connectorAccessMode].label}
+            </div>
+          </div>
+          <div className="rounded-xl border border-gray-200 bg-white p-5">
+            <div className="text-sm text-gray-500">适用范围</div>
+            <div className="mt-2 text-sm text-gray-900">
+              {IDENTITY_SCOPE_META[normalizeIdentityScope(connector.identityScope)].label}
             </div>
           </div>
           <div className="rounded-xl border border-gray-200 bg-white p-5">
@@ -217,7 +224,7 @@ function ConnectorDetail() {
 
 export default function ConnectorDetailPage() {
   return (
-    <AuthGuard allowedRoles={['admin', 'flow_manager']}>
+    <AuthGuard allowedRoles={['admin']}>
       <ConnectorDetail />
     </AuthGuard>
   );

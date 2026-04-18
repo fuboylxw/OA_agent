@@ -56,6 +56,7 @@ model User {
   username    String
   email       String
   displayName String
+  identityType String?
   roles       Json // ["admin", "flow_manager", "user", "auditor"]
   oaUserId    String? // OA系统中的用户ID
   status      String   @default("active")
@@ -83,6 +84,7 @@ model BootstrapJob {
   tenantId        String
   connectorId     String?   // 发布后关联的连接器，删除连接器时置空
   name            String?
+  identityScope   String    @default("both")
   status          String    @default("CREATED") // CREATED -> DISCOVERING -> PARSING -> AUTH_PROBING -> VALIDATING -> SELF_HEALING -> REVALIDATING -> NORMALIZING -> COMPILING -> PUBLISHED / PARTIALLY_PUBLISHED / VALIDATION_FAILED / FAILED / CONNECTOR_DELETED
   queueJobId      String?
   currentStage    String?
@@ -344,6 +346,7 @@ model Connector {
   id              String    @id @default(uuid())
   tenantId        String
   name            String
+  identityScope   String    @default("both")
   oaType          String // openapi, form-page, hybrid
   oaVendor        String? // 厂商名称
   oaVersion       String?
@@ -669,13 +672,20 @@ model PermissionPolicy {
 // ============================================================
 
 model ChatSession {
-  id        String   @id @default(uuid())
-  tenantId  String
-  userId    String
-  status    String   @default("active") // active, closed
-  metadata  Json?
-  createdAt DateTime @default(now())
-  updatedAt DateTime @updatedAt
+  id                     String    @id @default(uuid())
+  tenantId               String
+  userId                 String
+  status                 String    @default("active") // active, archived, deleted, purged
+  metadata               Json?
+  archivedAt             DateTime?
+  archivedSource         String?
+  archiveReason          String?
+  restorableUntil        DateTime?
+  retainedUntil          DateTime?
+  purgedAt               DateTime?
+  recoverySubmissionId   String?
+  createdAt              DateTime  @default(now())
+  updatedAt              DateTime  @updatedAt
 
   tenant   Tenant        @relation(fields: [tenantId], references: [id])
   user     User          @relation(fields: [userId], references: [id])
@@ -744,6 +754,11 @@ model Submission {
   submittedAt    DateTime?
   lastSyncedAt   DateTime? // 上次同步时间
   syncFailCount  Int       @default(0) // 连续同步失败次数
+  sessionId      String?
+  statusCategory String?   // draft, active, terminal
+  restoreStatus  String?   // available, summary_only, unavailable
+  restoreExpiresAt DateTime?
+  retainedUntil  DateTime?
   createdAt      DateTime  @default(now())
   updatedAt      DateTime  @updatedAt
 

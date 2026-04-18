@@ -16,6 +16,11 @@ import {
   type AccessModeKey as AccessMode,
   resolveAccessModeFromAuthConfig,
 } from '../lib/connector-access-mode';
+import {
+  IDENTITY_SCOPE_META,
+  type IdentityScope,
+  normalizeIdentityScope,
+} from '../lib/identity-scope';
 
 const TERMINAL_STATUSES = ['PUBLISHED', 'FAILED', 'VALIDATION_FAILED', 'PARTIALLY_PUBLISHED', 'MANUAL_REVIEW'];
 type ReactivateMode = 'reuse' | 'new';
@@ -37,6 +42,7 @@ type BootstrapFormState = {
   connectorId: string;
   name: string;
   oaUrl: string;
+  identityScope: IdentityScope | '';
   accessMode: AccessMode;
   apiDocType: ApiDocType;
   apiDocContent: string;
@@ -50,6 +56,7 @@ type BootstrapJob = {
   id: string;
   name?: string | null;
   oaUrl?: string | null;
+  identityScope?: IdentityScope | null;
   openApiUrl?: string | null;
   createdAt?: string | null;
   status: string;
@@ -61,6 +68,7 @@ type ConnectorOption = {
   id: string;
   name: string;
   baseUrl?: string | null;
+  identityScope?: IdentityScope | null;
   oaType?: string | null;
 };
 
@@ -70,6 +78,7 @@ function createEmptyFormState(): BootstrapFormState {
     connectorId: '',
     name: '',
     oaUrl: '',
+    identityScope: '',
     accessMode: 'backend_api',
     apiDocType: 'openapi',
     apiDocContent: '',
@@ -88,8 +97,9 @@ function createEmptyFormState(): BootstrapFormState {
 
 const AUTH_NOTICE = '认证信息可选。不要把用户真实密码交给模型或机器人，优先使用会话票据、外部密钥或让用户自行登录。';
 const TEXT_GUIDE_FILE_ACCEPT = '.txt,.md,.markdown,.text,.log';
-const DIRECT_LINK_FILE_ACCEPT = '.json,.txt';
+const DIRECT_LINK_FILE_ACCEPT = '.json,.txt,.md,.markdown,.text,.log';
 const TEXT_GUIDE_TEMPLATE_DOWNLOAD_URL = '/examples/text-guide-example.txt';
+const DIRECT_LINK_TEMPLATE_DOWNLOAD_URL = '/examples/direct-link-example.txt';
 const TEXT_GUIDE_PLACEHOLDER = [
   '流程: 请假申请',
   '打开 OA 首页',
@@ -110,6 +120,36 @@ const TEXT_GUIDE_PLACEHOLDER = [
   '输入 说明',
   '点击 提交',
 ].join('\n');
+const DIRECT_LINK_GUIDE_PLACEHOLDER = [
+  '# 全局',
+  '认证入口: https://auth.example.com/',
+  '系统网址: https://oa.example.com/',
+  '',
+  '## 流程: 请假申请',
+  '描述: 教职工请假申请示例',
+  '步骤:',
+  '- 访问 https://auth.example.com/',
+  '- 访问 https://oa.example.com/',
+  '- 访问 https://oa.example.com/workflow/new?templateId=leave_request',
+  '- 填写 请假事由 | 说明: 填写本次请假的具体原因 | 示例: 家中有事，需要请假半天',
+  '- 填写 开始日期 | 说明: 请假开始日期 | 示例: 2026-04-20',
+  '- 填写 结束日期 | 说明: 请假结束日期 | 示例: 2026-04-20',
+  '- 填写 外出地点 | 说明: 请假期间所在地点 | 示例: 北京市海淀区',
+  '- 填写 外出通讯方式 | 说明: 请假期间可联系到本人的手机号或其他联系方式 | 示例: 13800000000',
+  '- 点击 保存待发',
+  '- 看到 提交成功 就结束',
+  '',
+  '## 流程: 用印申请',
+  '描述: 公章或合同章申请示例',
+  '步骤:',
+  '- 访问 https://auth.example.com/',
+  '- 访问 https://oa.example.com/',
+  '- 访问 https://oa.example.com/workflow/new?templateId=seal_apply',
+  '- 填写 文件类型、名称及份数 | 说明: 填写需要盖章文件的类型、文件名称和份数 | 示例: 劳务合同 2份',
+  '- 上传 用印附件 | 说明: 上传需要盖章的文件 | 示例: 劳务合同.pdf',
+  '- 点击 保存待发',
+  '- 看到 提交成功 就结束',
+].join('\n');
 
 function normalizeAuthConfig(value: Record<string, any> | null | undefined) {
   return Object.fromEntries(Object.entries(value || {}).filter(([key, val]) => !key.startsWith('_') && val !== ''));
@@ -128,15 +168,17 @@ function resolveAccessModeFromJob(job: BootstrapJob): AccessMode {
 }
 
 function getBootstrapValidationMessage(
-  value: Pick<BootstrapFormState, 'connectorMode' | 'connectorId' | 'accessMode' | 'apiDocContent' | 'apiDocUrl' | 'rpaFlowContent'>,
+  value: Pick<BootstrapFormState, 'connectorMode' | 'connectorId' | 'oaUrl' | 'identityScope' | 'accessMode' | 'apiDocContent' | 'apiDocUrl' | 'rpaFlowContent'>,
 ) {
   if (value.connectorMode === 'existing' && !value.connectorId) return '请选择要导入的连接器。';
+  if (value.connectorMode === 'new' && !value.oaUrl.trim()) return '创建新连接器时必须填写系统网址。';
+  if (value.connectorMode === 'new' && !value.identityScope) return '创建新连接器时必须指定适用身份范围。';
 
   const hasApi = Boolean(value.apiDocContent.trim());
   const hasRpa = Boolean(value.rpaFlowContent.trim());
 
   if (value.accessMode === 'backend_api' && !hasApi) return '接口接入必须提供接口文档。';
-  if (value.accessMode === 'direct_link' && !hasRpa) return '链接直达接入必须提供页面流程 JSON。';
+  if (value.accessMode === 'direct_link' && !hasRpa) return '链接直达接入必须提供页面流程 JSON 或流程化文字模板。';
   if (value.accessMode === 'text_guide' && !hasRpa) return '文字示教接入必须填写操作步骤说明。';
   return '';
 }
@@ -151,6 +193,7 @@ function buildPayload(formData: BootstrapFormState) {
   } else {
     if (formData.name.trim()) payload.name = formData.name.trim();
     if (formData.oaUrl.trim()) payload.oaUrl = formData.oaUrl.trim();
+    if (formData.identityScope) payload.identityScope = formData.identityScope;
   }
 
   const authConfig = normalizeAuthConfig(formData.authConfig);
@@ -222,9 +265,30 @@ function BasicFields({ state, onChange }: { state: BootstrapFormState; onChange:
         <input disabled={state.connectorMode === 'existing'} className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-500" value={state.name} onChange={(e) => onChange((prev) => ({ ...prev, name: e.target.value }))} placeholder="例如：财务 OA" />
       </div>
       <div>
-        <label className="mb-1 block text-sm font-medium text-gray-700">系统网址（选填）</label>
+        <label className="mb-1 block text-sm font-medium text-gray-700">系统网址（必填）</label>
         <input disabled={state.connectorMode === 'existing'} className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-500" value={state.oaUrl} onChange={(e) => onChange((prev) => ({ ...prev, oaUrl: e.target.value }))} placeholder="https://oa.example.com" />
-        <p className="mt-1 text-xs text-gray-500">{state.connectorMode === 'existing' ? '已有连接器的名称和地址由连接器管理维护。' : '不知道也可以先不填；后面在步骤里写网址也能识别。'}</p>
+        <p className="mt-1 text-xs text-gray-500">{state.connectorMode === 'existing' ? '已有连接器的名称和地址由连接器管理维护。' : '创建新连接器时必须提供业务系统网址，后续流程会默认继承它。'}</p>
+      </div>
+      <div className="sm:col-span-2">
+        <label className="mb-1 block text-sm font-medium text-gray-700">适用身份范围（必填）</label>
+        <select
+          disabled={state.connectorMode === 'existing'}
+          className="w-full rounded-lg border border-gray-300 bg-white px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500 disabled:bg-gray-100 disabled:text-gray-500"
+          value={state.identityScope}
+          onChange={(e) => onChange((prev) => ({ ...prev, identityScope: e.target.value === '' ? '' : normalizeIdentityScope(e.target.value) }))}
+        >
+          <option value="">请选择适用范围</option>
+          <option value="teacher">老师可用</option>
+          <option value="student">学生可用</option>
+          <option value="both">老师和学生都可用</option>
+        </select>
+        <p className="mt-1 text-xs text-gray-500">
+          {state.connectorMode === 'existing'
+            ? `已有连接器的适用身份范围由连接器管理维护，当前为：${IDENTITY_SCOPE_META[normalizeIdentityScope(state.identityScope)].label}。`
+            : state.identityScope
+              ? IDENTITY_SCOPE_META[normalizeIdentityScope(state.identityScope)].description
+              : '请选择该连接器下流程面向的使用身份：老师、学生或都可。'}
+        </p>
       </div>
     </section>
   );
@@ -258,7 +322,12 @@ function SourceSystemFields({
         </button>
         <button
           type="button"
-          onClick={() => onChange((prev) => ({ ...prev, connectorMode: 'new', connectorId: '' }))}
+          onClick={() => onChange((prev) => ({
+            ...prev,
+            connectorMode: 'new',
+            connectorId: '',
+            identityScope: prev.connectorMode === 'new' ? prev.identityScope : '',
+          }))}
           className={`rounded-xl border p-4 text-left ${state.connectorMode === 'new' ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-gray-300'}`}
         >
           <div className="text-sm font-semibold text-gray-900">创建新连接器</div>
@@ -279,6 +348,7 @@ function SourceSystemFields({
                 connectorId: event.target.value,
                 name: connector?.name || '',
                 oaUrl: connector?.baseUrl || '',
+                identityScope: normalizeIdentityScope(connector?.identityScope),
               }));
             }}
           >
@@ -286,12 +356,16 @@ function SourceSystemFields({
             {connectors.map((connector) => (
               <option key={connector.id} value={connector.id}>
                 {connector.name}
+                {connector.identityScope ? `（${IDENTITY_SCOPE_META[normalizeIdentityScope(connector.identityScope)].badge}）` : ''}
                 {connector.baseUrl ? ` - ${connector.baseUrl}` : ''}
               </option>
             ))}
           </select>
           {selectedConnector && (
-            <p className="mt-1 text-xs text-gray-500">将把本次批量解析出的流程发布到连接器：{selectedConnector.name}</p>
+            <p className="mt-1 text-xs text-gray-500">
+              将把本次批量解析出的流程发布到连接器：{selectedConnector.name}
+              {selectedConnector.identityScope ? ` · ${IDENTITY_SCOPE_META[normalizeIdentityScope(selectedConnector.identityScope)].label}` : ''}
+            </p>
           )}
           {connectors.length === 0 && (
             <p className="mt-1 text-xs text-amber-700">当前还没有连接器，请选择“创建新连接器”。</p>
@@ -421,16 +495,23 @@ function FlowFields({
   onFileUpload: (event: ChangeEvent<HTMLInputElement>) => void;
 }) {
   const isTextGuide = state.accessMode === 'text_guide';
+  const isDirectLink = state.accessMode === 'direct_link';
   const placeholder = isTextGuide
     ? TEXT_GUIDE_PLACEHOLDER
-    : JSON.stringify({ flows: [{ processCode: 'expense_submit', processName: '费用报销', actions: { submit: { steps: [{ type: 'goto', value: 'https://oa.example.com/expense' }, { type: 'click', target: { kind: 'text', value: '新建申请' } }, { type: 'click', target: { kind: 'text', value: '提交' } }] } } }] }, null, 2);
+    : (isDirectLink
+      ? DIRECT_LINK_GUIDE_PLACEHOLDER
+      : JSON.stringify({ flows: [{ processCode: 'expense_submit', processName: '费用报销', actions: { submit: { steps: [{ type: 'goto', value: 'https://oa.example.com/expense' }, { type: 'click', target: { kind: 'text', value: '新建申请' } }, { type: 'click', target: { kind: 'text', value: '提交' } }] } } }] }, null, 2));
 
   return (
     <section className="space-y-4 rounded-xl border border-gray-200 p-4">
       <div>
         <h3 className="text-sm font-semibold text-gray-900">{isTextGuide ? '文字示教步骤' : '页面流程定义'}</h3>
         <p className="mt-1 text-xs text-gray-500">
-          {isTextGuide ? '不会写流程也没关系，把平时怎么点、怎么填、最后看到什么结果，按顺序写下来就行。' : '填写可执行的页面流程 JSON，也可以先上传文件再继续编辑。'}
+          {isTextGuide
+            ? '不会写流程也没关系，把平时怎么点、怎么填、最后看到什么结果，按顺序写下来就行。'
+            : isDirectLink
+              ? '链接直达接入支持两种材料：简易文字模板，或专家使用的页面流程 JSON。一次可以在同一份模板里写多个流程；模板里写了几个“填写/上传”项，就按几个字段解析。'
+              : '填写可执行的页面流程 JSON，也可以先上传文件再继续编辑。'}
         </p>
       </div>
 
@@ -441,7 +522,9 @@ function FlowFields({
             <p className="mt-1 text-xs leading-5 text-gray-500">
               {isTextGuide
                 ? '支持 .txt / .md / .markdown / .text / .log。上传后会自动填入下方输入框，你还能继续改。'
-                : '支持 .json / .txt，上传后会自动填入下方文本框。'}
+                : isDirectLink
+                  ? '支持 .json / .txt / .md / .markdown / .text / .log。推荐先用简易模板描述“先访问什么、再填写什么、最后点击什么”；字段后还可以补充“说明: ...”“示例: ...”；也支持直接上传 JSON。'
+                  : '支持 .json / .txt，上传后会自动填入下方文本框。'}
             </p>
           </div>
           <label className="inline-flex cursor-pointer items-center justify-center rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 hover:border-blue-400 hover:bg-blue-50">
@@ -461,7 +544,7 @@ function FlowFields({
           <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
             <div>
               <h4 className="text-sm font-semibold text-gray-900">不会写也没关系</h4>
-              <p className="mt-1 text-xs leading-5 text-gray-500">先下载模板，把你平时怎么办这件事按顺序写进去，再上传或粘贴到下面即可。看不懂“流程编码、参数、测试样例”也没关系，先按自然语言把步骤写清楚就行。</p>
+              <p className="mt-1 text-xs leading-5 text-gray-500">先下载模板，把你平时怎么办这件事按顺序写进去，再上传或粘贴到下面即可。看不懂“流程编码”也没关系，先按自然语言把步骤写清楚就行。</p>
             </div>
             <a
               href={TEXT_GUIDE_TEMPLATE_DOWNLOAD_URL}
@@ -475,6 +558,28 @@ function FlowFields({
         </div>
       )}
 
+      {isDirectLink && (
+        <div className="rounded-xl border border-blue-100 bg-blue-50/60 p-4">
+          <div className="flex flex-col gap-3 md:flex-row md:items-start md:justify-between">
+            <div>
+              <h4 className="text-sm font-semibold text-gray-900">推荐先用简易模板</h4>
+              <p className="mt-1 text-xs leading-5 text-gray-500">
+                不用先写 JSON。直接按“先访问什么、再访问什么、填写什么、最后点击什么”来写即可；需要时可在字段后补充说明和示例。
+                如果同一个业务系统下有多个流程，可以在同一份模板里连续写多个“流程:”分段，一次性初始化多个流程；模板里实际写了几个填写或上传项，就只解析几个字段。
+              </p>
+            </div>
+            <a
+              href={DIRECT_LINK_TEMPLATE_DOWNLOAD_URL}
+              download
+              className="inline-flex items-center gap-2 rounded-lg border border-blue-200 bg-white px-3 py-2 text-xs font-medium text-blue-700 hover:bg-blue-50"
+            >
+              <i className="fas fa-download" />
+              下载 URL 模板
+            </a>
+          </div>
+        </div>
+      )}
+
       <textarea
         rows={12}
         className="w-full rounded-lg border border-gray-300 px-3 py-2.5 font-mono text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
@@ -482,7 +587,13 @@ function FlowFields({
         onChange={(e) => onChange((prev) => ({ ...prev, rpaFlowContent: e.target.value }))}
         placeholder={placeholder}
       />
-      <p className="text-xs text-gray-500">{isTextGuide ? '先把步骤写出来就行，大多数情况下不用管下面的高级设置。' : '默认会使用 OA 地址或流程里的 URL 作为起点。需要覆盖入口或调整执行方式时，再到“高级设置”填写。'}</p>
+      <p className="text-xs text-gray-500">
+        {isTextGuide
+          ? '先把步骤写出来就行，大多数情况下不用管下面的高级设置。'
+          : isDirectLink
+            ? '推荐优先写文字模板；字段后可补充说明和示例，帮助后续更准确理解用户输入。模板里出现几个填写或上传项，初始化时就解析几个字段。默认会使用模板里的系统网址、认证入口或步骤中的 URL 作为起点。'
+            : '默认会使用 OA 地址或流程里的 URL 作为起点。需要覆盖入口或调整执行方式时，再到“高级设置”填写。'}
+      </p>
 
       <div className="hidden grid-cols-1 gap-4 sm:grid-cols-2">
         <div>
@@ -640,6 +751,7 @@ export default function BootstrapContent({ initialJobs }: { initialJobs: Bootstr
       ...createEmptyFormState(),
       accessMode: resolveAccessModeFromJob(job),
       oaUrl: job.oaUrl || '',
+      identityScope: normalizeIdentityScope(job.identityScope),
       platformConfig: { ...createEmptyFormState().platformConfig, ...normalizePlatformConfig(job?.authConfig?.platformConfig) },
       authConfig: {},
     });
@@ -659,6 +771,7 @@ export default function BootstrapContent({ initialJobs }: { initialJobs: Bootstr
             accessMode: reactivateDoc.accessMode,
             bootstrapMode: toLegacyBootstrapMode(reactivateDoc.accessMode),
             oaUrl: reactivateDoc.oaUrl || undefined,
+            identityScope: reactivateDoc.identityScope,
             authConfig: Object.keys(normalizedReactivateAuthConfig).length > 0 ? normalizedReactivateAuthConfig : undefined,
             platformConfig: reactivateDoc.accessMode !== 'backend_api' && Object.keys(normalizedReactivatePlatformConfig).length > 0
               ? normalizedReactivatePlatformConfig
@@ -707,7 +820,7 @@ export default function BootstrapContent({ initialJobs }: { initialJobs: Bootstr
                   || (['PUBLISHED', 'PARTIALLY_PUBLISHED'].includes(status.code) && !job.connectorId);
                 return (
                   <tr key={job.id}>
-                    <td className="px-4 py-3"><div className="text-sm font-medium text-gray-900">{job.name || `任务 #${job.id.substring(0, 8)}`}</div><div className="text-xs text-gray-500">{job.oaUrl || job.openApiUrl || '-'}</div></td>
+                    <td className="px-4 py-3"><div className="text-sm font-medium text-gray-900">{job.name || `任务 #${job.id.substring(0, 8)}`}</div><div className="text-xs text-gray-500">{job.oaUrl || job.openApiUrl || '-'}{` · ${IDENTITY_SCOPE_META[normalizeIdentityScope(job.identityScope)].badge}`}</div></td>
                     <td className="hidden px-4 py-3 sm:table-cell"><span className="rounded-full bg-slate-100 px-2 py-0.5 text-xs font-medium text-slate-700">{ACCESS_MODE_META[accessMode].badge}</span></td>
                     <td className="px-4 py-3"><span className={`rounded-full px-2 py-0.5 text-xs font-medium ${status.tone}`}>{status.label}</span></td>
                     <td className="hidden px-4 py-3 text-xs text-gray-500 md:table-cell">{formatDate(job.createdAt)}</td>

@@ -12,6 +12,7 @@ import { Readable } from 'stream';
 import { promisify } from 'util';
 import { ATTACHMENT_ROOT_DIR } from './attachment-upload.config';
 import { MinioObjectStorageClient } from './minio-object-storage.client';
+import { normalizeAttachmentFileName } from './attachment.utils';
 
 const copyFileAsync = promisify(copyFile);
 
@@ -45,7 +46,7 @@ export class AttachmentStorageService {
   }
 
   async persistUploadedFile(file: Express.Multer.File, assetId: string) {
-    const extension = extname(file.originalname).toLowerCase();
+    const extension = extname(normalizeAttachmentFileName(file.originalname) || file.originalname).toLowerCase();
     const storageKey = posix.join('raw', `${assetId}${extension}`);
     const fileBuffer = await fs.readFile(file.path);
     const sha256 = createHash('sha256').update(fileBuffer).digest('hex');
@@ -142,7 +143,8 @@ export class AttachmentStorageService {
   }
 
   async materializeToTempFile(storageKey: string, tempDir: string, preferredName?: string | null) {
-    const fileName = basename(preferredName || storageKey);
+    const fileName = normalizeAttachmentFileName(preferredName)
+      || basename(preferredName || storageKey);
     const targetPath = join(tempDir, fileName);
 
     if (this.minioClient) {
@@ -164,6 +166,6 @@ export class AttachmentStorageService {
   }
 
   toDownloadName(originalName: string) {
-    return basename(originalName);
+    return normalizeAttachmentFileName(originalName) || basename(originalName);
   }
 }

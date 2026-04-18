@@ -243,4 +243,38 @@ describe('FormAgent', () => {
     expect(leaveTypeField?.question).toBe('请告诉我请假类型，例如年假、事假或病假。');
     expect(leaveTypeField?.question).not.toContain('leave_type');
   });
+
+  it('appends field description and example to user-facing questions and supports multi-file hints', async () => {
+    (agent as any).llmClient = {
+      chat: jest.fn().mockRejectedValue(new Error('llm unavailable')),
+    };
+
+    const schema = {
+      fields: [
+        {
+          key: 'seal_attachment',
+          label: '用印附件',
+          type: 'file',
+          required: true,
+          description: '请上传需要盖章的完整材料',
+          example: '盖章申请表.pdf',
+          multiple: true,
+        },
+      ],
+    };
+
+    const result = await agent.extractFields('expense_submit', schema, '我要申请用印');
+
+    expect(result.missingFields).toHaveLength(1);
+    expect(result.missingFields[0]).toMatchObject({
+      key: 'seal_attachment',
+      description: '请上传需要盖章的完整材料',
+      example: '盖章申请表.pdf',
+      multiple: true,
+    });
+    expect(result.missingFields[0].question).toContain('还需要上传用印附件');
+    expect(result.missingFields[0].question).toContain('支持上传多份文件');
+    expect(result.missingFields[0].question).toContain('说明：请上传需要盖章的完整材料');
+    expect(result.missingFields[0].question).toContain('示例：盖章申请表.pdf');
+  });
 });

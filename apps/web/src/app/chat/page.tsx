@@ -8,6 +8,7 @@ import ProcessConversationCard, {
 } from '../components/ProcessConversationCard';
 import { apiClient } from '../lib/api-client';
 import { shouldPollChatSession } from '../lib/chat-process-polling';
+import { sortChatSessions } from '../lib/chat-session-list';
 import { getClientSessionToken, hasClientSession } from '../lib/client-auth';
 import { withBrowserApiBase } from '../lib/browser-api-base-url';
 
@@ -68,7 +69,15 @@ interface ChatMessage {
   needsAttachment?: boolean;
   attachments?: ChatAttachment[];
   authChallenge?: AuthChallenge;
-  missingFields?: Array<{ key: string; label: string; question: string; type?: string }>;
+  missingFields?: Array<{
+    key: string;
+    label: string;
+    question: string;
+    type?: string;
+    description?: string;
+    example?: string;
+    multiple?: boolean;
+  }>;
   processCard?: ProcessCard;
 }
 
@@ -79,11 +88,30 @@ interface ChatSession {
   messageCount: number;
   timestamp: string;
   status: string;
+  archivedAt?: string | null;
+  archivedSource?: string | null;
+  restorableUntil?: string | null;
   hasActiveProcess?: boolean;
   processName?: string | null;
   processStatus?: string | null;
+  processStatusText?: string | null;
   processStage?: ProcessCard['stage'] | null;
   reworkHint?: ProcessCard['reworkHint'] | null;
+  hasBusinessRecord?: boolean;
+  canRestoreConversation?: boolean;
+}
+
+interface ChatSidebarProps {
+  currentSessionId: string | null;
+  deletingSessionId: string | null;
+  sessions: ChatSession[];
+  showHistory: boolean;
+  onCreateNewChat: () => void;
+  onDeleteRequest: (session: ChatSession) => void;
+  onQuickAction: (message: string) => void;
+  onSelectSession: (sessionId: string) => void;
+  onShowHistoryChange: (show: boolean) => void;
+  onAction?: () => void;
 }
 
 function formatRelativeTime(date: string) {
@@ -99,44 +127,47 @@ function formatRelativeTime(date: string) {
 }
 
 function getSessionBadge(session: ChatSession) {
+  const resolvedStatusText = session.processStatusText?.trim();
+
   if (session.processStage === 'rework') {
-    switch (session.reworkHint) {
-      case 'supplement':
-        return { label: '待补件', className: 'bg-amber-100 text-amber-800' };
-      case 'modify':
-        return { label: '打回修改', className: 'bg-amber-100 text-amber-800' };
-      default:
-        return { label: '驳回待处理', className: 'bg-amber-100 text-amber-800' };
-    }
+    return {
+      label: resolvedStatusText || '驳回待处理',
+      className: 'bg-amber-100 text-amber-800',
+    };
   }
 
   if (session.hasActiveProcess) {
     if (session.processStatus === 'auth_required') {
-      return { label: '待授权', className: 'bg-amber-100 text-amber-800' };
+      return { label: resolvedStatusText || '待授权', className: 'bg-amber-100 text-amber-800' };
     }
     if (session.processStage === 'confirming') {
-      return { label: '待确认', className: 'bg-amber-100 text-amber-800' };
+      return { label: resolvedStatusText || '待确认', className: 'bg-amber-100 text-amber-800' };
     }
     if (session.processStage === 'collecting') {
-      return { label: '待补充', className: 'bg-sky-100 text-sky-700' };
+      return { label: resolvedStatusText || '待补充', className: 'bg-sky-100 text-sky-700' };
+    }
+    if (session.processStage === 'executing') {
+      return { label: resolvedStatusText || '提交执行中', className: 'bg-indigo-100 text-indigo-700' };
     }
     return {
-      label: '继续办理',
+      label: resolvedStatusText || '继续办理',
       className: 'bg-sky-100 text-sky-700',
     };
   }
 
   switch (session.processStage) {
+    case 'draft':
+      return { label: resolvedStatusText || '已保存待发', className: 'bg-amber-100 text-amber-800' };
     case 'submitted':
-      return { label: '审批中', className: 'bg-indigo-100 text-indigo-700' };
+      return { label: resolvedStatusText || '审批中', className: 'bg-indigo-100 text-indigo-700' };
     case 'completed':
-      return { label: '已完成', className: 'bg-emerald-100 text-emerald-700' };
+      return { label: resolvedStatusText || '已完成', className: 'bg-emerald-100 text-emerald-700' };
     case 'failed':
-      return { label: '失败', className: 'bg-rose-100 text-rose-700' };
+      return { label: resolvedStatusText || '失败', className: 'bg-rose-100 text-rose-700' };
     case 'cancelled':
-      return { label: '已取消', className: 'bg-slate-100 text-slate-600' };
+      return { label: resolvedStatusText || '已取消', className: 'bg-slate-100 text-slate-600' };
     case 'executing':
-      return { label: '处理中', className: 'bg-indigo-100 text-indigo-700' };
+      return { label: resolvedStatusText || '提交执行中', className: 'bg-indigo-100 text-indigo-700' };
     default:
       return null;
   }
@@ -151,10 +182,169 @@ function getActionMarker(action: string) {
   return actionMap[action] || action;
 }
 
+function ChatSidebar({
+  currentSessionId,
+  deletingSessionId,
+  sessions,
+  showHistory,
+  onCreateNewChat,
+  onDeleteRequest,
+  onQuickAction,
+  onSelectSession,
+  onShowHistoryChange,
+  onAction,
+}: ChatSidebarProps) {
+  return (
+    <>
+      <div className="p-4">
+        <button
+          onClick={() => {
+            onCreateNewChat();
+            onAction?.();
+          }}
+          className="w-full rounded-2xl bg-sky-600 py-3 text-sm font-medium text-white transition-colors hover:bg-sky-700"
+        >
+          <i className="fas fa-plus mr-2 text-xs"></i>
+          新建对话
+        </button>
+      </div>
+
+      <div className="border-b border-slate-200 px-4">
+        <button
+          onClick={() => onShowHistoryChange(true)}
+          className={`mr-6 border-b-2 py-3 text-sm font-medium transition-colors ${
+            showHistory ? 'border-sky-600 text-sky-700' : 'border-transparent text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          历史对话
+        </button>
+        <button
+          onClick={() => onShowHistoryChange(false)}
+          className={`border-b-2 py-3 text-sm font-medium transition-colors ${
+            !showHistory ? 'border-sky-600 text-sky-700' : 'border-transparent text-slate-500 hover:text-slate-700'
+          }`}
+        >
+          快捷入口
+        </button>
+      </div>
+
+      <div className="flex-1 overflow-y-auto">
+        {showHistory ? (
+          <div className="space-y-2 p-3">
+            {sessions.length === 0 ? (
+              <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">
+                暂无历史对话
+              </div>
+            ) : (
+              sessions.map((session) => {
+                const badge = getSessionBadge(session);
+                return (
+                  <div
+                    key={session.id}
+                    className={`w-full rounded-2xl border px-4 py-3 transition-all ${
+                      currentSessionId === session.id
+                        ? 'border-sky-200 bg-sky-50 shadow-sm'
+                        : 'border-transparent bg-white hover:border-slate-200 hover:bg-slate-50'
+                    }`}
+                  >
+                    <button
+                      type="button"
+                      onClick={() => {
+                        onSelectSession(session.id);
+                        onAction?.();
+                      }}
+                      className="w-full text-left"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="min-w-0">
+                          <div className="truncate text-sm font-semibold text-slate-900">
+                            {session.title || '新对话'}
+                          </div>
+                          <div className="mt-1 truncate text-xs text-slate-500">
+                            {session.processName || session.lastMessage || '暂无摘要'}
+                          </div>
+                        </div>
+                        {badge ? (
+                          <span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${badge.className}`}>
+                            {badge.label}
+                          </span>
+                        ) : null}
+                      </div>
+                      <div className="mt-2 flex items-center justify-between gap-3 text-xs text-slate-400">
+                        <span>{session.messageCount} 条消息</span>
+                        <div className="flex items-center gap-3">
+                          <span>{formatRelativeTime(session.timestamp)}</span>
+                        </div>
+                      </div>
+                    </button>
+                    <div className="mt-2 flex justify-end">
+                      <button
+                        type="button"
+                        onClick={(event) => {
+                          event.stopPropagation();
+                          onDeleteRequest(session);
+                        }}
+                        disabled={deletingSessionId === session.id}
+                        className="rounded-full px-2 py-1 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-50"
+                        title={session.hasBusinessRecord ? '从历史中移除，可在我的申请中恢复' : '永久删除'}
+                      >
+                        <i className="fas fa-trash text-[11px]"></i>
+                      </button>
+                    </div>
+                  </div>
+                );
+              })
+            )}
+          </div>
+        ) : (
+          <div className="p-4">
+            <div className="mb-4 text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">
+              快捷办理
+            </div>
+            <div className="space-y-2">
+              {QUICK_ACTIONS.map((action) => (
+                <button
+                  key={action.label}
+                  onClick={() => {
+                    onQuickAction(action.message);
+                    onAction?.();
+                  }}
+                  className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left transition-colors hover:border-sky-200 hover:bg-sky-50"
+                >
+                  <div className="flex items-center gap-3">
+                    <div className={`flex h-9 w-9 items-center justify-center rounded-2xl ${action.color}`}>
+                      <i className={`fas ${action.icon} text-sm`}></i>
+                    </div>
+                    <div className="text-sm font-medium text-slate-900">{action.label}</div>
+                  </div>
+                </button>
+              ))}
+            </div>
+          </div>
+        )}
+      </div>
+
+      <div className="border-t border-slate-200 px-4 py-4">
+        <div className="flex flex-wrap gap-2 text-xs">
+          {['发起申请', '继续办理', '查进度', '撤回', '催办'].map((intent) => (
+            <span
+              key={intent}
+              className="rounded-full bg-sky-50 px-2.5 py-1 font-medium text-sky-700"
+            >
+              {intent}
+            </span>
+          ))}
+        </div>
+      </div>
+    </>
+  );
+}
+
 export default function ChatPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const flowCode = searchParams.get('flow');
+  const requestedSessionId = searchParams.get('sessionId');
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -171,12 +361,60 @@ export default function ChatPage() {
   const [authorizingMessageId, setAuthorizingMessageId] = useState<string | null>(null);
   const [authReady, setAuthReady] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement>(null);
+  const messagesContainerRef = useRef<HTMLDivElement>(null);
+  const shouldAutoScrollRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const flowBootstrappedRef = useRef<string | null>(null);
+  const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
+  const [deleteConfirmSession, setDeleteConfirmSession] = useState<ChatSession | null>(null);
+
+  const isNearBottom = useCallback(() => {
+    const container = messagesContainerRef.current;
+    if (!container) {
+      return true;
+    }
+
+    const distanceToBottom = container.scrollHeight - container.scrollTop - container.clientHeight;
+    return distanceToBottom <= 120;
+  }, []);
+
+  const scrollToBottom = useCallback((behavior: ScrollBehavior = 'smooth') => {
+    const container = messagesContainerRef.current;
+    if (container) {
+      container.scrollTo({
+        top: container.scrollHeight,
+        behavior,
+      });
+      return;
+    }
+
+    messagesEndRef.current?.scrollIntoView({ behavior, block: 'end' });
+  }, []);
+
+  const syncScrollState = useCallback(() => {
+    const nearBottom = isNearBottom();
+    shouldAutoScrollRef.current = nearBottom;
+    setShowScrollToBottom(!nearBottom);
+  }, [isNearBottom]);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
-  }, [messages, loading]);
+    if (showHistory) {
+      return;
+    }
+
+    if (!shouldAutoScrollRef.current) {
+      return;
+    }
+
+    const frameId = window.requestAnimationFrame(() => {
+      scrollToBottom(messages.length <= 1 ? 'auto' : 'smooth');
+    });
+
+    return () => {
+      window.cancelAnimationFrame(frameId);
+    };
+  }, [loading, messages, scrollToBottom, showHistory]);
 
   const ensureSession = useCallback(() => {
     if (hasClientSession()) {
@@ -194,23 +432,33 @@ export default function ChatPage() {
       }
 
       const response = await apiClient.get('/assistant/sessions');
-      setSessions(response.data || []);
+      setSessions(sortChatSessions(Array.isArray(response.data) ? response.data : []));
     } catch (error) {
       console.error('Failed to load sessions:', error);
     }
   }, [ensureSession]);
 
-  const loadSession = useCallback(async (id: string) => {
+  const loadSession = useCallback(async (
+    id: string,
+    options?: { source?: 'manual' | 'poll' },
+  ) => {
     try {
       const response = await apiClient.get(`/assistant/sessions/${id}/messages`);
       const data = response.data || {};
+      const isPassiveRefresh = options?.source === 'poll';
+      if (!isPassiveRefresh) {
+        shouldAutoScrollRef.current = true;
+        setShowScrollToBottom(false);
+      }
       setMessages(Array.isArray(data.messages) ? data.messages : []);
       setSessionId(id);
       setSessionState(data.session?.sessionState || null);
-      setSidebarOpen(false);
-      setShowHistory(true);
-      setUploadError('');
-      setAuthorizingMessageId(null);
+      if (!isPassiveRefresh) {
+        setSidebarOpen(false);
+        setShowHistory(true);
+        setUploadError('');
+        setAuthorizingMessageId(null);
+      }
     } catch (error) {
       console.error('Failed to load session:', error);
     }
@@ -237,6 +485,8 @@ export default function ChatPage() {
 
       setMessages((prev) => [...prev, userMessage]);
     }
+    shouldAutoScrollRef.current = true;
+    setShowScrollToBottom(false);
     setInput('');
     setUploadError('');
     const filesToSend = [...pendingFiles];
@@ -317,6 +567,17 @@ export default function ChatPage() {
   }, [authReady, loadSessions]);
 
   useEffect(() => {
+    if (!authReady || !requestedSessionId) {
+      return;
+    }
+    if (sessionId === requestedSessionId) {
+      return;
+    }
+
+    void loadSession(requestedSessionId, { source: 'manual' });
+  }, [authReady, loadSession, requestedSessionId, sessionId]);
+
+  useEffect(() => {
     if (!authReady) {
       return;
     }
@@ -341,8 +602,8 @@ export default function ChatPage() {
         setShowHistory(false);
         await sendMessage(`我要办理${processName}`);
       } catch {
-        setInput(`我要办理${flowCode}`);
         setShowHistory(false);
+        await sendMessage(`我要办理${flowCode}`);
       }
     })();
   }, [authReady, ensureSession, flowCode, loading, messages.length, sendMessage, sessionId]);
@@ -353,7 +614,7 @@ export default function ChatPage() {
     }
 
     const intervalId = window.setInterval(() => {
-      void loadSession(sessionId);
+      void loadSession(sessionId, { source: 'poll' });
       void loadSessions();
     }, 3000);
 
@@ -362,7 +623,9 @@ export default function ChatPage() {
     };
   }, [authReady, loadSession, loadSessions, messages, sessionId, sessionState]);
 
-  const createNewChat = () => {
+  const clearConversationState = useCallback((options?: { keepHistoryView?: boolean }) => {
+    shouldAutoScrollRef.current = true;
+    setShowScrollToBottom(false);
     setMessages([]);
     setInput('');
     setSessionId(null);
@@ -371,11 +634,18 @@ export default function ChatPage() {
     setUploadError('');
     setUploadTargetFieldKey(null);
     setAuthorizingMessageId(null);
-    setShowHistory(false);
+    setDeleteConfirmSession(null);
+    if (!options?.keepHistoryView) {
+      setShowHistory(false);
+    }
     if (flowCode) {
       flowBootstrappedRef.current = flowCode;
     }
-  };
+  }, [flowCode]);
+
+  const createNewChat = useCallback(() => {
+    clearConversationState();
+  }, [clearConversationState]);
 
   const handleFileUpload = async (event: React.ChangeEvent<HTMLInputElement>) => {
     const files = event.target.files;
@@ -585,135 +855,40 @@ export default function ChatPage() {
 
     try {
       await apiClient.post(`/assistant/sessions/${sessionId}/reset`);
-      await loadSession(sessionId);
+      await loadSession(sessionId, { source: 'manual' });
     } catch (error) {
       console.error('Failed to reset session:', error);
     }
   };
 
-  const SidebarContent = ({ onAction }: { onAction?: () => void }) => (
-    <>
-      <div className="p-4">
-        <button
-          onClick={() => {
-            createNewChat();
-            onAction?.();
-          }}
-          className="w-full rounded-2xl bg-sky-600 py-3 text-sm font-medium text-white transition-colors hover:bg-sky-700"
-        >
-          <i className="fas fa-plus mr-2 text-xs"></i>
-          新建对话
-        </button>
-      </div>
+  const handleRequestDeleteSession = useCallback((targetSession: ChatSession) => {
+    setDeleteConfirmSession(targetSession);
+  }, []);
 
-      <div className="border-b border-slate-200 px-4">
-        <button
-          onClick={() => setShowHistory(true)}
-          className={`mr-6 border-b-2 py-3 text-sm font-medium transition-colors ${
-            showHistory ? 'border-sky-600 text-sky-700' : 'border-transparent text-slate-500 hover:text-slate-700'
-          }`}
-        >
-          历史对话
-        </button>
-        <button
-          onClick={() => setShowHistory(false)}
-          className={`border-b-2 py-3 text-sm font-medium transition-colors ${
-            !showHistory ? 'border-sky-600 text-sky-700' : 'border-transparent text-slate-500 hover:text-slate-700'
-          }`}
-        >
-          快捷入口
-        </button>
-      </div>
+  const handleDeleteSession = useCallback(async () => {
+    if (!deleteConfirmSession) {
+      return;
+    }
 
-      <div className="flex-1 overflow-y-auto">
-        {showHistory ? (
-          <div className="space-y-2 p-3">
-            {sessions.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">
-                暂无历史对话
-              </div>
-            ) : (
-              sessions.map((session) => {
-                const badge = getSessionBadge(session);
-                return (
-                  <button
-                    key={session.id}
-                    onClick={() => {
-                      void loadSession(session.id);
-                      onAction?.();
-                    }}
-                    className={`w-full rounded-2xl border px-4 py-3 text-left transition-all ${
-                      sessionId === session.id
-                        ? 'border-sky-200 bg-sky-50 shadow-sm'
-                        : 'border-transparent bg-white hover:border-slate-200 hover:bg-slate-50'
-                    }`}
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      <div className="min-w-0">
-                        <div className="truncate text-sm font-semibold text-slate-900">
-                          {session.title || '新对话'}
-                        </div>
-                        <div className="mt-1 truncate text-xs text-slate-500">
-                          {session.processName || session.lastMessage || '暂无摘要'}
-                        </div>
-                      </div>
-                      {badge ? (
-                        <span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${badge.className}`}>
-                          {badge.label}
-                        </span>
-                      ) : null}
-                    </div>
-                    <div className="mt-2 flex items-center justify-between text-xs text-slate-400">
-                      <span>{session.messageCount} 条消息</span>
-                      <span>{formatRelativeTime(session.timestamp)}</span>
-                    </div>
-                  </button>
-                );
-              })
-            )}
-          </div>
-        ) : (
-          <div className="p-4">
-            <div className="mb-4 text-xs font-semibold uppercase tracking-[0.24em] text-slate-400">
-              快捷办理
-            </div>
-            <div className="space-y-2">
-              {QUICK_ACTIONS.map((action) => (
-                <button
-                  key={action.label}
-                  onClick={() => {
-                    void sendMessage(action.message);
-                    onAction?.();
-                  }}
-                  className="w-full rounded-2xl border border-slate-200 bg-white px-4 py-3 text-left transition-colors hover:border-sky-200 hover:bg-sky-50"
-                >
-                  <div className="flex items-center gap-3">
-                    <div className={`flex h-9 w-9 items-center justify-center rounded-2xl ${action.color}`}>
-                      <i className={`fas ${action.icon} text-sm`}></i>
-                    </div>
-                    <div className="text-sm font-medium text-slate-900">{action.label}</div>
-                  </div>
-                </button>
-              ))}
-            </div>
-          </div>
-        )}
-      </div>
+    const targetSession = deleteConfirmSession;
+    setDeletingSessionId(targetSession.id);
+    try {
+      const mode = targetSession.hasBusinessRecord ? 'archive' : 'purge';
+      await apiClient.delete(`/assistant/sessions/${targetSession.id}`, {
+        params: { mode },
+      });
 
-      <div className="border-t border-slate-200 px-4 py-4">
-        <div className="flex flex-wrap gap-2 text-xs">
-          {['发起申请', '继续办理', '查进度', '撤回', '催办'].map((intent) => (
-            <span
-              key={intent}
-              className="rounded-full bg-sky-50 px-2.5 py-1 font-medium text-sky-700"
-            >
-              {intent}
-            </span>
-          ))}
-        </div>
-      </div>
-    </>
-  );
+      if (sessionId === targetSession.id) {
+        clearConversationState({ keepHistoryView: true });
+      }
+      setDeleteConfirmSession(null);
+      await loadSessions();
+    } catch (error) {
+      console.error('Failed to delete session:', error);
+    } finally {
+      setDeletingSessionId(null);
+    }
+  }, [clearConversationState, deleteConfirmSession, loadSessions, sessionId]);
 
   if (!authReady) {
     return (
@@ -724,7 +899,7 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="flex h-full bg-[linear-gradient(180deg,#f7fbff_0%,#f5f7fb_100%)]">
+    <div className="flex h-full min-h-0 bg-[linear-gradient(180deg,#f7fbff_0%,#f5f7fb_100%)]">
       {sidebarOpen ? (
         <div
           className="fixed inset-0 z-40 bg-slate-950/35 lg:hidden"
@@ -746,10 +921,25 @@ export default function ChatPage() {
             <i className="fas fa-times"></i>
           </button>
         </div>
-        <SidebarContent onAction={() => setSidebarOpen(false)} />
+        <ChatSidebar
+          currentSessionId={sessionId}
+          deletingSessionId={deletingSessionId}
+          sessions={sessions}
+          showHistory={showHistory}
+          onCreateNewChat={createNewChat}
+          onDeleteRequest={handleRequestDeleteSession}
+          onQuickAction={(message) => {
+            void sendMessage(message);
+          }}
+          onSelectSession={(nextSessionId) => {
+            void loadSession(nextSessionId, { source: 'manual' });
+          }}
+          onShowHistoryChange={setShowHistory}
+          onAction={() => setSidebarOpen(false)}
+        />
       </aside>
 
-      <main className="flex min-w-0 flex-1 flex-col">
+      <main className="flex min-h-0 min-w-0 flex-1 flex-col">
         <div className="px-4 pt-4 lg:hidden">
           <div className="mx-auto flex max-w-5xl">
             <button
@@ -794,8 +984,13 @@ export default function ChatPage() {
           </div>
         ) : null}
 
-        <div className="flex-1 overflow-y-auto">
-          <div className="mx-auto flex min-h-full max-w-5xl flex-col px-4 py-6">
+        <div className="relative flex-1 min-h-0">
+          <div
+            ref={messagesContainerRef}
+            onScroll={syncScrollState}
+            className="h-full min-h-0 overflow-y-auto"
+          >
+            <div className="mx-auto flex min-h-full max-w-5xl flex-col px-4 py-6">
             {messages.length === 0 ? (
               <div className="flex flex-1 flex-col items-center justify-center text-center">
                 <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-[1.75rem] bg-sky-100 text-sky-700">
@@ -898,6 +1093,7 @@ export default function ChatPage() {
                               card={message.processCard}
                               actionButtons={message.actionButtons}
                               onAction={(action) => handleActionButton(message.id, action)}
+                              onUploadField={(fieldKey) => openFilePicker(fieldKey)}
                               disabled={loading || authorizingMessageId === message.id}
                             />
                           </div>
@@ -957,6 +1153,20 @@ export default function ChatPage() {
             ) : null}
             <div ref={messagesEndRef} />
           </div>
+          </div>
+          {showScrollToBottom && !loading && messages.length > 0 ? (
+            <button
+              type="button"
+              onClick={() => {
+                shouldAutoScrollRef.current = true;
+                setShowScrollToBottom(false);
+                scrollToBottom('smooth');
+              }}
+              className="absolute bottom-5 right-5 rounded-full border border-sky-200 bg-white px-4 py-2 text-xs font-medium text-sky-700 shadow-sm transition-colors hover:bg-sky-50"
+            >
+              回到底部
+            </button>
+          ) : null}
         </div>
 
         <div className="border-t border-slate-200 bg-white/95 px-4 py-4 backdrop-blur" style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
@@ -1038,6 +1248,55 @@ export default function ChatPage() {
           </div>
         </div>
       </main>
+
+      {deleteConfirmSession ? (
+        <div
+          className="fixed inset-0 z-[70] flex items-center justify-center bg-slate-950/45 p-4"
+          onClick={() => {
+            if (!deletingSessionId) {
+              setDeleteConfirmSession(null);
+            }
+          }}
+        >
+          <div
+            className="w-full max-w-md rounded-3xl bg-white shadow-2xl"
+            onClick={(event) => event.stopPropagation()}
+          >
+            <div className="px-6 py-5">
+              <h2 className="text-lg font-semibold text-slate-900">确认删除这条对话？</h2>
+              <p className="mt-3 text-sm leading-6 text-slate-600">
+                {deleteConfirmSession.hasBusinessRecord
+                  ? '删除后，这条对话会从左侧历史中移除，但不会删除对应的业务记录。后续仍可在“我的申请”中恢复。'
+                  : '删除后，这条对话会被永久删除，且无法恢复。'}
+              </p>
+              <div className="mt-4 rounded-2xl bg-slate-50 px-4 py-3 text-sm text-slate-700">
+                <div className="font-medium text-slate-900">{deleteConfirmSession.title || '新对话'}</div>
+                <div className="mt-1 truncate text-xs text-slate-500">
+                  {deleteConfirmSession.processName || deleteConfirmSession.lastMessage || '暂无摘要'}
+                </div>
+              </div>
+            </div>
+            <div className="flex gap-3 border-t border-slate-200 px-6 py-4">
+              <button
+                type="button"
+                onClick={() => setDeleteConfirmSession(null)}
+                disabled={Boolean(deletingSessionId)}
+                className="flex-1 rounded-2xl border border-slate-300 px-4 py-2.5 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                取消
+              </button>
+              <button
+                type="button"
+                onClick={() => void handleDeleteSession()}
+                disabled={deletingSessionId === deleteConfirmSession.id}
+                className="flex-1 rounded-2xl bg-rose-600 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-rose-700 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                {deletingSessionId === deleteConfirmSession.id ? '删除中...' : '确认删除'}
+              </button>
+            </div>
+          </div>
+        </div>
+      ) : null}
     </div>
   );
 }
