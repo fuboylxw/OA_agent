@@ -378,6 +378,7 @@ export type RpaLocatorKind =
   | 'element_ref'
   | 'image'
   | 'text'
+  | 'upload'
   | 'url';
 
 export interface RpaTargetRegion {
@@ -403,10 +404,31 @@ export interface RpaFieldBinding {
   type?: string;
   required?: boolean;
   selector?: string;
+  id?: string;
+  name?: string;
+  placeholder?: string;
   defaultValue?: any;
   description?: string;
   example?: string;
   multiple?: boolean;
+  options?: FieldOption[];
+  requestFieldName?: string;
+  requestPatches?: RpaFieldRequestPatch[];
+}
+
+export interface RpaFieldRequestPatch {
+  scope?: 'body' | 'query' | 'headers';
+  path: string;
+  source?: string;
+  transform?:
+    | 'toString'
+    | 'toNumber'
+    | 'toBoolean'
+    | 'toUpperCase'
+    | 'toLowerCase'
+    | 'json'
+    | 'joinComma'
+    | 'joinChineseComma';
 }
 
 export interface RpaStepDefinition {

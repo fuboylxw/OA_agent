@@ -2,6 +2,8 @@ import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios';
 import { Injectable, Optional } from '@nestjs/common';
 import { sanitizeStructuredData } from '@uniflow/agent-kernel';
 import type {
+  RpaFieldBinding,
+  RpaFieldRequestPatch,
   RpaNetworkMappingRule,
   RpaNetworkRequestDefinition,
 } from '@uniflow/shared-types';
@@ -34,6 +36,11 @@ interface UrlNetworkAttachmentPayload {
   content?: string | Buffer;
   mimeType?: string;
   fieldKey?: string | null;
+}
+
+interface InferredFieldPatchCandidate {
+  path: string;
+  value: any;
 }
 
 interface PreflightResult {
@@ -219,14 +226,29 @@ export class UrlNetworkSubmitService {
   ): AxiosRequestConfig {
     const method = String(this.interpolateTemplate(String(definition.method || 'POST'), context) || 'POST').toUpperCase();
     const url = this.interpolateTemplate(definition.url, context);
-    const params = this.applyMapping(definition.query, context);
+    const params = this.applyFieldRequestPatches(
+      'query',
+      this.applyMapping(definition.query, context),
+      context,
+      deliveryContext,
+    );
     const bodyMode = this.resolveBodyMode(definition.bodyMode, context);
-    const headers = {
-      ...this.normalizeStringMap(deliveryContext.runtime.headers || {}, context),
-      ...this.normalizeStringMap(definition.headers || {}, context),
-      ...(deliveryContext.ticket.headers || {}),
-      ...this.buildSessionHeaders(context.auth, context.authPlatform, url),
-    };
+    const capturedHeaders = this.normalizeStringMap(
+      this.asRecord(context.preflight?.submitRequestHeaders),
+      context,
+    );
+    const headers = this.applyFieldRequestPatches(
+      'headers',
+      {
+        ...capturedHeaders,
+        ...this.normalizeStringMap(deliveryContext.runtime.headers || {}, context),
+        ...this.normalizeStringMap(definition.headers || {}, context),
+        ...(deliveryContext.ticket.headers || {}),
+        ...this.buildSessionHeaders(context.auth, context.authPlatform, url),
+      },
+      context,
+      deliveryContext,
+    );
     const config: AxiosRequestConfig = {
       method: method as any,
       url,
@@ -236,22 +258,38 @@ export class UrlNetworkSubmitService {
       validateStatus: () => true,
     };
 
+    delete (config.headers as Record<string, any>).host;
+    delete (config.headers as Record<string, any>)['content-length'];
+
     if (!['GET', 'DELETE'].includes(method)) {
+      const builtBody = this.applyFieldRequestPatches(
+        'body',
+        this.buildRequestBody(context, definition.body),
+        context,
+        deliveryContext,
+      );
+      this.validateRequiredFieldBindings({
+        body: builtBody,
+        query: params,
+        headers,
+        context,
+        deliveryContext,
+      });
+
       if (bodyMode === 'multipart') {
-        const multipart = this.buildMultipartRequestBody(context, definition.body);
+        const multipart = this.buildMultipartRequestBody(context, builtBody, deliveryContext);
         config.data = multipart;
         delete (config.headers as Record<string, string>)['Content-Type'];
       } else if (bodyMode === 'form') {
-        const body = this.buildRequestBody(context, definition.body);
         const searchParams = new URLSearchParams();
-        for (const [key, value] of Object.entries(this.flattenUndefined(body))) {
+        for (const [key, value] of Object.entries(this.flattenUndefined(builtBody))) {
           searchParams.set(key, value === undefined || value === null ? '' : String(value));
         }
         config.data = searchParams.toString();
         (config.headers as Record<string, string>)['Content-Type'] =
           (config.headers as Record<string, string>)['Content-Type'] || 'application/x-www-form-urlencoded';
       } else {
-        config.data = this.buildRequestBody(context, definition.body);
+        config.data = builtBody;
         (config.headers as Record<string, string>)['Content-Type'] =
           (config.headers as Record<string, string>)['Content-Type'] || 'application/json';
       }
@@ -301,8 +339,11 @@ export class UrlNetworkSubmitService {
     return this.flattenUndefined(result);
   }
 
-  private buildMultipartRequestBody(context: Record<string, any>, template: any) {
-    const body = this.buildRequestBody(context, template);
+  private buildMultipartRequestBody(
+    context: Record<string, any>,
+    body: any,
+    deliveryContext: UrlDeliveryExecutionContext,
+  ) {
     const FormDataCtor = (globalThis as any).FormData;
     const BlobCtor = (globalThis as any).Blob;
     if (typeof FormDataCtor !== 'function' || typeof BlobCtor !== 'function') {
@@ -312,6 +353,7 @@ export class UrlNetworkSubmitService {
     const form = new FormDataCtor();
     const requestFieldNamesWithFiles = new Set<string>();
     const attachmentFieldMap = this.asRecord(context.preflight?.attachmentFieldMap);
+    const fieldBindings = this.getFieldBindings(deliveryContext);
     const attachments = Array.isArray(context.attachments)
       ? context.attachments.map((attachment) => this.normalizeAttachmentPayload(attachment))
       : [];
@@ -321,8 +363,12 @@ export class UrlNetworkSubmitService {
         continue;
       }
       const targetFieldKey = this.normalizeString(attachment.fieldKey);
+      const explicitRequestFieldName = targetFieldKey
+        ? this.normalizeString(fieldBindings.get(targetFieldKey)?.requestFieldName)
+        : undefined;
       const requestFieldName = this.normalizeString(
         (targetFieldKey && attachmentFieldMap[targetFieldKey])
+        || explicitRequestFieldName
         || targetFieldKey,
       );
       if (!requestFieldName) {
@@ -374,6 +420,800 @@ export class UrlNetworkSubmitService {
     }
 
     form.append(prefix, String(value));
+  }
+
+  private applyFieldRequestPatches(
+    scope: 'body' | 'query' | 'headers',
+    target: any,
+    context: Record<string, any>,
+    deliveryContext: UrlDeliveryExecutionContext,
+  ) {
+    const fields = this.getFieldBindings(deliveryContext);
+    if (fields.size === 0) {
+      return target;
+    }
+
+    let patchedTarget = target;
+    for (const field of fields.values()) {
+      const patches = Array.isArray(field.requestPatches)
+        ? field.requestPatches as RpaFieldRequestPatch[]
+        : [];
+      if (patches.length === 0) {
+        continue;
+      }
+
+      for (const patch of patches) {
+        if (!patch || typeof patch !== 'object') {
+          continue;
+        }
+        const normalizedScope = String(patch.scope || 'body').trim().toLowerCase();
+        if (normalizedScope !== scope) {
+          continue;
+        }
+
+        const value = this.resolveFieldPatchValue(field, patch, context);
+        if (value === undefined) {
+          continue;
+        }
+
+        patchedTarget = this.setValueAtRequestPath(
+          patchedTarget,
+          String(patch.path || '').trim(),
+          value,
+        );
+      }
+    }
+
+    return this.applyInferredFieldRequestPatches(
+      scope,
+      patchedTarget,
+      context,
+      deliveryContext,
+    );
+  }
+
+  private applyInferredFieldRequestPatches(
+    scope: 'body' | 'query' | 'headers',
+    target: any,
+    context: Record<string, any>,
+    deliveryContext: UrlDeliveryExecutionContext,
+  ) {
+    if (scope !== 'body') {
+      return target;
+    }
+
+    let patchedTarget = target;
+    for (const field of this.getFieldBindings(deliveryContext).values()) {
+      if (this.hasExplicitRequestPatch(field) || !this.supportsInferredBodyPatch(field)) {
+        continue;
+      }
+
+      const submittedValue = context.formData?.[field.key];
+      if (this.isEmptyRuntimeValue(submittedValue)) {
+        continue;
+      }
+
+      const candidates = this.buildInferredBodyPatchCandidates(
+        field,
+        submittedValue,
+        patchedTarget,
+        deliveryContext,
+      );
+      for (const candidate of candidates) {
+        if (!candidate.path) {
+          continue;
+        }
+        const actual = this.getValueAtRequestPath(patchedTarget, candidate.path);
+        if (this.valuesRoughlyEqual(actual, candidate.value)) {
+          continue;
+        }
+        patchedTarget = this.setValueAtRequestPath(
+          patchedTarget,
+          candidate.path,
+          candidate.value,
+        );
+      }
+    }
+
+    return patchedTarget;
+  }
+
+  private validateRequiredFieldBindings(input: {
+    body: any;
+    query: any;
+    headers: Record<string, any>;
+    context: Record<string, any>;
+    deliveryContext: UrlDeliveryExecutionContext;
+  }) {
+    const fields = [...this.getFieldBindings(input.deliveryContext).values()];
+    if (fields.length === 0) {
+      return;
+    }
+
+    const filledFields = this.asRecord(input.context.preflight?.filledFields);
+    const attachmentFieldMap = this.asRecord(input.context.preflight?.attachmentFieldMap);
+    const attachments = Array.isArray(input.context.attachments) ? input.context.attachments : [];
+    const missingLabels: string[] = [];
+
+    for (const field of fields) {
+      if (!field.required) {
+        continue;
+      }
+
+      const fieldKey = this.normalizeString(field.key);
+      const fieldLabel = this.normalizeString(field.label) || fieldKey || '未命名字段';
+      if (!fieldKey) {
+        continue;
+      }
+
+      if (String(field.type || '').trim().toLowerCase() === 'file') {
+        const fieldAttachments = attachments.filter((attachment) => this.normalizeString(attachment?.fieldKey) === fieldKey);
+        if (fieldAttachments.length === 0) {
+          continue;
+        }
+        const requestFieldName = this.normalizeString(
+          attachmentFieldMap[fieldKey]
+          || field.requestFieldName,
+        );
+        const hasFilePatch = Array.isArray(field.requestPatches) && field.requestPatches.length > 0;
+        const hasFileNameInRequest = fieldAttachments.some((attachment) =>
+          this.requestContainsValue(input.body, attachment?.filename || attachment?.name)
+          || this.requestContainsValue(input.query, attachment?.filename || attachment?.name)
+          || this.requestContainsValue(input.headers, attachment?.filename || attachment?.name));
+        if (!requestFieldName && !hasFilePatch && !hasFileNameInRequest) {
+          missingLabels.push(fieldLabel);
+        }
+        continue;
+      }
+
+      const submittedValue = input.context.formData?.[fieldKey];
+      if (this.isEmptyRuntimeValue(submittedValue)) {
+        continue;
+      }
+
+      if (!this.isChoiceField(field) && this.hasSuccessfulDomBinding(field, filledFields)) {
+        continue;
+      }
+
+      if (
+        this.hasPatchedRequestValue(
+          field,
+          submittedValue,
+          input.body,
+          input.query,
+          input.headers,
+          input.deliveryContext,
+        )
+      ) {
+        continue;
+      }
+
+      if (
+        this.requestContainsValue(input.body, submittedValue)
+        || this.requestContainsValue(input.query, submittedValue)
+        || this.requestContainsValue(input.headers, submittedValue)
+      ) {
+        continue;
+      }
+
+      missingLabels.push(fieldLabel);
+    }
+
+    if (missingLabels.length > 0) {
+      throw new Error(`URL runtime failed to bind required fields: ${missingLabels.join('、')}`);
+    }
+  }
+
+  private hasSuccessfulDomBinding(
+    field: Pick<RpaFieldBinding, 'key' | 'label' | 'selector' | 'id' | 'name' | 'placeholder'>,
+    filledFields: Record<string, any>,
+  ) {
+    const candidateKeys = [
+      field.key,
+      field.label,
+      field.selector,
+      field.id,
+      field.name,
+      field.placeholder,
+    ]
+      .map((item) => this.normalizeString(item))
+      .filter((item): item is string => Boolean(item));
+
+    return candidateKeys.some((key) => filledFields[key] === true);
+  }
+
+  private hasPatchedRequestValue(
+    field: RpaFieldBinding,
+    submittedValue: any,
+    body: any,
+    query: any,
+    headers: Record<string, any>,
+    deliveryContext?: UrlDeliveryExecutionContext,
+  ) {
+    const patches = Array.isArray(field.requestPatches)
+      ? field.requestPatches as RpaFieldRequestPatch[]
+      : [];
+    const hasExplicitPatchMatch = patches.some((patch) => {
+      const path = String(patch?.path || '').trim();
+      if (!path) {
+        return false;
+      }
+      const scope = String(patch?.scope || 'body').trim().toLowerCase();
+      const target = scope === 'query'
+        ? query
+        : scope === 'headers'
+          ? headers
+          : body;
+      const actual = this.getValueAtRequestPath(target, path);
+      return this.valuesRoughlyEqual(actual, this.applyPatchTransform(submittedValue, patch?.transform));
+    });
+    if (hasExplicitPatchMatch) {
+      return true;
+    }
+
+    if (!deliveryContext) {
+      return false;
+    }
+
+    return this.buildInferredBodyPatchCandidates(field, submittedValue, body, deliveryContext)
+      .some((candidate) =>
+        this.valuesRoughlyEqual(
+          this.getValueAtRequestPath(body, candidate.path),
+          candidate.value,
+        ));
+  }
+
+  private hasExplicitRequestPatch(field: RpaFieldBinding) {
+    return Array.isArray(field.requestPatches)
+      && field.requestPatches.some((patch) => patch && typeof patch === 'object' && !Array.isArray(patch));
+  }
+
+  private supportsInferredBodyPatch(field: RpaFieldBinding) {
+    const normalizedType = this.normalizeString(field.type)?.toLowerCase() || '';
+    return normalizedType !== 'file';
+  }
+
+  private isChoiceField(field: Pick<RpaFieldBinding, 'type'>) {
+    const normalizedType = this.normalizeString(field.type)?.toLowerCase() || '';
+    return normalizedType === 'checkbox' || normalizedType === 'radio';
+  }
+
+  private buildInferredBodyPatchCandidates(
+    field: RpaFieldBinding,
+    submittedValue: any,
+    body: any,
+    deliveryContext: UrlDeliveryExecutionContext,
+  ): InferredFieldPatchCandidate[] {
+    if (this.isChoiceField(field)) {
+      return this.buildChoiceBodyPatchCandidates(field, submittedValue, body, deliveryContext);
+    }
+
+    return this.inferBodyPatchPaths(field, body).map((path) => ({
+      path,
+      value: submittedValue,
+    }));
+  }
+
+  private buildChoiceBodyPatchCandidates(
+    field: RpaFieldBinding,
+    submittedValue: any,
+    body: any,
+    deliveryContext: UrlDeliveryExecutionContext,
+  ): InferredFieldPatchCandidate[] {
+    const selectedChoices = this.normalizeChoiceValues(submittedValue);
+    if (selectedChoices.length === 0 && !Boolean(submittedValue)) {
+      return [];
+    }
+
+    const relatedMappings = this.getCaptureFormFieldMappings(deliveryContext, field.key);
+    const colMainDataRoots = this.findColMainDataRoots(body);
+    const candidates: InferredFieldPatchCandidate[] = [];
+    const seenPaths = new Set<string>();
+
+    for (const mapping of relatedMappings) {
+      const mappingAliases = this.collectChoiceAliases(mapping, field);
+      const shouldSelect = selectedChoices.length > 0
+        ? this.choiceAliasesMatch(mappingAliases, selectedChoices)
+        : Boolean(submittedValue);
+
+      const capFieldToken = this.extractCapFieldToken({
+        id: this.normalizeString(mapping?.target?.id),
+        selector: this.normalizeString(mapping?.target?.selector),
+        requestFieldName: this.normalizeString(mapping?.target?.name),
+      });
+      if (!capFieldToken) {
+        continue;
+      }
+
+      const candidatePaths = colMainDataRoots.length > 0
+        ? colMainDataRoots.map((root) => root ? `${root}.colMainData.${capFieldToken}` : `colMainData.${capFieldToken}`)
+        : [`colMainData.${capFieldToken}`];
+
+      for (const path of candidatePaths) {
+        if (!path || seenPaths.has(path)) {
+          continue;
+        }
+        const actual = this.getValueAtRequestPath(body, path);
+        candidates.push({
+          path,
+          value: shouldSelect
+            ? this.inferSelectedChoicePatchValue(actual, mapping, field, relatedMappings.length)
+            : this.inferUnselectedChoicePatchValue(actual),
+        });
+        seenPaths.add(path);
+      }
+    }
+
+    return candidates;
+  }
+
+  private inferBodyPatchPaths(field: RpaFieldBinding, body: any) {
+    const paths = new Set<string>();
+    const directCandidates = [
+      this.normalizeString(field.requestFieldName),
+      this.normalizeString(field.key),
+    ].filter((item): item is string => Boolean(item));
+
+    for (const candidate of directCandidates) {
+      if (this.hasRequestPath(body, candidate)) {
+        paths.add(candidate);
+      }
+    }
+
+    const capFieldToken = this.extractCapFieldToken(field);
+    if (capFieldToken) {
+      const colMainDataRoots = this.findColMainDataRoots(body);
+      for (const root of colMainDataRoots) {
+        paths.add(root ? `${root}.colMainData.${capFieldToken}` : `colMainData.${capFieldToken}`);
+      }
+    }
+
+    return [...paths];
+  }
+
+  private getCaptureFormFieldMappings(
+    deliveryContext: UrlDeliveryExecutionContext,
+    fieldKey?: string,
+  ) {
+    const preflightSteps = Array.isArray(deliveryContext.runtime?.preflight?.steps)
+      ? deliveryContext.runtime.preflight.steps as Array<Record<string, any>>
+      : [];
+
+    return preflightSteps
+      .filter((step) => this.normalizeString(step?.builtin) === 'capture_form_submit')
+      .flatMap((step) => Array.isArray(step?.options?.fieldMappings) ? step.options.fieldMappings : [])
+      .filter((mapping) => mapping && typeof mapping === 'object' && !Array.isArray(mapping))
+      .filter((mapping) => {
+        if (!fieldKey) {
+          return true;
+        }
+        return this.normalizeString(mapping.fieldKey) === this.normalizeString(fieldKey);
+      }) as Array<Record<string, any>>;
+  }
+
+  private normalizeChoiceValues(value: any) {
+    const queue = Array.isArray(value) ? value : [value];
+    const results = new Set<string>();
+    for (const item of queue) {
+      const normalizedItem = this.normalizeString(item);
+      if (!normalizedItem) {
+        continue;
+      }
+      const parts = normalizedItem
+        .split(/[、,，;；\n]/)
+        .map((part) => this.normalizeString(part))
+        .filter((part): part is string => Boolean(part));
+      if (parts.length === 0) {
+        results.add(normalizedItem);
+        continue;
+      }
+      for (const part of parts) {
+        results.add(part);
+      }
+    }
+    return [...results];
+  }
+
+  private collectChoiceAliases(mapping: Record<string, any>, field: RpaFieldBinding) {
+    return Array.from(new Set([
+      ...this.collectOptionAliases(mapping?.options),
+      this.normalizeString(mapping?.target?.label),
+    ].filter((item): item is string => Boolean(item))));
+  }
+
+  private collectOptionAliases(options: unknown) {
+    if (!Array.isArray(options)) {
+      return [];
+    }
+
+    return Array.from(new Set(options.flatMap((option) => {
+      if (typeof option === 'string') {
+        const normalized = this.normalizeString(option);
+        return normalized ? [normalized] : [];
+      }
+      if (!option || typeof option !== 'object' || Array.isArray(option)) {
+        return [];
+      }
+      return [
+        this.normalizeString((option as Record<string, any>).label),
+        this.normalizeString((option as Record<string, any>).value),
+      ].filter((item): item is string => Boolean(item));
+    })));
+  }
+
+  private choiceAliasesMatch(aliases: string[], selectedChoices: string[]) {
+    return selectedChoices.some((choice) =>
+      aliases.some((alias) =>
+        alias === choice
+        || alias.includes(choice)
+        || choice.includes(alias)));
+  }
+
+  private inferSelectedChoicePatchValue(
+    actual: any,
+    mapping: Record<string, any>,
+    field: RpaFieldBinding,
+    relatedMappingCount: number,
+  ) {
+    if (typeof actual === 'boolean') {
+      return true;
+    }
+    if (typeof actual === 'number') {
+      return 1;
+    }
+
+    const normalizedActual = this.normalizeString(actual)?.toLowerCase();
+    if (normalizedActual) {
+      if (normalizedActual === '0' || normalizedActual === '1') {
+        return '1';
+      }
+      if (normalizedActual === 'false' || normalizedActual === 'true') {
+        return 'true';
+      }
+      if (normalizedActual === 'n' || normalizedActual === 'y') {
+        return 'Y';
+      }
+      return this.getPreferredChoiceValue(mapping, field) || actual;
+    }
+
+    if (relatedMappingCount > 1) {
+      return '1';
+    }
+
+    return this.getPreferredChoiceValue(mapping, field) || '1';
+  }
+
+  private inferUnselectedChoicePatchValue(actual: any) {
+    if (typeof actual === 'boolean') {
+      return false;
+    }
+    if (typeof actual === 'number') {
+      return 0;
+    }
+
+    const normalizedActual = this.normalizeString(actual)?.toLowerCase();
+    if (normalizedActual) {
+      if (normalizedActual === '0' || normalizedActual === '1') {
+        return '0';
+      }
+      if (normalizedActual === 'false' || normalizedActual === 'true') {
+        return 'false';
+      }
+      if (normalizedActual === 'n' || normalizedActual === 'y') {
+        return 'N';
+      }
+    }
+
+    return '';
+  }
+
+  private getPreferredChoiceValue(mapping: Record<string, any>, field: RpaFieldBinding) {
+    const mappingAliases = this.collectOptionAliases(mapping?.options);
+    if (mappingAliases.length > 0) {
+      return mappingAliases[0];
+    }
+
+    return this.normalizeString(mapping?.target?.label)
+      || this.normalizeString(field.label);
+  }
+
+  private hasRequestPath(target: any, path: string) {
+    const normalizedPath = this.normalizeString(path);
+    if (!normalizedPath) {
+      return false;
+    }
+    return this.getValueAtRequestPath(target, normalizedPath) !== undefined;
+  }
+
+  private extractCapFieldToken(field: Pick<RpaFieldBinding, 'id' | 'selector' | 'requestFieldName'>) {
+    const candidates = [
+      this.normalizeString(field.id),
+      this.normalizeString(field.requestFieldName),
+      this.normalizeString(field.selector),
+    ].filter((item): item is string => Boolean(item));
+
+    for (const candidate of candidates) {
+      const matched = candidate.match(/(field\d+)/i);
+      if (matched?.[1]) {
+        return matched[1];
+      }
+    }
+
+    return undefined;
+  }
+
+  private findColMainDataRoots(value: any, prefix = ''): string[] {
+    const roots: string[] = [];
+    const current = typeof value === 'string' && this.looksLikeJson(value)
+      ? this.safeParseJson(value)
+      : value;
+
+    if (!current || typeof current !== 'object') {
+      return roots;
+    }
+
+    if (!Array.isArray(current) && current.colMainData && typeof current.colMainData === 'object') {
+      roots.push(prefix);
+    }
+
+    if (Array.isArray(current)) {
+      return roots;
+    }
+
+    for (const [key, child] of Object.entries(current)) {
+      if (child === undefined || child === null) {
+        continue;
+      }
+      const childValue = typeof child === 'string' && this.looksLikeJson(child)
+        ? this.safeParseJson(child)
+        : child;
+      if (!childValue || typeof childValue !== 'object') {
+        continue;
+      }
+      const nextPrefix = prefix ? `${prefix}.${key}` : key;
+      if (!Array.isArray(childValue) && childValue.colMainData && typeof childValue.colMainData === 'object') {
+        roots.push(nextPrefix);
+      }
+    }
+
+    return [...new Set(roots)];
+  }
+
+  private getFieldBindings(deliveryContext: UrlDeliveryExecutionContext) {
+    const bindings = new Map<string, RpaFieldBinding>();
+    const fields = deliveryContext.rpaFlow?.rpaDefinition?.fields;
+    if (!Array.isArray(fields)) {
+      return bindings;
+    }
+
+    for (const field of fields) {
+      if (!field || typeof field !== 'object' || Array.isArray(field)) {
+        continue;
+      }
+      const key = this.normalizeString((field as RpaFieldBinding).key);
+      if (!key) {
+        continue;
+      }
+      bindings.set(key, field as RpaFieldBinding);
+    }
+
+    return bindings;
+  }
+
+  private resolveFieldPatchValue(
+    field: RpaFieldBinding,
+    patch: RpaFieldRequestPatch,
+    context: Record<string, any>,
+  ) {
+    const sourcePath = this.normalizeString(patch.source) || `formData.${field.key}`;
+    const rawValue = this.getNestedValue(context, sourcePath);
+    if (this.isEmptyRuntimeValue(rawValue)) {
+      return undefined;
+    }
+    return this.applyPatchTransform(rawValue, patch.transform);
+  }
+
+  private applyPatchTransform(value: any, transform?: RpaFieldRequestPatch['transform']) {
+    switch (transform) {
+      case 'toString':
+        return value === undefined || value === null ? value : String(value);
+      case 'toNumber':
+        return value === undefined || value === null ? value : Number(value);
+      case 'toBoolean':
+        return value === undefined || value === null ? value : Boolean(value);
+      case 'toUpperCase':
+        return value === undefined || value === null ? value : String(value).toUpperCase();
+      case 'toLowerCase':
+        return value === undefined || value === null ? value : String(value).toLowerCase();
+      case 'json':
+        return value === undefined ? value : JSON.stringify(value);
+      case 'joinComma':
+        return Array.isArray(value) ? value.join(',') : value;
+      case 'joinChineseComma':
+        return Array.isArray(value) ? value.join('、') : value;
+      default:
+        return value;
+    }
+  }
+
+  private setValueAtRequestPath(target: any, path: string, value: any) {
+    const normalizedPath = String(path || '').trim();
+    if (!normalizedPath || normalizedPath === '$') {
+      return value;
+    }
+
+    const segments = normalizedPath.split('.').filter(Boolean);
+    if (segments.length === 0) {
+      return value;
+    }
+
+    const root = this.ensureMutableContainer(target) ?? (/^\d+$/.test(segments[0]) ? [] : {});
+    this.assignValueAtSegments(root, segments, value);
+    return root;
+  }
+
+  private assignValueAtSegments(target: any, segments: string[], value: any) {
+    if (segments.length === 0) {
+      return;
+    }
+
+    const [head, ...rest] = segments;
+    const isIndex = /^\d+$/.test(head);
+    if (rest.length === 0) {
+      if (Array.isArray(target) && isIndex) {
+        target[Number(head)] = value;
+      } else {
+        target[head] = value;
+      }
+      return;
+    }
+
+    const currentValue = Array.isArray(target) && isIndex
+      ? target[Number(head)]
+      : target[head];
+    let nextContainer = this.ensureMutableContainer(currentValue);
+
+    if (!nextContainer) {
+      nextContainer = /^\d+$/.test(rest[0]) ? [] : {};
+    }
+
+    if (Array.isArray(target) && isIndex) {
+      target[Number(head)] = nextContainer;
+    } else {
+      target[head] = nextContainer;
+    }
+
+    this.assignValueAtSegments(nextContainer, rest, value);
+
+    if (typeof currentValue === 'string' && this.looksLikeJson(currentValue)) {
+      const serialized = JSON.stringify(nextContainer);
+      if (Array.isArray(target) && isIndex) {
+        target[Number(head)] = serialized;
+      } else {
+        target[head] = serialized;
+      }
+    }
+  }
+
+  private getValueAtRequestPath(target: any, path: string) {
+    const normalizedPath = String(path || '').trim();
+    if (!normalizedPath || normalizedPath === '$') {
+      return target;
+    }
+
+    const segments = normalizedPath.split('.').filter(Boolean);
+    let current = target;
+    for (const segment of segments) {
+      if (typeof current === 'string' && this.looksLikeJson(current)) {
+        current = this.safeParseJson(current);
+      }
+      if (current === undefined || current === null) {
+        return undefined;
+      }
+      if (Array.isArray(current) && /^\d+$/.test(segment)) {
+        current = current[Number(segment)];
+        continue;
+      }
+      if (typeof current !== 'object') {
+        return undefined;
+      }
+      current = current[segment];
+    }
+    return current;
+  }
+
+  private ensureMutableContainer(value: any) {
+    if (Array.isArray(value)) {
+      return [...value];
+    }
+    if (value && typeof value === 'object') {
+      return { ...value };
+    }
+    if (typeof value === 'string' && this.looksLikeJson(value)) {
+      const parsed = this.safeParseJson(value);
+      if (parsed && typeof parsed === 'object') {
+        return Array.isArray(parsed) ? [...parsed] : { ...parsed };
+      }
+    }
+    return value === undefined || value === null
+      ? {}
+      : undefined;
+  }
+
+  private looksLikeJson(value: string) {
+    const trimmed = value.trim();
+    return (trimmed.startsWith('{') && trimmed.endsWith('}'))
+      || (trimmed.startsWith('[') && trimmed.endsWith(']'));
+  }
+
+  private safeParseJson(value: string) {
+    try {
+      return JSON.parse(value);
+    } catch {
+      return undefined;
+    }
+  }
+
+  private requestContainsValue(target: any, expected: any): boolean {
+    if (expected === undefined || expected === null) {
+      return false;
+    }
+
+    if (Array.isArray(expected)) {
+      return expected.every((item) => this.requestContainsValue(target, item));
+    }
+
+    if (Array.isArray(target)) {
+      return target.some((item) => this.requestContainsValue(item, expected));
+    }
+
+    if (typeof target === 'string') {
+      if (this.looksLikeJson(target)) {
+        const parsed = this.safeParseJson(target);
+        if (parsed !== undefined) {
+          return this.requestContainsValue(parsed, expected);
+        }
+      }
+      return target.includes(String(expected));
+    }
+
+    if (target && typeof target === 'object') {
+      return Object.values(target).some((item) => this.requestContainsValue(item, expected));
+    }
+
+    return this.valuesRoughlyEqual(target, expected);
+  }
+
+  private valuesRoughlyEqual(left: any, right: any) {
+    if (Array.isArray(left) || Array.isArray(right)) {
+      const leftList = Array.isArray(left) ? left.map((item) => String(item)) : [String(left)];
+      const rightList = Array.isArray(right) ? right.map((item) => String(item)) : [String(right)];
+      return leftList.length === rightList.length
+        && leftList.every((item) => rightList.includes(item));
+    }
+
+    if (left === right) {
+      return true;
+    }
+
+    if (left === undefined || left === null || right === undefined || right === null) {
+      return false;
+    }
+
+    return String(left) === String(right);
+  }
+
+  private isEmptyRuntimeValue(value: any) {
+    if (value === undefined || value === null) {
+      return true;
+    }
+    if (Array.isArray(value)) {
+      return value.length === 0 || value.every((item) => this.isEmptyRuntimeValue(item));
+    }
+    if (typeof value === 'string') {
+      return value.trim().length === 0;
+    }
+    return false;
   }
 
   private applyMapping(

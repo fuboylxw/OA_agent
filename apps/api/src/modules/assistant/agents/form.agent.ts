@@ -271,6 +271,21 @@ export class FormAgent {
     };
   }
 
+  normalizeDirectFieldValue(
+    processCode: string,
+    processSchema: ProcessSchema,
+    fieldKey: string,
+    rawValue: any,
+  ) {
+    const normalizedFields = this.normalizeFields(processSchema.fields || [], processCode);
+    const field = normalizedFields.find((item) => item.key === fieldKey);
+    if (!field) {
+      return undefined;
+    }
+
+    return this.normalizeFieldValue(field, rawValue);
+  }
+
   private normalizeFields(fields: RawProcessField[], processCode: string): ProcessField[] {
     return fields
       .map((field) => {
@@ -498,6 +513,9 @@ ${fieldDescriptions.join('\n')}
       if (optionLabels.length > 0) {
         descriptionParts.push(`可选值=${optionLabels.join(' / ')}`);
       }
+      if (field.multiple) {
+        descriptionParts.push(`支持多值=${field.type === 'file' ? '是' : '可多选'}`);
+      }
       if (field.description) {
         descriptionParts.push(`填写说明=${field.description}`);
       }
@@ -605,7 +623,7 @@ ${fieldDescriptions.join('\n')}
       return this.extractModifiedNumberField(userMessage, explicitFieldPattern);
     }
 
-    if (field.semanticKind === 'leave_type' || field.type === 'select' || field.type === 'radio') {
+    if (field.semanticKind === 'leave_type' || this.isOptionLikeField(field)) {
       return this.extractModifiedOptionField(field, userMessage, explicitFieldPattern);
     }
 
@@ -625,8 +643,7 @@ ${fieldDescriptions.join('\n')}
       || field.semanticKind === 'amount'
       || field.type === 'date'
       || field.type === 'number'
-      || field.type === 'select'
-      || field.type === 'radio'
+      || this.isOptionLikeField(field)
     );
   }
 
@@ -661,7 +678,7 @@ ${fieldDescriptions.join('\n')}
       return this.normalizeDateValue(rawValue);
     }
 
-    if (field.semanticKind === 'leave_type' || field.type === 'select' || field.type === 'radio') {
+    if (field.semanticKind === 'leave_type' || this.isOptionLikeField(field)) {
       return this.normalizeOptionValue(field, rawValue);
     }
 
@@ -704,7 +721,28 @@ ${fieldDescriptions.join('\n')}
     return this.parseDateExpression(expressions[0]);
   }
 
-  private normalizeOptionValue(field: ProcessField, rawValue: any): string | undefined {
+  private normalizeOptionValue(field: ProcessField, rawValue: any): string | string[] | undefined {
+    if (field.type === 'checkbox' || field.multiple === true) {
+      const rawList = Array.isArray(rawValue)
+        ? rawValue
+        : [rawValue];
+      const normalized = rawList
+        .flatMap((value) => typeof value === 'string'
+          ? value.split(/[、,，;；]/)
+          : [value])
+        .map((value) => String(value ?? '').trim())
+        .filter(Boolean)
+        .map((value) => {
+          if (!field.options || field.options.length === 0) {
+            return value;
+          }
+          return this.mapValueToOption(value, field.options) || value;
+        })
+        .filter((value, index, list) => Boolean(value) && list.indexOf(value) === index);
+
+      return normalized.length > 0 ? normalized : undefined;
+    }
+
     if (typeof rawValue !== 'string' && typeof rawValue !== 'number') {
       return undefined;
     }
@@ -764,14 +802,14 @@ ${fieldDescriptions.join('\n')}
       return this.extractNumberField(field, userMessage);
     }
 
-    if (field.type === 'select' || field.type === 'radio') {
+    if (this.isOptionLikeField(field)) {
       return this.extractOptionField(field, userMessage);
     }
 
     return this.extractTextField(field, userMessage);
   }
 
-  private extractLeaveTypeField(field: ProcessField, userMessage: string): string | undefined {
+  private extractLeaveTypeField(field: ProcessField, userMessage: string): string | string[] | undefined {
     const optionValue = this.extractOptionField(field, userMessage);
     if (optionValue !== undefined) {
       return optionValue;
@@ -879,7 +917,7 @@ ${fieldDescriptions.join('\n')}
     field: ProcessField,
     userMessage: string,
     explicitFieldPattern: string,
-  ): string | undefined {
+  ): string | string[] | undefined {
     const explicitRegex = new RegExp(`(?:把|将)?${explicitFieldPattern}(?:[^，。；;\\n]{0,12})?(?:改成|改为|调整为|换成|设为|设成|写成)?`, 'i');
     if (!explicitRegex.test(userMessage)) {
       return undefined;
@@ -907,8 +945,18 @@ ${fieldDescriptions.join('\n')}
     return undefined;
   }
 
-  private extractOptionField(field: ProcessField, userMessage: string): string | undefined {
+  private extractOptionField(field: ProcessField, userMessage: string): string | string[] | undefined {
     const normalizedMessage = userMessage.toLowerCase();
+    if (field.type === 'checkbox' || field.multiple === true) {
+      const matches = (field.options || [])
+        .filter((option) =>
+          normalizedMessage.includes(String(option.label).toLowerCase())
+          || normalizedMessage.includes(String(option.value).toLowerCase()))
+        .map((option) => option.value)
+        .filter((value, index, list) => list.indexOf(value) === index);
+      return matches.length > 0 ? matches : undefined;
+    }
+
     for (const option of field.options || []) {
       if (
         normalizedMessage.includes(String(option.label).toLowerCase())
@@ -1338,6 +1386,12 @@ ${fieldDescriptions.join('\n')}
     return fuzzy?.value;
   }
 
+  private isOptionLikeField(field: ProcessField) {
+    return field.type === 'select'
+      || field.type === 'radio'
+      || field.type === 'checkbox';
+  }
+
   private parseNumericValue(rawValue: string, rawUnit?: string): number {
     let value = Number.parseFloat(rawValue);
     const unit = String(rawUnit || '').toLowerCase();
@@ -1450,11 +1504,12 @@ ${fieldDescriptions.join('\n')}
       return this.appendFieldHelp(`请告诉我${field.label}。`, field);
     }
 
-    if (field.type === 'select' || field.type === 'radio') {
+    if (this.isOptionLikeField(field)) {
       const options = (field.options || []).map((option) => option.label).join('、');
+      const multipleHint = field.multiple ? '可多选。' : '';
       return options
-        ? `请告诉我${field.label}。可选项有：${options}。`
-        : `请告诉我${field.label}。`;
+        ? `请告诉我${field.label}。${multipleHint}可选项有：${options}。`
+        : `请告诉我${field.label}。${multipleHint}`;
     }
 
     if (field.type === 'date') {

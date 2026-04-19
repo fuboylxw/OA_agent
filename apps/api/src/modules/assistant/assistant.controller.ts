@@ -107,6 +107,9 @@ class ProcessCardFieldDto {
   @ApiProperty({ required: false, description: '是否支持多文件/多值' })
   multiple?: boolean;
 
+  @ApiProperty({ required: false, description: '字段可选项' })
+  options?: Array<{ label: string; value: string }>;
+
   @ApiProperty({ required: false, description: '字段来源', enum: ['user', 'derived', 'prefill'] })
   origin?: 'user' | 'derived' | 'prefill';
 
@@ -294,6 +297,16 @@ class ChatResponseDto {
   sessionState?: SessionStateDto;
 }
 
+class UpdatePendingFormFieldDto {
+  @ApiProperty({ description: '字段键' })
+  @IsString()
+  fieldKey: string;
+
+  @ApiProperty({ description: '用户直接输入的新值' })
+  @IsString()
+  value: string;
+}
+
 @ApiTags('assistant')
 @Controller('assistant')
 export class AssistantController {
@@ -426,6 +439,39 @@ export class AssistantController {
       this.logger.error(`getMessages error: ${error.message}`);
       throw new HttpException(
         error.message || 'Failed to get messages',
+        HttpStatus.INTERNAL_SERVER_ERROR
+      );
+    }
+  }
+
+  @Post('sessions/:sessionId/form')
+  @ApiOperation({
+    summary: '更新当前待确认表单中的单个字段',
+    description: '用于确认页点击字段后直接键盘修改，修改后返回最新会话消息与流程卡片'
+  })
+  async updatePendingFormField(
+    @Req() req: Request,
+    @Param('sessionId') sessionId: string,
+    @Body() dto: UpdatePendingFormFieldDto,
+  ) {
+    try {
+      const auth = await this.requestAuth.resolveUser(req, { requireUser: true });
+      return await this.assistantService.updatePendingFormField({
+        sessionId,
+        tenantId: auth.tenantId,
+        userId: auth.userId!,
+        fieldKey: dto.fieldKey,
+        value: dto.value,
+        identityType: auth.identityType,
+        roles: auth.roles,
+      });
+    } catch (error: any) {
+      if (error instanceof HttpException) {
+        throw error;
+      }
+      this.logger.error(`updatePendingFormField error: ${error.message}`);
+      throw new HttpException(
+        error.message || 'Failed to update pending form field',
         HttpStatus.INTERNAL_SERVER_ERROR
       );
     }

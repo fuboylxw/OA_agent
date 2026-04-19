@@ -24,6 +24,65 @@ describe('ProcessLibraryService', () => {
     }],
   });
 
+
+  const validUrlTextTemplate = [
+    '流程: 请假申请',
+    '流程编码: leave_request',
+    '描述: 教职工请假申请示例',
+    '系统网址: https://oa.example.com',
+    '流程页面: https://oa.example.com/workflow/new?templateId=leave_request',
+    '',
+    '需要填写的信息:',
+    '- 请假事由 | 说明: 填写本次请假的具体原因 | 示例: 家中有事，需要请假半天',
+    '- 开始日期 | 示例: 2026-04-20',
+    '',
+    '需要上传的材料:',
+    '- 病假证明 | 示例: 诊断证明.pdf',
+    '',
+    '步骤:',
+    '- 访问 https://oa.example.com/workflow/new?templateId=leave_request',
+    '- 点击 保存待发',
+    '- 看到 提交成功 就结束',
+  ].join('\n');
+
+  const validRpaTextTemplate = [
+    '流程: 用印申请',
+    '流程编码: seal_apply',
+    '描述: 用印申请示例',
+    '入口链接: https://oa.example.com/workflow',
+    '',
+    '需要填写的信息:',
+    '- 文件类型、名称及份数 | 说明: 填写文件名称和份数 | 示例: 劳务合同 2份',
+    '',
+    '需要上传的材料:',
+    '- 用印附件 | 示例: 劳务合同.pdf',
+    '',
+    '步骤:',
+    '- 访问 https://oa.example.com/workflow',
+    '- 点击 用印申请',
+    '- 填写 文件类型、名称及份数',
+    '- 上传 用印附件',
+    '- 点击 保存待发',
+  ].join('\n');
+
+  const validApiTextTemplate = [
+    '流程: 合同审批',
+    '流程编码: contract_apply',
+    '描述: 通过接口提交合同审批示例',
+    '系统网址: https://oa.example.com',
+    '提交接口: POST /api/workflow/contract/submit',
+    '查询接口: GET /api/workflow/contract/status/{submissionId}',
+    '提交成功字段: success',
+    '状态字段: data.status',
+    '',
+    '需要填写的信息:',
+    '- 合同名称 | 说明: 合同标题 | 示例: 校企合作协议',
+    '- 合同金额 | 示例: 12000',
+    '',
+    '需要上传的材料:',
+    '- 合同附件 | 示例: 合同正文.pdf | 多份',
+  ].join('\n');
+
   beforeEach(() => {
     prisma = {
       connector: {
@@ -202,6 +261,195 @@ describe('ProcessLibraryService', () => {
     })).rejects.toThrow('流程定义必须包含可执行的提交步骤');
   });
 
+  it('accepts url text templates and stores authoring metadata for edit playback', async () => {
+    const tx = {
+      remoteProcess: {
+        upsert: jest.fn().mockResolvedValue({ id: 'remote-1' }),
+        update: jest.fn().mockResolvedValue({ id: 'remote-1', latestTemplateId: 'template-text-url' }),
+      },
+      processTemplate: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockImplementation(async ({ data }: any) => ({
+          id: 'template-text-url',
+          ...data,
+          connector: {
+            id: 'connector-1',
+            name: '统一办公',
+            oaType: 'form-page',
+            oclLevel: 'OCL3',
+          },
+          createdAt: new Date('2026-04-19T10:00:00.000Z'),
+          updatedAt: new Date('2026-04-19T10:00:00.000Z'),
+        })),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
+    };
+
+    prisma.connector.findFirst.mockResolvedValue({
+      id: 'connector-1',
+      name: '统一办公',
+      oaType: 'form-page',
+      baseUrl: 'https://oa.example.com',
+    });
+    prisma.$transaction.mockImplementation(async (callback: any) => callback(tx));
+
+    await service.createManualProcessTemplate('tenant-1', {
+      connectorId: '11111111-1111-1111-1111-111111111111',
+      processCode: 'leave_request',
+      processName: '请假申请',
+      falLevel: 'F3',
+      accessMode: 'url',
+      authoringMode: 'text',
+      rpaFlowContent: validUrlTextTemplate,
+    });
+
+    expect(tx.processTemplate.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        uiHints: expect.objectContaining({
+          executionModes: {
+            submit: ['url'],
+            queryStatus: [],
+          },
+          authoring: expect.objectContaining({
+            mode: 'text',
+            accessMode: 'url',
+            textTemplate: validUrlTextTemplate,
+          }),
+        }),
+      }),
+    }));
+  });
+
+  it('accepts rpa text templates and keeps rpa submit execution mode', async () => {
+    const tx = {
+      remoteProcess: {
+        upsert: jest.fn().mockResolvedValue({ id: 'remote-1' }),
+        update: jest.fn().mockResolvedValue({ id: 'remote-1', latestTemplateId: 'template-text-rpa' }),
+      },
+      processTemplate: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockImplementation(async ({ data }: any) => ({
+          id: 'template-text-rpa',
+          ...data,
+          connector: {
+            id: 'connector-1',
+            name: '统一办公',
+            oaType: 'form-page',
+            oclLevel: 'OCL3',
+          },
+          createdAt: new Date('2026-04-19T11:00:00.000Z'),
+          updatedAt: new Date('2026-04-19T11:00:00.000Z'),
+        })),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
+    };
+
+    prisma.connector.findFirst.mockResolvedValue({
+      id: 'connector-1',
+      name: '统一办公',
+      oaType: 'form-page',
+      baseUrl: 'https://oa.example.com',
+    });
+    prisma.$transaction.mockImplementation(async (callback: any) => callback(tx));
+
+    await service.createManualProcessTemplate('tenant-1', {
+      connectorId: '11111111-1111-1111-1111-111111111111',
+      processCode: 'seal_apply',
+      processName: '用印申请',
+      falLevel: 'F2',
+      accessMode: 'rpa',
+      authoringMode: 'text',
+      rpaFlowContent: validRpaTextTemplate,
+    });
+
+    expect(tx.processTemplate.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        uiHints: expect.objectContaining({
+          executionModes: {
+            submit: ['rpa'],
+            queryStatus: [],
+          },
+          authoring: expect.objectContaining({
+            mode: 'text',
+            accessMode: 'rpa',
+          }),
+        }),
+        schema: expect.objectContaining({
+          fields: expect.arrayContaining([
+            expect.objectContaining({ label: '文件类型、名称及份数' }),
+            expect.objectContaining({ label: '用印附件', type: 'file' }),
+          ]),
+        }),
+      }),
+    }));
+  });
+
+  it('accepts api text templates, publishes api execution modes, and upserts manual api tools', async () => {
+    const tx = {
+      remoteProcess: {
+        upsert: jest.fn().mockResolvedValue({ id: 'remote-api-1' }),
+        update: jest.fn().mockResolvedValue({ id: 'remote-api-1', latestTemplateId: 'template-text-api' }),
+      },
+      processTemplate: {
+        findFirst: jest.fn().mockResolvedValue(null),
+        create: jest.fn().mockImplementation(async ({ data }: any) => ({
+          id: 'template-text-api',
+          ...data,
+          connector: {
+            id: 'connector-1',
+            name: '统一办公',
+            oaType: 'openapi',
+            oclLevel: 'OCL3',
+          },
+          createdAt: new Date('2026-04-19T11:30:00.000Z'),
+          updatedAt: new Date('2026-04-19T11:30:00.000Z'),
+        })),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
+      mCPTool: {
+        upsert: jest.fn().mockResolvedValue({ id: 'tool-1' }),
+        updateMany: jest.fn().mockResolvedValue({ count: 0 }),
+      },
+    };
+
+    prisma.connector.findFirst.mockResolvedValue({
+      id: 'connector-1',
+      name: '统一办公',
+      oaType: 'openapi',
+      baseUrl: 'https://oa.example.com',
+    });
+    prisma.$transaction.mockImplementation(async (callback: any) => callback(tx));
+
+    await service.createManualProcessTemplate('tenant-1', {
+      connectorId: '11111111-1111-1111-1111-111111111111',
+      processCode: 'contract_apply',
+      processName: '合同审批',
+      falLevel: 'F2',
+      accessMode: 'api',
+      inputMethod: 'file',
+      authoringMode: 'text',
+      rpaFlowContent: validApiTextTemplate,
+    });
+
+    expect(tx.mCPTool.upsert).toHaveBeenCalledTimes(2);
+    expect(tx.processTemplate.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        uiHints: expect.objectContaining({
+          apiMethod: 'POST',
+          apiPath: 'https://oa.example.com/api/workflow/contract/submit',
+          executionModes: {
+            submit: ['api'],
+            queryStatus: ['api'],
+          },
+          authoring: expect.objectContaining({
+            accessMode: 'api',
+            inputMethod: 'file',
+          }),
+        }),
+      }),
+    }));
+  });
+
   it('accepts direct-link definitions with network submit and publishes url execution modes', async () => {
     const tx = {
       remoteProcess: {
@@ -366,6 +614,69 @@ describe('ProcessLibraryService', () => {
         name: '统一办公',
       }),
     }));
+  });
+
+  it('syncs saved text templates with updated basic fields when editing text-authored flows', async () => {
+    const tx = {
+      remoteProcess: {
+        upsert: jest.fn().mockResolvedValue({ id: 'remote-1' }),
+        update: jest.fn().mockResolvedValue({ id: 'remote-1', latestTemplateId: 'template-sync-text' }),
+      },
+      processTemplate: {
+        findFirst: jest.fn().mockResolvedValue({ id: 'template-old-text', version: 1 }),
+        create: jest.fn().mockImplementation(async ({ data }: any) => ({
+          id: 'template-sync-text',
+          ...data,
+          connector: {
+            id: 'connector-1',
+            name: '统一办公',
+            oaType: 'form-page',
+            oclLevel: 'OCL3',
+          },
+          createdAt: new Date('2026-04-19T12:00:00.000Z'),
+          updatedAt: new Date('2026-04-19T12:00:00.000Z'),
+        })),
+        updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+      },
+    };
+
+    prisma.processTemplate.findFirst = jest.fn().mockResolvedValue({
+      id: 'template-old-text',
+      connectorId: 'connector-1',
+    });
+    prisma.connector.findFirst.mockResolvedValue({
+      id: 'connector-1',
+      name: '统一办公',
+      oaType: 'form-page',
+      baseUrl: 'https://oa.example.com',
+    });
+    prisma.$transaction.mockImplementation(async (callback: any) => callback(tx));
+
+    await service.updateManualProcessTemplate('tenant-1', 'template-old-text', {
+      connectorId: 'connector-1',
+      processCode: 'seal_apply_new',
+      processName: '用印申请（新版）',
+      description: '新的描述',
+      falLevel: 'F2',
+      accessMode: 'rpa',
+      authoringMode: 'text',
+      rpaFlowContent: validRpaTextTemplate,
+    });
+
+    expect(tx.processTemplate.create).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        uiHints: expect.objectContaining({
+          authoring: expect.objectContaining({
+            mode: 'text',
+            accessMode: 'rpa',
+            textTemplate: expect.stringContaining('流程: 用印申请（新版）'),
+          }),
+        }),
+      }),
+    }));
+    const uiHints = tx.processTemplate.create.mock.calls[0][0].data.uiHints;
+    expect(uiHints.authoring.textTemplate).toContain('流程编码: seal_apply_new');
+    expect(uiHints.authoring.textTemplate).toContain('描述: 新的描述');
   });
 
   it('updates a process by publishing a new version and archiving the previous published version', async () => {

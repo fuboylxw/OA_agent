@@ -1343,11 +1343,35 @@ export class BootstrapService {
       options: {
         fieldMappings: fields
           .filter((field) => String(field?.type || '').trim().toLowerCase() !== 'file')
-          .map((field) => ({
-            fieldKey: field.key,
-            sources: [field.key, field.label].filter(Boolean),
-            target: {
-              label: field.label,
+        .map((field) => ({
+          fieldKey: field.key,
+          fieldType: field.type,
+          sources: [field.key, field.label].filter(Boolean),
+          ...(Array.isArray(field?.options) && field.options.length > 0
+            ? {
+                options: field.options.map((option) => ({
+                  label: String(option?.label || option?.value || '').trim(),
+                  value: String(option?.value || option?.label || '').trim(),
+                })).filter((option) => option.label && option.value),
+              }
+            : {}),
+          target: {
+            label: field.label,
+            ...(typeof field?.selector === 'string' && field.selector.trim()
+              ? { selector: field.selector.trim() }
+                : {}),
+            ...(typeof field?.id === 'string' && field.id.trim()
+              ? { id: field.id.trim() }
+              : {}),
+            ...(typeof field?.type === 'string' && field.type.trim().toLowerCase() === 'file' && typeof field?.id === 'string' && field.id.trim()
+              ? { selector: `#${field.id.trim()} .cap4-attach__picker, #${field.id.trim()} .cap4-attach__cnt, #${field.id.trim()}` }
+              : {}),
+            ...(typeof field?.name === 'string' && field.name.trim()
+              ? { name: field.name.trim() }
+              : {}),
+              ...(typeof field?.placeholder === 'string' && field.placeholder.trim()
+                ? { placeholder: field.placeholder.trim() }
+                : {}),
             },
           })),
         fileMappings: fields
@@ -1356,6 +1380,21 @@ export class BootstrapService {
             fieldKey: field.key,
             target: {
               label: field.label,
+              ...(typeof field?.selector === 'string' && field.selector.trim()
+                ? { selector: field.selector.trim() }
+                : {}),
+              ...(typeof field?.id === 'string' && field.id.trim()
+                ? { id: field.id.trim() }
+                : {}),
+              ...(typeof field?.name === 'string' && field.name.trim()
+                ? { name: field.name.trim() }
+                : {}),
+              ...(typeof field?.requestFieldName === 'string' && field.requestFieldName.trim()
+                ? { name: field.requestFieldName.trim() }
+                : {}),
+              ...(typeof field?.placeholder === 'string' && field.placeholder.trim()
+                ? { placeholder: field.placeholder.trim() }
+                : {}),
             },
           })),
         trigger: {
@@ -1371,6 +1410,8 @@ export class BootstrapService {
           bodyModeKey: 'submitBodyMode',
           originKey: 'submitOrigin',
           attachmentFieldMapKey: 'attachmentFieldMap',
+          headersKey: 'submitRequestHeaders',
+          rawBodyKey: 'submitRawBody',
         },
       },
     };
@@ -1592,21 +1633,8 @@ export class BootstrapService {
         continue;
       }
 
-      const selectMatch = this.parseGuideInstructionV2(line, ['选择', '选中']);
+      const selectMatch = this.parseGuideInstructionV2(line, ['选择', '选中', '勾选', '勾上', '打勾', '打钩']);
       if (selectMatch) {
-        if (!selectMatch.value) {
-          steps.push({
-            type: 'click',
-            target: {
-              kind: 'text',
-              value: selectMatch.label,
-              label: selectMatch.label,
-            },
-            description: line,
-          });
-          continue;
-        }
-
         const authKind = detectAuthCredentialFieldKind({ label: selectMatch.label })
           || (/^(用户名|用户账号|登录账号|登录用户名|登录工号|username|login name|login id)$/i.test(selectMatch.label)
             ? 'username'
@@ -1785,6 +1813,7 @@ export class BootstrapService {
         description?: string;
         example?: string;
         multiple?: boolean;
+        options?: string[];
       }>;
       testData: Record<string, string>;
       platformConfig: Record<string, any>;
@@ -1796,7 +1825,8 @@ export class BootstrapService {
       | 'shared'
       | 'flow_steps'
       | 'flow_fields'
-      | 'flow_examples' = 'preamble';
+      | 'flow_examples'
+      | 'flow_notes' = 'preamble';
     let currentFlow: {
       processName: string;
       processCode?: string;
@@ -1810,6 +1840,7 @@ export class BootstrapService {
         description?: string;
         example?: string;
         multiple?: boolean;
+        options?: string[];
       }>;
       testData: Record<string, string>;
       platformConfig: Record<string, any>;
@@ -1850,7 +1881,7 @@ export class BootstrapService {
         continue;
       }
 
-      if (/^(?:步骤|步骤列表)\s*[:：]?$/u.test(line)) {
+      if (/^(?:步骤|步骤列表|办理步骤)\s*[:：]?$/u.test(line)) {
         if (currentFlow) {
           currentSection = 'flow_steps';
         }
@@ -1871,10 +1902,18 @@ export class BootstrapService {
         continue;
       }
 
+      if (this.isGuideNoteSectionHeader(line)) {
+        if (currentFlow) {
+          currentSection = 'flow_notes';
+        }
+        continue;
+      }
+
       if (
         (currentSection === 'flow_steps'
           || currentSection === 'flow_fields'
-          || currentSection === 'flow_examples')
+          || currentSection === 'flow_examples'
+          || currentSection === 'flow_notes')
         && currentFlow
       ) {
         const explicitProcessCode = this.parseGuideProcessCodeLine(line);
@@ -1909,6 +1948,10 @@ export class BootstrapService {
           continue;
         }
 
+        if (currentSection === 'flow_notes') {
+          continue;
+        }
+
         currentFlow.steps.push(line);
         continue;
       }
@@ -1934,7 +1977,7 @@ export class BootstrapService {
   }
 
   private isGuideFieldSectionHeader(line: string) {
-    return /^(?:#{1,6}\s*)?(?:参数|字段)(?:定义)?\s*[:：]?$/u.test(line);
+    return /^(?:#{1,6}\s*)?(?:参数|字段|用户办理时需要补充的信息|待补充信息|需要补充的信息)(?:定义)?\s*[:：]?$/u.test(line);
   }
 
   private isGuideTestDataSectionHeader(line: string) {
@@ -1942,11 +1985,15 @@ export class BootstrapService {
   }
 
   private isGuideGlobalSectionHeader(line: string) {
-    return /^(?:#{1,6}\s*)?全局(?:配置)?\s*[:：]?$/u.test(line);
+    return /^(?:#{1,6}\s*)?(?:全局(?:配置)?|系统基本信息)\s*[:：]?$/u.test(line);
   }
 
   private isGuideSharedStepsSectionHeader(line: string) {
     return /^(?:#{1,6}\s*)?(?:共享步骤|公共步骤|通用步骤)\s*[:：]?$/u.test(line);
+  }
+
+  private isGuideNoteSectionHeader(line: string) {
+    return /^(?:#{1,6}\s*)?(?:特殊说明|补充说明|注意事项)\s*[:：]?$/u.test(line);
   }
 
   private parseGuideFlowHeader(line: string) {
@@ -2022,13 +2069,22 @@ export class BootstrapService {
       const required = this.parseGuideRequiredFlag(pipeSegments);
       const description = this.extractGuideFieldDescription(pipeSegments.slice(1));
       const example = this.extractGuideFieldExample(pipeSegments.slice(1));
+      const options = this.extractGuideFieldOptions(pipeSegments.slice(1));
+      const uploadRequirements = this.extractGuideFieldUploadRequirements(pipeSegments.slice(1));
+      const multiple = this.parseGuideMultipleFlag(pipeSegments.slice(1), uploadRequirements);
+      const normalizedDescription = [description, uploadRequirements ? `上传要求：${uploadRequirements}` : undefined]
+        .filter(Boolean)
+        .join('；');
+      const resolvedType = type || (options.length > 0 ? 'select' : uploadRequirements ? 'file' : undefined);
 
       return {
         label,
-        ...(type ? { type } : {}),
+        ...(resolvedType ? { type: resolvedType } : {}),
         ...(required !== undefined ? { required } : {}),
-        ...(description ? { description } : {}),
+        ...(normalizedDescription ? { description: normalizedDescription } : {}),
         ...(example ? { example } : {}),
+        ...(multiple !== undefined ? { multiple } : {}),
+        ...(options.length > 0 ? { options } : {}),
       };
     }
 
@@ -2049,13 +2105,22 @@ export class BootstrapService {
       const required = this.parseGuideRequiredFlag(tokens);
       const description = this.extractGuideFieldDescription(tokens);
       const example = this.extractGuideFieldExample(tokens);
+      const options = this.extractGuideFieldOptions(tokens);
+      const uploadRequirements = this.extractGuideFieldUploadRequirements(tokens);
+      const multiple = this.parseGuideMultipleFlag(tokens, uploadRequirements);
+      const normalizedDescription = [description, uploadRequirements ? `上传要求：${uploadRequirements}` : undefined]
+        .filter(Boolean)
+        .join('；');
+      const resolvedType = type || (options.length > 0 ? 'select' : uploadRequirements ? 'file' : undefined);
 
       return {
         label,
-        ...(type ? { type } : {}),
+        ...(resolvedType ? { type: resolvedType } : {}),
         ...(required !== undefined ? { required } : {}),
-        ...(description ? { description } : {}),
+        ...(normalizedDescription ? { description: normalizedDescription } : {}),
         ...(example ? { example } : {}),
+        ...(multiple !== undefined ? { multiple } : {}),
+        ...(options.length > 0 ? { options } : {}),
       };
     }
 
@@ -2128,7 +2193,15 @@ export class BootstrapService {
       return true;
     }
 
+    if (normalizedTokens.some((token) => /^(?:是否必填|required)\s*[:：=]\s*(?:是|必填|true|yes|1)$/iu.test(token))) {
+      return true;
+    }
+
     if (normalizedTokens.some((token) => token === '选填' || token === 'optional' || token === '可选')) {
+      return false;
+    }
+
+    if (normalizedTokens.some((token) => /^(?:是否必填|required)\s*[:：=]\s*(?:否|选填|可选|false|no|0)$/iu.test(token))) {
       return false;
     }
 
@@ -2144,9 +2217,80 @@ export class BootstrapService {
     if (['text', '文本', '字符串', '单行文本'].includes(normalized)) return 'text';
     if (['textarea', '多行文本', '备注', '说明'].includes(normalized)) return 'textarea';
     if (['date', '日期', '时间', 'datetime'].includes(normalized)) return 'date';
-    if (['select', '下拉', '枚举', '选项'].includes(normalized)) return 'select';
+    if (['select', '下拉', '枚举', '选项', '单选', '多选', '勾选', 'checkbox', 'radio'].includes(normalized)) return 'select';
     if (['file', '附件', 'upload'].includes(normalized)) return 'file';
     if (['number', '数字', '金额', '整数', '小数'].includes(normalized)) return 'number';
+    return undefined;
+  }
+
+  private extractGuideFieldOptions(tokens: string[]) {
+    for (const token of tokens) {
+      const match = String(token || '').trim().match(/^(?:可选值|选项|候选值|options?)\s*[:：=]\s*(.+)$/iu);
+      const value = match?.[1]?.trim();
+      if (!value) {
+        continue;
+      }
+
+      return Array.from(
+        new Set(
+          value
+            .split(/[、,，;；/]/)
+            .map((item) => item.trim())
+            .filter(Boolean),
+        ),
+      );
+    }
+
+    return [] as string[];
+  }
+
+  private extractGuideFieldUploadRequirements(tokens: string[]) {
+    for (const token of tokens) {
+      const match = String(token || '').trim().match(/^(?:上传要求|附件要求|upload)\s*[:：=]\s*(.+)$/iu);
+      const value = match?.[1]?.trim();
+      if (value) {
+        return value;
+      }
+    }
+
+    return undefined;
+  }
+
+  private parseGuideMultipleFlag(tokens: string[], uploadRequirements?: string) {
+    const normalizedTokens = tokens.map((token) => token.trim().toLowerCase());
+
+    if (normalizedTokens.some((token) =>
+      token === '可多选'
+      || token === '多选'
+      || token === '多选框'
+      || token === 'checkbox'
+      || token === '支持多份'
+      || /^(?:是否可多选|multiple)\s*[:：=]\s*(?:是|可多选|支持|true|yes|1)$/iu.test(token)
+      || /^(?:是否支持多份|支持多份|允许多份)\s*[:：=]?\s*(?:是|支持|true|yes|1)?$/iu.test(token)
+    )) {
+      return true;
+    }
+
+    if (normalizedTokens.some((token) =>
+      token === '只能选一个'
+      || token === '单选'
+      || token === '单份'
+      || /^(?:是否可多选|multiple)\s*[:：=]\s*(?:否|只能选一个|false|no|0)$/iu.test(token)
+      || /^(?:是否支持多份|支持多份|允许多份)\s*[:：=]\s*(?:否|不支持|false|no|0)$/iu.test(token)
+    )) {
+      return false;
+    }
+
+    const normalizedUploadRequirements = String(uploadRequirements || '').trim();
+    if (normalizedUploadRequirements) {
+      if (/(多份|多个|多文件)/u.test(normalizedUploadRequirements)) {
+        return true;
+      }
+      if (/(单份|一份|单个文件)/u.test(normalizedUploadRequirements)) {
+        return false;
+      }
+    }
+
     return undefined;
   }
 
@@ -2161,6 +2305,14 @@ export class BootstrapService {
       description?: string;
       example?: string;
       multiple?: boolean;
+      selector?: string;
+      id?: string;
+      name?: string;
+      placeholder?: string;
+      requestFieldName?: string;
+      requestPatches?: Array<Record<string, any>>;
+      options?: Array<{ label?: string; value?: string } | string>;
+      uiHints?: Record<string, any>;
     }>;
     testData?: Record<string, any>;
   }) {
@@ -2197,6 +2349,55 @@ export class BootstrapService {
       if (field && definition.multiple !== undefined) {
         field.multiple = Boolean(definition.multiple);
       }
+      if (field && typeof definition.selector === 'string' && definition.selector.trim()) {
+        field.selector = definition.selector.trim();
+      }
+      if (field && typeof definition.id === 'string' && definition.id.trim()) {
+        field.id = definition.id.trim();
+      }
+      if (field && typeof definition.name === 'string' && definition.name.trim()) {
+        field.name = definition.name.trim();
+      }
+      if (field && typeof definition.placeholder === 'string' && definition.placeholder.trim()) {
+        field.placeholder = definition.placeholder.trim();
+      }
+      if (field && typeof definition.requestFieldName === 'string' && definition.requestFieldName.trim()) {
+        field.requestFieldName = definition.requestFieldName.trim();
+      }
+      if (field && Array.isArray(definition.requestPatches) && definition.requestPatches.length > 0) {
+        field.requestPatches = definition.requestPatches
+          .filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+          .map((item) => ({ ...item }));
+      }
+      if (field && Array.isArray(definition.options) && definition.options.length > 0) {
+        field.options = definition.options
+          .map((option) => {
+            if (typeof option === 'string') {
+              const normalized = option.trim();
+              return normalized
+                ? {
+                    label: normalized,
+                    value: normalized,
+                  }
+                : null;
+            }
+            const labelValue = String(option?.label || option?.value || '').trim();
+            const optionValue = String(option?.value || option?.label || '').trim();
+            return labelValue && optionValue
+              ? {
+                  label: labelValue,
+                  value: optionValue,
+                }
+              : null;
+          })
+          .filter((option): option is { label: string; value: string } => Boolean(option));
+      }
+      if (field && definition.uiHints && typeof definition.uiHints === 'object' && !Array.isArray(definition.uiHints)) {
+        field.uiHints = {
+          ...(field.uiHints && typeof field.uiHints === 'object' && !Array.isArray(field.uiHints) ? field.uiHints : {}),
+          ...definition.uiHints,
+        };
+      }
     }
 
     for (const [rawLabel, rawValue] of Object.entries(rawTestData)) {
@@ -2226,7 +2427,7 @@ export class BootstrapService {
   }
 
   private tryAssignGuidePlatformConfig(target: Record<string, any>, line: string) {
-    const match = line.match(/^(入口链接|入口地址|入口URL|入口Url|入口url|打开地址|OA地址|OA 地址|认证入口|登录入口|门户地址|门户首页|系统网址|系统地址|业务系统网址|业务系统地址|流程页面|页面链接|流程链接|目标页面|跳转页面|执行方式|目标系统|跳转链接模板|票据服务地址)\s*[:：]\s*(.+)$/u);
+    const match = line.match(/^(系统名称|适用对象|登录说明|流程入口|办理完成标志|入口链接|入口地址|入口URL|入口Url|入口url|打开地址|OA地址|OA 地址|认证入口|登录入口|门户地址|门户首页|系统网址|系统地址|业务系统网址|业务系统地址|流程页面|页面链接|流程链接|目标页面|跳转页面|执行方式|目标系统|跳转链接模板|票据服务地址)\s*[:：]\s*(.+)$/u);
     if (!match) {
       return false;
     }
@@ -2234,6 +2435,31 @@ export class BootstrapService {
     const rawKey = match[1].replace(/\s+/g, '');
     const value = match[2]?.trim();
     if (!value) {
+      return true;
+    }
+
+    if (rawKey === '系统名称') {
+      target.targetSystem = value;
+      return true;
+    }
+
+    if (rawKey === '适用对象') {
+      target.audience = value;
+      return true;
+    }
+
+    if (rawKey === '登录说明') {
+      target.loginHint = value;
+      return true;
+    }
+
+    if (rawKey === '流程入口') {
+      target.flowEntryHint = value;
+      return true;
+    }
+
+    if (rawKey === '办理完成标志') {
+      target.completionHint = value;
       return true;
     }
 

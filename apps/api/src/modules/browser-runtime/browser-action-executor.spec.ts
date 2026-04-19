@@ -278,10 +278,18 @@ describe('BrowserActionExecutor', () => {
       evaluate: jest.fn().mockResolvedValue({
         submitCapture: {
           action: 'https://oa.example.com/form/saveDraft',
+          headers: {
+            'content-type': 'application/json',
+          },
+          rawBody: '{"ok":true}',
           fields: {
             _json_params: '{"ok":true}',
           },
         },
+        submitRequestHeaders: {
+          'content-type': 'application/json',
+        },
+        submitRawBody: '{"ok":true}',
       }),
       stabilize: jest.fn().mockResolvedValue(undefined),
     };

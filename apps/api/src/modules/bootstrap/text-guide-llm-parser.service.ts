@@ -25,6 +25,7 @@ const TextGuideFieldSchema = z.object({
   description: z.string().trim().min(1).optional(),
   example: z.string().trim().min(1).optional(),
   multiple: z.boolean().optional(),
+  options: z.array(z.string().trim().min(1)).optional(),
 });
 
 const TextGuideFlowSchema = z.object({
@@ -99,6 +100,10 @@ const TEXT_GUIDE_PARSE_TOOL: LLMToolDef = {
                     description: { type: 'string' },
                     example: { type: 'string' },
                     multiple: { type: 'boolean' },
+                    options: {
+                      type: 'array',
+                      items: { type: 'string' },
+                    },
                   },
                 },
               },
@@ -146,6 +151,7 @@ const SYSTEM_PROMPT = [
   'Support both single-flow and multi-flow guides.',
   'If the guide contains parameter definitions or test samples, preserve them separately as fields and testData.',
   'For each declared parameter, preserve its explanation and sample value when present.',
+  'If a parameter lists selectable choices, preserve them in field.options. If it says the field supports multiple selections or multiple files, preserve that in field.multiple.',
   'If the input contains explicit fields, placeholders, or a sample form that shows how many values the user needs to provide, the returned field count must match that source exactly. Do not add guessed fields and do not drop declared fields.',
   'When multiple flows clearly share login or navigation steps, put those reusable steps into sharedSteps.',
   'Do not invent APIs, selectors, credentials, hidden branches, or field keys.',
@@ -212,12 +218,13 @@ export class TextGuideLlmParserService {
     return [
       'Parse the following user-provided OA operation guide into a normalized structured document.',
       'Important requirements:',
-      '- The input may contain common sections such as "# 全局", "# 共享步骤", "## 流程: ...", "参数:", "步骤:", "测试样例:", but it may also be free-form text.',
+      '- The input may contain common sections such as "# 全局", "# 系统基本信息", "# 共享步骤", "## 流程: ...", "参数:", "用户办理时需要补充的信息:", "步骤:", "办理步骤:", "测试样例:", "特殊说明:", but it may also be free-form text.',
       '- Keep each step short and executable.',
       '- If the guide only describes one process, return exactly one flow.',
       '- If a step is clearly shared by multiple flows, place it in sharedSteps.',
       '- If parameter definitions are present, store them in fields.',
       '- Preserve parameter explanations, usage notes, and sample values in each field when the input provides them.',
+      '- If parameter definitions include selectable values, preserve them in field.options. If they say the field is multi-select or supports multiple files, preserve that in field.multiple.',
       '- If the guide contains explicit fields, placeholders, or an example form showing how many values need to be filled, the number of returned fields must match that source exactly.',
       '- If test/sample values are present, store them in testData instead of hard-coding them into executable steps.',
       '',
@@ -349,6 +356,17 @@ export class TextGuideLlmParserService {
         ...(field.description ? { description: String(field.description).trim() } : {}),
         ...(field.example ? { example: String(field.example).trim() } : {}),
         ...(field.multiple !== undefined ? { multiple: field.multiple } : {}),
+        ...(Array.isArray(field.options) && field.options.length > 0
+          ? {
+              options: Array.from(
+                new Set(
+                  field.options
+                    .map((option) => String(option || '').trim())
+                    .filter(Boolean),
+                ),
+              ),
+            }
+          : {}),
       }))
       .filter((field) => field.label);
   }

@@ -120,14 +120,18 @@ export default function UserHeader() {
     <div className="relative" ref={menuRef}>
       <button
         onClick={() => setShowMenu(!showMenu)}
-        className="flex items-center space-x-2 rounded-lg px-2 py-1 transition-colors hover:bg-gray-50"
+        className="flex items-center gap-2 rounded-lg px-2 py-1 transition-colors hover:bg-gray-50"
       >
         <div className="flex h-8 w-8 items-center justify-center rounded-full bg-blue-100">
           <span className="text-sm font-medium text-blue-600">{initial}</span>
         </div>
-        <span className="text-sm text-gray-700">{snapshot.hasProfile ? displayName : '加载中...'}</span>
+        <span className="hidden text-sm text-gray-700 sm:block">
+          {snapshot.hasProfile ? displayName : '加载中...'}
+        </span>
         {(isAdmin || isFlowManager) && (
-          <span className="rounded bg-orange-100 px-1.5 py-0.5 text-xs font-medium text-orange-600">管理员</span>
+          <span className="hidden rounded bg-orange-100 px-1.5 py-0.5 text-xs font-medium text-orange-600 md:inline-flex">
+            管理员
+          </span>
         )}
         <i className="fas fa-chevron-down text-xs text-gray-400"></i>
       </button>

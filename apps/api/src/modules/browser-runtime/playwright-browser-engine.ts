@@ -767,10 +767,7 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
     const labels = this.collectUploadLocatorLabels(element);
 
     if (element.selector) {
-      const selectorMatch = await this.findFirstMatchingLocator(
-        scopes,
-        (scope) => scope.locator(element.selector!).first(),
-      );
+      const selectorMatch = await this.findUploadLocatorBySelector(scopes, element.selector);
       if (selectorMatch) {
         return selectorMatch;
       }
@@ -788,6 +785,10 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
     }
 
     for (const label of labels) {
+      const capLabelMatch = await this.findCapAttachmentLocator(scopes, label);
+      if (capLabelMatch) {
+        return capLabelMatch;
+      }
       const labelMatch = await this.findFirstMatchingLocator(
         scopes,
         (scope) => scope.getByLabel(label).first(),
@@ -824,6 +825,104 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
     const uniqueFileInput = await this.findUniqueFileInputLocator(scopes);
     if (uniqueFileInput) {
       return uniqueFileInput;
+    }
+
+    return null;
+  }
+
+  private async findUploadLocatorBySelector(
+    scopes: PlaywrightLocatorScope[],
+    selector: string,
+  ): Promise<UploadLocatorMatch | null> {
+    for (const entry of scopes) {
+      const nestedLocator = entry.scope.locator(selector).locator('input[type="file"]').first();
+      const nestedCount = await nestedLocator.count().catch(() => 0);
+      if (nestedCount > 0) {
+        return {
+          locator: nestedLocator,
+          requestFieldName: await this.readLocatorRequestFieldName(nestedLocator),
+        };
+      }
+
+      const directLocator = entry.scope.locator(selector).first();
+      const directCount = await directLocator.count().catch(() => 0);
+      if (directCount === 0) {
+        continue;
+      }
+
+      const isDirectFileInput = await directLocator.evaluate((node: Element) =>
+        node instanceof HTMLInputElement && node.type === 'file').catch(() => false);
+      if (!isDirectFileInput) {
+        continue;
+      }
+
+      return {
+        locator: directLocator,
+        requestFieldName: await this.readLocatorRequestFieldName(directLocator),
+      };
+    }
+
+    return null;
+  }
+
+  private async findCapAttachmentLocator(
+    scopes: PlaywrightLocatorScope[],
+    hint: string,
+  ): Promise<UploadLocatorMatch | null> {
+    const normalizedHint = this.normalizeLocatorText(hint);
+    if (!normalizedHint) {
+      return null;
+    }
+
+    for (const entry of scopes) {
+      if (typeof entry.scope?.evaluate !== 'function') {
+        continue;
+      }
+
+      const candidate = await entry.scope.evaluate(({ hintText }) => {
+        const normalize = (value: string | null | undefined) => String(value || '')
+          .replace(/\s+/g, ' ')
+          .trim();
+        const fields = Array.from(document.querySelectorAll('.cap-field, .cap4-attach'));
+        for (const field of fields) {
+          const text = normalize(field.textContent);
+          if (!text || !text.includes(hintText)) {
+            continue;
+          }
+          const input = field.querySelector('input[type="file"]') as HTMLInputElement | null;
+          return {
+            fieldId: normalize((field as HTMLElement).id || ''),
+            inputId: normalize(input?.id || ''),
+            inputName: normalize(input?.name || ''),
+          };
+        }
+        return null;
+      }, {
+        hintText: normalizedHint,
+      }).catch(() => null);
+
+      if (!candidate) {
+        continue;
+      }
+
+      const selectors = [
+        candidate.inputId ? `input[type="file"]#${this.escapeCssValue(candidate.inputId)}` : '',
+        candidate.inputName ? `input[type="file"][name="${this.escapeCssValue(candidate.inputName)}"]` : '',
+        candidate.fieldId ? `#${this.escapeCssValue(candidate.fieldId)} input[type="file"]` : '',
+      ].filter(Boolean);
+
+      for (const selector of selectors) {
+        const count = await entry.scope.locator(selector).count().catch(() => 0);
+        if (!count) {
+          continue;
+        }
+
+        const locator = entry.scope.locator(selector).first();
+        return {
+          locator,
+          requestFieldName: await this.readLocatorRequestFieldName(locator),
+        };
+      }
     }
 
     return null;

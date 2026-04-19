@@ -2,6 +2,11 @@
 @tailwind components;
 @tailwind utilities;
 
+:root {
+  --mobile-bottom-nav-height: 64px;
+  --mobile-bottom-nav-total-height: calc(var(--mobile-bottom-nav-height) + env(safe-area-inset-bottom, 0px));
+}
+
 * {
   margin: 0;
   padding: 0;
@@ -13,7 +18,39 @@ body {
   color: #111827;
   background: #f9fafb;
   min-height: 100vh;
+  min-height: 100dvh;
   overflow-x: hidden;
+}
+
+html {
+  overflow-x: hidden;
+}
+
+@media (max-width: 767px) {
+  html.chat-scroll-lock,
+  body.chat-scroll-lock {
+    height: 100%;
+    overflow: hidden;
+    overscroll-behavior-y: none;
+  }
+
+  body.chat-scroll-lock {
+    position: fixed;
+    inset: 0;
+    width: 100%;
+    touch-action: pan-y pinch-zoom;
+  }
+
+  .chat-scroll-root {
+    overscroll-behavior-y: none;
+    touch-action: pan-y pinch-zoom;
+  }
+
+  .chat-scroll-region {
+    overscroll-behavior-y: contain;
+    -webkit-overflow-scrolling: touch;
+    touch-action: pan-y pinch-zoom;
+  }
 }
 
 .font-brand {

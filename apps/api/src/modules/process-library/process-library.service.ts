@@ -5,6 +5,13 @@ import { normalizeProcessName, parseRpaFlowDefinitions } from '@uniflow/shared-t
 import { PrismaService } from '../common/prisma.service';
 import { CreateProcessTemplateDto } from './dto/create-process-template.dto';
 import { resolveAllowedIdentityScopes } from '../common/identity-scope.util';
+import {
+  buildProcessLibraryFlowDefinitions,
+  type ProcessLibraryApiToolDefinition,
+  type ProcessLibraryAccessMode,
+  type ProcessLibraryAuthoringMode,
+  type ProcessLibraryInputMethod,
+} from './process-library-authoring.util';
 
 type ProcessLibraryItem = {
   id: string;
@@ -40,7 +47,12 @@ type ManualProcessTemplatePayload = {
   processCategory: string | null;
   description: string | null;
   falLevel: string;
+  accessMode: ProcessLibraryAccessMode;
+  authoringMode: ProcessLibraryAuthoringMode;
+  inputMethod: ProcessLibraryInputMethod;
+  authoringText: string | null;
   definition: Record<string, any>;
+  apiTools: ProcessLibraryApiToolDefinition[];
   schemaFields: Array<{
     key: string;
     label: string;
@@ -48,8 +60,11 @@ type ManualProcessTemplatePayload = {
     required: boolean;
   }>;
   sourceHash: string;
+  hasApiSubmit: boolean;
+  hasApiQuery: boolean;
   hasUrlSubmit: boolean;
   hasUrlQuery: boolean;
+  hasRpaSubmit: boolean;
   hasRpaQuery: boolean;
 };
 
@@ -128,7 +143,7 @@ export class ProcessLibraryService {
 
   async createManualProcessTemplate(tenantId: string, dto: CreateProcessTemplateDto) {
     const connector = await this.getManageableConnector(tenantId, dto.connectorId);
-    const payload = this.buildManualTemplatePayload(dto);
+    const payload = this.buildManualTemplatePayload(dto, connector);
     return this.publishManualProcessTemplate(tenantId, connector, payload);
   }
 
@@ -153,7 +168,7 @@ export class ProcessLibraryService {
     }
 
     const connector = await this.getManageableConnector(tenantId, dto.connectorId);
-    const payload = this.buildManualTemplatePayload(dto);
+    const payload = this.buildManualTemplatePayload(dto, connector);
     return this.publishManualProcessTemplate(tenantId, connector, payload, templateId);
   }
 
@@ -199,6 +214,21 @@ export class ProcessLibraryService {
           data: {
             latestTemplateId: null,
             status: 'disabled',
+          },
+        });
+      }
+
+      if (tx.mCPTool?.updateMany) {
+        await tx.mCPTool.updateMany({
+          where: {
+            connectorId: existing.connectorId,
+            flowCode: existing.processCode,
+            toolName: {
+              startsWith: `manual_${existing.processCode}_`,
+            },
+          },
+          data: {
+            enabled: false,
           },
         });
       }
@@ -368,17 +398,18 @@ export class ProcessLibraryService {
     return connector;
   }
 
-  private buildManualTemplatePayload(dto: CreateProcessTemplateDto): ManualProcessTemplatePayload {
-    const definitions = parseRpaFlowDefinitions(dto.rpaFlowContent);
-    if (definitions.length !== 1) {
-      throw new BadRequestException('单个添加流程只能提交一个流程定义');
-    }
-
-    const baseDefinition = definitions[0];
+  private buildManualTemplatePayload(
+    dto: CreateProcessTemplateDto,
+    connector: {
+      id: string;
+      name: string;
+      identityScope: string | null;
+      oaType: string;
+      baseUrl: string | null;
+    },
+  ): ManualProcessTemplatePayload {
     const processCode = this.normalizeProcessCode(dto.processCode);
     const processName = dto.processName.trim();
-    const processCategory = dto.processCategory?.trim() || baseDefinition.category || null;
-    const description = dto.description?.trim() || baseDefinition.description || null;
 
     if (!processCode) {
       throw new BadRequestException('流程编码不能为空');
@@ -387,6 +418,29 @@ export class ProcessLibraryService {
     if (!processName) {
       throw new BadRequestException('流程名称不能为空');
     }
+
+    const hintedDefinitions = parseRpaFlowDefinitions(dto.rpaFlowContent);
+    const resolvedAccessMode = dto.accessMode === 'rpa' || dto.accessMode === 'url' || dto.accessMode === 'api'
+      ? dto.accessMode
+      : (hintedDefinitions.some((definition) => this.isDirectLinkDefinition(definition as Record<string, any>)) ? 'url' : 'rpa');
+    const resolvedAuthoringMode = dto.authoringMode === 'json' ? 'json' : 'text';
+    const resolvedInputMethod: ProcessLibraryInputMethod = dto.inputMethod === 'file' ? 'file' : 'manual';
+    const parsed = buildProcessLibraryFlowDefinitions({
+      content: dto.rpaFlowContent,
+      accessMode: resolvedAccessMode,
+      authoringMode: resolvedAuthoringMode,
+      connectorBaseUrl: connector.baseUrl,
+      processName,
+      processCode,
+    });
+
+    if (parsed.definitions.length !== 1) {
+      throw new BadRequestException('单个添加流程只能提交一个流程定义');
+    }
+
+    const baseDefinition = parsed.definitions[0];
+    const processCategory = dto.processCategory?.trim() || baseDefinition.category || null;
+    const description = dto.description?.trim() || baseDefinition.description || null;
 
     const definition = {
       ...baseDefinition,
@@ -398,17 +452,29 @@ export class ProcessLibraryService {
 
     const directLinkDefinition = this.isDirectLinkDefinition(definition);
     const submitSteps = definition.actions?.submit?.steps;
-    const hasRpaSubmit = !directLinkDefinition && Array.isArray(submitSteps) && submitSteps.length > 0;
+    const hasApiSubmit = resolvedAccessMode === 'api'
+      && Array.isArray(parsed.apiTools)
+      && parsed.apiTools.some((tool) => tool.category === 'submit');
+    const hasApiQuery = resolvedAccessMode === 'api'
+      && Array.isArray(parsed.apiTools)
+      && parsed.apiTools.some((tool) => tool.category === 'query');
+    const hasRpaSubmit = resolvedAccessMode !== 'api'
+      && !directLinkDefinition
+      && Array.isArray(submitSteps)
+      && submitSteps.length > 0;
     const hasUrlSubmit = directLinkDefinition && this.hasNetworkRequest(definition.runtime?.networkSubmit);
-    if (!hasRpaSubmit && !hasUrlSubmit) {
+    if (!hasApiSubmit && !hasRpaSubmit && !hasUrlSubmit) {
       throw new BadRequestException(
-        directLinkDefinition
+        resolvedAccessMode === 'api'
+          ? 'API 流程至少需要提供一个提交接口'
+          : directLinkDefinition
           ? '链接直达流程定义必须包含网络提交定义'
           : '流程定义必须包含可执行的提交步骤',
       );
     }
 
-    const hasRpaQuery = !directLinkDefinition
+    const hasRpaQuery = resolvedAccessMode !== 'api'
+      && !directLinkDefinition
       && Array.isArray(definition.actions?.queryStatus?.steps)
       && definition.actions.queryStatus.steps.length > 0;
     const hasUrlQuery = directLinkDefinition && this.hasNetworkRequest(definition.runtime?.networkStatus);
@@ -418,6 +484,33 @@ export class ProcessLibraryService {
       label: String(field?.label || field?.key || `字段${index + 1}`).trim(),
       type: String(field?.type || 'text').trim() || 'text',
       required: Boolean(field?.required),
+      defaultValue: field?.defaultValue,
+      options: Array.isArray(field?.options)
+        ? field.options.map((option: any) => {
+            if (typeof option === 'string') {
+              const normalized = option.trim();
+              return normalized
+                ? {
+                    label: normalized,
+                    value: normalized,
+                  }
+                : null;
+            }
+
+            const label = String(option?.label || option?.value || '').trim();
+            const value = String(option?.value || option?.label || '').trim();
+            return label && value
+              ? { label, value }
+              : null;
+          }).filter(Boolean)
+        : undefined,
+      validation: Array.isArray(field?.validation) ? field.validation : undefined,
+      description: typeof field?.description === 'string' ? field.description.trim() : undefined,
+      example: typeof field?.example === 'string' ? field.example.trim() : undefined,
+      multiple: field?.multiple === true,
+      uiHints: field?.uiHints && typeof field.uiHints === 'object' && !Array.isArray(field.uiHints)
+        ? field.uiHints
+        : undefined,
     }));
 
     const sourceHash = createHash('sha256')
@@ -431,13 +524,66 @@ export class ProcessLibraryService {
       processCategory,
       description,
       falLevel: dto.falLevel || 'F2',
+      accessMode: resolvedAccessMode === 'api'
+        ? 'api'
+        : (directLinkDefinition ? 'url' : 'rpa'),
+      authoringMode: parsed.normalizedAuthoringMode,
+      inputMethod: resolvedInputMethod,
+      authoringText: parsed.authoringText
+        ? this.syncAuthoringTextTemplate(parsed.authoringText, { processName, processCode, description })
+        : null,
       definition,
+      apiTools: Array.isArray(parsed.apiTools) ? parsed.apiTools : [],
       schemaFields,
       sourceHash,
+      hasApiSubmit,
+      hasApiQuery,
       hasUrlSubmit,
       hasUrlQuery,
+      hasRpaSubmit,
       hasRpaQuery,
     };
+  }
+
+  private syncAuthoringTextTemplate(
+    source: string,
+    input: {
+      processName: string;
+      processCode: string;
+      description: string | null;
+    },
+  ) {
+    const lines = String(source || '').split(/\r?\n/);
+    const nextLines = [...lines];
+
+    const replaceOrInsert = (pattern: RegExp, value: string, insertIndex: number) => {
+      const index = nextLines.findIndex((line) => pattern.test(String(line || '').trim()));
+      if (index >= 0) {
+        nextLines[index] = value;
+        return;
+      }
+      nextLines.splice(insertIndex, 0, value);
+    };
+
+    replaceOrInsert(/^(?:#{1,6}\s*)?流程\s*(?:[:：]|\s+)/u, `流程: ${input.processName}`, 0);
+
+    const flowLineIndex = nextLines.findIndex((line) => /^(?:#{1,6}\s*)?流程\s*(?:[:：]|\s+)/u.test(String(line || '').trim()));
+    replaceOrInsert(/^(?:流程编码|processCode)\s*[:：]/iu, `流程编码: ${input.processCode}`, flowLineIndex >= 0 ? flowLineIndex + 1 : 1);
+
+    const descriptionIndex = nextLines.findIndex((line) => /^(?:描述|说明|简介|流程描述|description)\s*[:：]/iu.test(String(line || '').trim()));
+    if (input.description) {
+      const normalizedDescription = `描述: ${input.description}`;
+      if (descriptionIndex >= 0) {
+        nextLines[descriptionIndex] = normalizedDescription;
+      } else {
+        const processCodeIndex = nextLines.findIndex((line) => /^(?:流程编码|processCode)\s*[:：]/iu.test(String(line || '').trim()));
+        nextLines.splice(processCodeIndex >= 0 ? processCodeIndex + 1 : 2, 0, normalizedDescription);
+      }
+    } else if (descriptionIndex >= 0) {
+      nextLines.splice(descriptionIndex, 1);
+    }
+
+    return nextLines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
   }
 
   private async publishManualProcessTemplate(
@@ -507,14 +653,42 @@ export class ProcessLibraryService {
         },
       });
 
+      await this.syncManualApiTools(tx, {
+        tenantId,
+        connectorId: connector.id,
+        processCode: payload.processCode,
+        schemaFields: payload.schemaFields,
+        apiTools: payload.accessMode === 'api' ? payload.apiTools : [],
+      });
+
       const nextVersion = (latestTemplate?.version || 0) + 1;
+      const submitModes = payload.hasApiSubmit
+        ? ['api']
+        : (payload.hasUrlSubmit ? ['url'] : (payload.hasRpaSubmit ? ['rpa'] : []));
+      const queryModes = payload.hasApiQuery
+        ? ['api']
+        : (payload.hasUrlQuery ? ['url'] : (payload.hasRpaQuery ? ['rpa'] : []));
+      const primaryApiTool = payload.apiTools.find((tool) => tool.category === 'submit');
       const uiHints = {
         executionModes: {
-          submit: payload.hasUrlSubmit ? ['url'] : ['rpa'],
-          queryStatus: payload.hasUrlQuery ? ['url'] : (payload.hasRpaQuery ? ['rpa'] : []),
+          submit: submitModes,
+          queryStatus: queryModes,
         },
         rpaDefinition: payload.definition,
         source: 'process_library_manual',
+        ...(primaryApiTool
+          ? {
+              apiMethod: primaryApiTool.httpMethod,
+              apiPath: primaryApiTool.apiEndpoint,
+              endpoints: this.buildApiUiHintsEndpoints(payload.apiTools),
+            }
+          : {}),
+        authoring: {
+          mode: payload.authoringMode,
+          accessMode: payload.accessMode,
+          inputMethod: payload.inputMethod,
+          textTemplate: payload.authoringText,
+        },
       } as unknown as Prisma.InputJsonValue;
 
       const template = await tx.processTemplate.create({
@@ -576,5 +750,128 @@ export class ProcessLibraryService {
 
       return template;
     });
+  }
+
+  private async syncManualApiTools(
+    tx: any,
+    input: {
+      tenantId: string;
+      connectorId: string;
+      processCode: string;
+      schemaFields: ManualProcessTemplatePayload['schemaFields'];
+      apiTools: ProcessLibraryApiToolDefinition[];
+    },
+  ) {
+    if (!tx?.mCPTool) {
+      return;
+    }
+
+    const expectedToolNames = input.apiTools.map((tool) => tool.toolName);
+    for (const tool of input.apiTools) {
+      await tx.mCPTool.upsert({
+        where: {
+          connectorId_toolName: {
+            connectorId: input.connectorId,
+            toolName: tool.toolName,
+          },
+        },
+        create: {
+          tenantId: input.tenantId,
+          connectorId: input.connectorId,
+          toolName: tool.toolName,
+          toolDescription: tool.toolDescription,
+          toolSchema: this.buildManualApiToolSchema(input.schemaFields, tool.category),
+          apiEndpoint: tool.apiEndpoint,
+          httpMethod: tool.httpMethod,
+          headers: tool.headers || {},
+          bodyTemplate: tool.bodyTemplate || null,
+          paramMapping: tool.paramMapping,
+          responseMapping: tool.responseMapping,
+          flowCode: input.processCode,
+          category: tool.category,
+          enabled: true,
+          testInput: tool.testInput || null,
+          testOutput: null,
+        },
+        update: {
+          toolDescription: tool.toolDescription,
+          toolSchema: this.buildManualApiToolSchema(input.schemaFields, tool.category),
+          apiEndpoint: tool.apiEndpoint,
+          httpMethod: tool.httpMethod,
+          headers: tool.headers || {},
+          bodyTemplate: tool.bodyTemplate || null,
+          paramMapping: tool.paramMapping,
+          responseMapping: tool.responseMapping,
+          flowCode: input.processCode,
+          category: tool.category,
+          enabled: true,
+          testInput: tool.testInput || null,
+          updatedAt: new Date(),
+        },
+      });
+    }
+
+    if (tx.mCPTool.updateMany) {
+      await tx.mCPTool.updateMany({
+        where: {
+          connectorId: input.connectorId,
+          flowCode: input.processCode,
+          toolName: {
+            startsWith: `manual_${input.processCode}_`,
+          },
+          ...(expectedToolNames.length > 0
+            ? {
+                NOT: {
+                  toolName: {
+                    in: expectedToolNames,
+                  },
+                },
+              }
+            : {}),
+        },
+        data: {
+          enabled: false,
+        },
+      });
+    }
+  }
+
+  private buildManualApiToolSchema(
+    schemaFields: ManualProcessTemplatePayload['schemaFields'],
+    category: ProcessLibraryApiToolDefinition['category'],
+  ) {
+    if (category === 'query') {
+      return {
+        type: 'object',
+        properties: {
+          submissionId: {
+            type: 'string',
+            description: '业务系统中的申请单号或提交流水号',
+          },
+        },
+        required: ['submissionId'],
+      };
+    }
+
+    return {
+      type: 'object',
+      properties: Object.fromEntries(schemaFields.map((field) => [
+        field.key,
+        {
+          type: field.type === 'number' ? 'number' : 'string',
+          description: field.label,
+        },
+      ])),
+      required: schemaFields.filter((field) => field.required).map((field) => field.key),
+    };
+  }
+
+  private buildApiUiHintsEndpoints(apiTools: ProcessLibraryApiToolDefinition[]) {
+    return apiTools.map((tool) => ({
+      toolName: tool.toolName,
+      category: tool.category === 'query' ? 'query' : 'submit',
+      method: tool.httpMethod,
+      path: tool.apiEndpoint,
+    }));
   }
 }

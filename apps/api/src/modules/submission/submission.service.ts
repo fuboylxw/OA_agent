@@ -53,6 +53,7 @@ export interface SubmissionWorkbenchItem {
   processCode?: string;
   processName?: string;
   processCategory?: string;
+  connectorName?: string | null;
   sessionId?: string | null;
   restoreStatus?: string | null;
   restoreExpiresAt?: Date | string | null;
@@ -545,6 +546,13 @@ export class SubmissionService {
     const templateIds = [...new Set(submissions.map(s => s.templateId))];
     const templates = await this.prisma.processTemplate.findMany({
       where: { id: { in: templateIds } },
+      include: {
+        connector: {
+          select: {
+            name: true,
+          },
+        },
+      },
     });
     const templateMap = new Map(templates.map(t => [t.id, t]));
 
@@ -583,6 +591,7 @@ export class SubmissionService {
         processCode: template?.processCode,
         processName: template?.processName,
         processCategory: template?.processCategory,
+        connectorName: template?.connector?.name || null,
         status: effectiveStatus,
         statusText: getSubmissionStatusText(effectiveStatus),
         formData: toFormDataRecord(s.formData),
@@ -615,7 +624,15 @@ export class SubmissionService {
         ...(submissionDraftIds.size > 0 ? { id: { notIn: [...submissionDraftIds] } } : {}),
       },
       include: {
-        template: true,
+        template: {
+          include: {
+            connector: {
+              select: {
+                name: true,
+              },
+            },
+          },
+        },
       },
       orderBy: { updatedAt: 'desc' },
       take: 50,
@@ -636,6 +653,7 @@ export class SubmissionService {
         processCode: draft.template?.processCode,
         processName: draft.template?.processName,
         processCategory: draft.template?.processCategory,
+        connectorName: draft.template?.connector?.name || null,
         status: draftWorkbenchStatus,
         statusText: draft.status === 'ready' ? '待确认提交' : '待补充信息',
         formData: toFormDataRecord(draft.formData),

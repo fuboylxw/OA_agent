@@ -495,6 +495,737 @@ describe('UrlNetworkSubmitService', () => {
     expect(result.summary).toBe('请假申请 draft saved through URL network runtime');
   });
 
+  it('patches captured form payloads from field-level request mappings before URL submit', async () => {
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      data: {
+        ok: true,
+      },
+    });
+    mockedAxios.create.mockReturnValue({
+      request,
+    } as any);
+
+    const service = new UrlNetworkSubmitService({
+      run: jest.fn().mockResolvedValue({
+        success: true,
+        extractedValues: {
+          submitCapture: {
+            action: 'https://oa.example.com/form/seal/saveDraft',
+            method: 'post',
+            bodyMode: 'form',
+            fields: {
+              CSRFTOKEN: 'csrf-001',
+              _json_params: JSON.stringify({
+                colMainData: {
+                  subject: '西安工程大学用印申请单',
+                },
+              }),
+            },
+          },
+          filledFields: {
+            '文件类型、名称及份数': false,
+          },
+        },
+      }),
+    } as any);
+
+    await service.execute({
+      action: 'submit',
+      connectorId: 'connector-1',
+      processCode: 'expense_submit',
+      processName: '西安工程大学用印申请单',
+      payload: {
+        formData: {
+          field_1: '测试用印材料1份',
+        },
+      },
+      context: {
+        path: 'url',
+        action: 'submit',
+        authConfig: {
+          cookie: 'SESSION=abc123',
+        },
+        ticket: {
+          jumpUrl: 'https://oa.example.com/form/seal/new',
+        },
+        runtime: {
+          preflight: {
+            steps: [
+              { type: 'evaluate', builtin: 'capture_form_submit' },
+            ],
+          },
+          networkSubmit: {
+            url: '{{preflight.submitCapture.action}}',
+            method: '{{preflight.submitCapture.method}}',
+            bodyMode: '{{preflight.submitCapture.bodyMode}}',
+            successMode: 'http2xx',
+            completionKind: 'draft',
+            body: { source: 'preflight.submitCapture.fields' },
+          },
+        },
+        navigation: {},
+        rpaFlow: {
+          processCode: 'expense_submit',
+          processName: '西安工程大学用印申请单',
+          rpaDefinition: {
+            processCode: 'expense_submit',
+            processName: '西安工程大学用印申请单',
+            fields: [
+              {
+                key: 'field_1',
+                label: '文件类型、名称及份数',
+                type: 'textarea',
+                required: true,
+                requestPatches: [
+                  {
+                    scope: 'body',
+                    path: '_json_params.colMainData.fileSummary',
+                  },
+                ],
+              },
+            ],
+          },
+        },
+      } as any,
+    });
+
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({
+      method: 'POST',
+      url: 'https://oa.example.com/form/seal/saveDraft',
+    }));
+
+    const data = String(request.mock.calls[0][0].data);
+    expect(decodeURIComponent(data)).toContain('"fileSummary":"测试用印材料1份"');
+  });
+
+  it('inherits captured ajax request headers for URL runtime replay while dropping hop-by-hop headers', async () => {
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      data: {
+        success: true,
+      },
+    });
+    mockedAxios.create.mockReturnValue({
+      request,
+    } as any);
+
+    const service = new UrlNetworkSubmitService({
+      run: jest.fn().mockResolvedValue({
+        success: true,
+        extractedValues: {
+          submitCapture: {
+            action: 'https://oa.example.com/form/seal/saveDraft',
+            method: 'post',
+            bodyMode: 'json',
+            fields: {
+              formId: 'form-001',
+            },
+          },
+          submitRequestHeaders: {
+            'content-type': 'application/json;charset=UTF-8',
+            'x-requested-with': 'XMLHttpRequest',
+            host: 'oa.example.com',
+            'content-length': '123',
+          },
+        },
+      }),
+    } as any);
+
+    await service.execute({
+      action: 'submit',
+      connectorId: 'connector-1',
+      processCode: 'seal_apply',
+      processName: '用印申请',
+      payload: {
+        formData: {},
+      },
+      context: {
+        path: 'url',
+        action: 'submit',
+        authConfig: {
+          cookie: 'SESSION=abc123',
+        },
+        ticket: {
+          jumpUrl: 'https://oa.example.com/form/seal/new',
+        },
+        runtime: {
+          preflight: {
+            steps: [
+              { type: 'evaluate', builtin: 'capture_form_submit' },
+            ],
+          },
+          networkSubmit: {
+            url: '{{preflight.submitCapture.action}}',
+            method: '{{preflight.submitCapture.method}}',
+            bodyMode: '{{preflight.submitCapture.bodyMode}}',
+            successMode: 'http2xx',
+            body: { source: 'preflight.submitCapture.fields' },
+          },
+        },
+        navigation: {},
+        rpaFlow: {
+          processCode: 'seal_apply',
+          processName: '用印申请',
+          rpaDefinition: {
+            processCode: 'seal_apply',
+            processName: '用印申请',
+          },
+        },
+      } as any,
+    });
+
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({
+      method: 'POST',
+      url: 'https://oa.example.com/form/seal/saveDraft',
+      headers: expect.objectContaining({
+        Cookie: 'SESSION=abc123',
+        'content-type': 'application/json;charset=UTF-8',
+        'x-requested-with': 'XMLHttpRequest',
+      }),
+      data: {
+        formId: 'form-001',
+      },
+    }));
+    expect(request.mock.calls[0][0].headers.host).toBeUndefined();
+    expect(request.mock.calls[0][0].headers['content-length']).toBeUndefined();
+  });
+
+  it('infers CAP4 colMainData body patch paths from generic field ids without explicit requestPatches', async () => {
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      data: {
+        success: true,
+      },
+    });
+    mockedAxios.create.mockReturnValue({
+      request,
+    } as any);
+
+    const service = new UrlNetworkSubmitService({
+      run: jest.fn().mockResolvedValue({
+        success: true,
+        extractedValues: {
+          submitCapture: {
+            action: 'https://oa.example.com/form/seal/saveDraft',
+            method: 'post',
+            bodyMode: 'form',
+            fields: {
+              _json_params: JSON.stringify({
+                workflow_definition: {},
+                colMainData: {
+                  subject: '西安工程大学用印申请单',
+                  field0050: '',
+                },
+              }),
+            },
+          },
+          filledFields: {
+            field0050_id: false,
+          },
+        },
+      }),
+    } as any);
+
+    await service.execute({
+      action: 'submit',
+      connectorId: 'connector-1',
+      processCode: 'seal_apply',
+      processName: '西安工程大学用印申请单',
+      payload: {
+        formData: {
+          fileSummary: '合同文本 2份',
+        },
+      },
+      context: {
+        path: 'url',
+        action: 'submit',
+        authConfig: {
+          cookie: 'SESSION=abc123',
+        },
+        ticket: {
+          jumpUrl: 'https://oa.example.com/form/seal/new',
+        },
+        runtime: {
+          preflight: {
+            steps: [
+              { type: 'evaluate', builtin: 'capture_form_submit' },
+            ],
+          },
+          networkSubmit: {
+            url: '{{preflight.submitCapture.action}}',
+            method: '{{preflight.submitCapture.method}}',
+            bodyMode: '{{preflight.submitCapture.bodyMode}}',
+            successMode: 'http2xx',
+            completionKind: 'draft',
+            body: { source: 'preflight.submitCapture.fields' },
+          },
+        },
+        navigation: {},
+        rpaFlow: {
+          processCode: 'seal_apply',
+          processName: '西安工程大学用印申请单',
+          rpaDefinition: {
+            processCode: 'seal_apply',
+            processName: '西安工程大学用印申请单',
+            fields: [
+              {
+                key: 'fileSummary',
+                label: '文件类型、名称及份数',
+                type: 'textarea',
+                required: true,
+                id: 'field0050_id',
+              },
+            ],
+          },
+        },
+      } as any,
+    });
+
+    const data = String(request.mock.calls[0][0].data);
+    expect(decodeURIComponent(data.replace(/\+/g, '%20'))).toContain('"field0050":"合同文本 2份"');
+  });
+
+  it('infers CAP4 checkbox request patches from capture_form_submit field mappings', async () => {
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      data: {
+        success: true,
+      },
+    });
+    mockedAxios.create.mockReturnValue({
+      request,
+    } as any);
+
+    const service = new UrlNetworkSubmitService({
+      run: jest.fn().mockResolvedValue({
+        success: true,
+        extractedValues: {
+          submitCapture: {
+            action: 'https://oa.example.com/form/seal/saveDraft',
+            method: 'post',
+            bodyMode: 'form',
+            fields: {
+              _json_params: JSON.stringify({
+                workflow_definition: {},
+                colMainData: {
+                  subject: '西安工程大学用印申请单',
+                  field0053: '',
+                  field0054: '',
+                },
+              }),
+            },
+          },
+          filledFields: {
+            field0053_id: true,
+            sealTypes: true,
+          },
+        },
+      }),
+    } as any);
+
+    await service.execute({
+      action: 'submit',
+      connectorId: 'connector-1',
+      processCode: 'seal_apply',
+      processName: '西安工程大学用印申请单',
+      payload: {
+        formData: {
+          sealTypes: ['党委公章'],
+        },
+      },
+      context: {
+        path: 'url',
+        action: 'submit',
+        authConfig: {
+          cookie: 'SESSION=abc123',
+        },
+        ticket: {
+          jumpUrl: 'https://oa.example.com/form/seal/new',
+        },
+        runtime: {
+          preflight: {
+            steps: [
+              {
+                type: 'evaluate',
+                builtin: 'capture_form_submit',
+                options: {
+                  fieldMappings: [
+                    {
+                      fieldKey: 'sealTypes',
+                      fieldType: 'checkbox',
+                      target: { id: 'field0053_id', label: '党委公章' },
+                      options: [{ label: '党委公章', value: '党委公章' }],
+                    },
+                    {
+                      fieldKey: 'sealTypes',
+                      fieldType: 'checkbox',
+                      target: { id: 'field0054_id', label: '学校公章' },
+                      options: [{ label: '学校公章', value: '学校公章' }],
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          networkSubmit: {
+            url: '{{preflight.submitCapture.action}}',
+            method: '{{preflight.submitCapture.method}}',
+            bodyMode: '{{preflight.submitCapture.bodyMode}}',
+            successMode: 'http2xx',
+            completionKind: 'draft',
+            body: { source: 'preflight.submitCapture.fields' },
+          },
+        },
+        navigation: {},
+        rpaFlow: {
+          processCode: 'seal_apply',
+          processName: '西安工程大学用印申请单',
+          rpaDefinition: {
+            processCode: 'seal_apply',
+            processName: '西安工程大学用印申请单',
+            fields: [
+              {
+                key: 'sealTypes',
+                label: '用印类型',
+                type: 'checkbox',
+                required: true,
+                multiple: true,
+                options: [
+                  { label: '党委公章', value: '党委公章' },
+                  { label: '学校公章', value: '学校公章' },
+                ],
+              },
+            ],
+          },
+        },
+      } as any,
+    });
+
+    const data = String(request.mock.calls[0][0].data);
+    const decoded = decodeURIComponent(data.replace(/\+/g, '%20'));
+    expect(decoded).toContain('"field0053":"1"');
+    expect(decoded).toContain('"field0054":""');
+  });
+
+  it('adds missing CAP4 checkbox sibling fields when the captured payload omits unselected options', async () => {
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      data: {
+        success: true,
+      },
+    });
+    mockedAxios.create.mockReturnValue({
+      request,
+    } as any);
+
+    const service = new UrlNetworkSubmitService({
+      run: jest.fn().mockResolvedValue({
+        success: true,
+        extractedValues: {
+          submitCapture: {
+            action: 'https://oa.example.com/form/seal/saveDraft',
+            method: 'post',
+            bodyMode: 'form',
+            fields: {
+              _json_params: JSON.stringify({
+                workflow_definition: {},
+                colMainData: {
+                  subject: '西安工程大学用印申请单',
+                  field0053: '',
+                },
+              }),
+            },
+          },
+          filledFields: {
+            field0053_id: true,
+            sealTypes: true,
+          },
+        },
+      }),
+    } as any);
+
+    await service.execute({
+      action: 'submit',
+      connectorId: 'connector-1',
+      processCode: 'seal_apply',
+      processName: '西安工程大学用印申请单',
+      payload: {
+        formData: {
+          sealTypes: ['党委公章'],
+        },
+      },
+      context: {
+        path: 'url',
+        action: 'submit',
+        authConfig: {
+          cookie: 'SESSION=abc123',
+        },
+        ticket: {
+          jumpUrl: 'https://oa.example.com/form/seal/new',
+        },
+        runtime: {
+          preflight: {
+            steps: [
+              {
+                type: 'evaluate',
+                builtin: 'capture_form_submit',
+                options: {
+                  fieldMappings: [
+                    {
+                      fieldKey: 'sealTypes',
+                      fieldType: 'checkbox',
+                      target: { id: 'field0053_id', label: '党委公章' },
+                      options: [{ label: '党委公章', value: '党委公章' }],
+                    },
+                    {
+                      fieldKey: 'sealTypes',
+                      fieldType: 'checkbox',
+                      target: { id: 'field0054_id', label: '学校公章' },
+                      options: [{ label: '学校公章', value: '学校公章' }],
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          networkSubmit: {
+            url: '{{preflight.submitCapture.action}}',
+            method: '{{preflight.submitCapture.method}}',
+            bodyMode: '{{preflight.submitCapture.bodyMode}}',
+            successMode: 'http2xx',
+            completionKind: 'draft',
+            body: { source: 'preflight.submitCapture.fields' },
+          },
+        },
+        navigation: {},
+        rpaFlow: {
+          processCode: 'seal_apply',
+          processName: '西安工程大学用印申请单',
+          rpaDefinition: {
+            processCode: 'seal_apply',
+            processName: '西安工程大学用印申请单',
+            fields: [
+              {
+                key: 'sealTypes',
+                label: '用印类型',
+                type: 'checkbox',
+                required: true,
+                multiple: true,
+                options: [
+                  { label: '党委公章', value: '党委公章' },
+                  { label: '学校公章', value: '学校公章' },
+                ],
+              },
+            ],
+          },
+        },
+      } as any,
+    });
+
+    const data = String(request.mock.calls[0][0].data);
+    const decoded = decodeURIComponent(data.replace(/\+/g, '%20'));
+    expect(decoded).toContain('"field0053":"1"');
+    expect(decoded).toContain('"field0054":""');
+  });
+
+  it('fails fast when a required URL field is neither DOM-bound nor request-patched', async () => {
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      data: {
+        ok: true,
+      },
+    });
+    mockedAxios.create.mockReturnValue({
+      request,
+    } as any);
+
+    const service = new UrlNetworkSubmitService({
+      run: jest.fn().mockResolvedValue({
+        success: true,
+        extractedValues: {
+          submitCapture: {
+            action: 'https://oa.example.com/form/seal/saveDraft',
+            method: 'post',
+            bodyMode: 'form',
+            fields: {
+              _json_params: '{"demo":true}',
+            },
+          },
+          filledFields: {
+            '文件类型、名称及份数': false,
+          },
+        },
+      }),
+    } as any);
+
+    await expect(service.execute({
+      action: 'submit',
+      connectorId: 'connector-1',
+      processCode: 'expense_submit',
+      processName: '西安工程大学用印申请单',
+      payload: {
+        formData: {
+          field_1: '测试用印材料1份',
+        },
+      },
+      context: {
+        path: 'url',
+        action: 'submit',
+        authConfig: {
+          cookie: 'SESSION=abc123',
+        },
+        ticket: {
+          jumpUrl: 'https://oa.example.com/form/seal/new',
+        },
+        runtime: {
+          preflight: {
+            steps: [
+              { type: 'evaluate', builtin: 'capture_form_submit' },
+            ],
+          },
+          networkSubmit: {
+            url: '{{preflight.submitCapture.action}}',
+            method: '{{preflight.submitCapture.method}}',
+            bodyMode: '{{preflight.submitCapture.bodyMode}}',
+            successMode: 'http2xx',
+            completionKind: 'draft',
+            body: { source: 'preflight.submitCapture.fields' },
+          },
+        },
+        navigation: {},
+        rpaFlow: {
+          processCode: 'expense_submit',
+          processName: '西安工程大学用印申请单',
+          rpaDefinition: {
+            processCode: 'expense_submit',
+            processName: '西安工程大学用印申请单',
+            fields: [
+              {
+                key: 'field_1',
+                label: '文件类型、名称及份数',
+                type: 'textarea',
+                required: true,
+              },
+            ],
+          },
+        },
+      } as any,
+    })).rejects.toThrow('URL runtime failed to bind required fields: 文件类型、名称及份数');
+
+    expect(request).not.toHaveBeenCalled();
+  });
+
+  it('fails fast when a required checkbox field is DOM-clicked but still missing from the request payload', async () => {
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      data: {
+        ok: true,
+      },
+    });
+    mockedAxios.create.mockReturnValue({
+      request,
+    } as any);
+
+    const service = new UrlNetworkSubmitService({
+      run: jest.fn().mockResolvedValue({
+        success: true,
+        extractedValues: {
+          submitCapture: {
+            action: 'https://oa.example.com/form/seal/saveDraft',
+            method: 'post',
+            bodyMode: 'form',
+            fields: {
+              _json_params: JSON.stringify({
+                workflow_definition: {},
+                colMainData: {
+                  subject: '西安工程大学用印申请单',
+                },
+              }),
+            },
+          },
+          filledFields: {
+            field0053_id: true,
+            sealTypes: true,
+          },
+        },
+      }),
+    } as any);
+
+    await expect(service.execute({
+      action: 'submit',
+      connectorId: 'connector-1',
+      processCode: 'seal_apply',
+      processName: '西安工程大学用印申请单',
+      payload: {
+        formData: {
+          sealTypes: ['党委公章'],
+        },
+      },
+      context: {
+        path: 'url',
+        action: 'submit',
+        authConfig: {
+          cookie: 'SESSION=abc123',
+        },
+        ticket: {
+          jumpUrl: 'https://oa.example.com/form/seal/new',
+        },
+        runtime: {
+          preflight: {
+            steps: [
+              {
+                type: 'evaluate',
+                builtin: 'capture_form_submit',
+                options: {
+                  fieldMappings: [
+                    {
+                      fieldKey: 'sealTypes',
+                      fieldType: 'checkbox',
+                      target: { label: '党委公章' },
+                      options: [{ label: '党委公章', value: '党委公章' }],
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          networkSubmit: {
+            url: '{{preflight.submitCapture.action}}',
+            method: '{{preflight.submitCapture.method}}',
+            bodyMode: '{{preflight.submitCapture.bodyMode}}',
+            successMode: 'http2xx',
+            completionKind: 'draft',
+            body: { source: 'preflight.submitCapture.fields' },
+          },
+        },
+        navigation: {},
+        rpaFlow: {
+          processCode: 'seal_apply',
+          processName: '西安工程大学用印申请单',
+          rpaDefinition: {
+            processCode: 'seal_apply',
+            processName: '西安工程大学用印申请单',
+            fields: [
+              {
+                key: 'sealTypes',
+                label: '用印类型',
+                type: 'checkbox',
+                required: true,
+                multiple: true,
+                options: [
+                  { label: '党委公章', value: '党委公章' },
+                ],
+              },
+            ],
+          },
+        },
+      } as any,
+    })).rejects.toThrow('URL runtime failed to bind required fields: 用印类型');
+
+    expect(request).not.toHaveBeenCalled();
+  });
+
   it('supports multipart submit by merging captured fields with uploaded attachments', async () => {
     const request = jest.fn().mockResolvedValue({
       status: 200,
@@ -516,12 +1247,9 @@ describe('UrlNetworkSubmitService', () => {
             bodyMode: 'multipart',
             fields: {
               subject: '印章申请',
-              attachmentRealField: 'seal.pdf',
             },
           },
-          attachmentFieldMap: {
-            sealAttachment: 'attachmentRealField',
-          },
+          attachmentFieldMap: {},
         },
       }),
     } as any);
@@ -574,6 +1302,14 @@ describe('UrlNetworkSubmitService', () => {
           rpaDefinition: {
             processCode: 'expense_submit',
             processName: '西安工程大学用印申请单',
+            fields: [
+              {
+                key: 'sealAttachment',
+                label: '用印附件',
+                type: 'file',
+                requestFieldName: 'attachmentRealField',
+              },
+            ],
           },
         },
       } as any,

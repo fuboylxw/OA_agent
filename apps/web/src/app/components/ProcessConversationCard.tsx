@@ -81,12 +81,14 @@ export default function ProcessConversationCard({
   actionButtons,
   onAction,
   onUploadField,
+  onEditField,
   disabled = false,
 }: {
   card: ProcessCard;
   actionButtons?: ActionButton[];
   onAction?: (action: string) => void;
   onUploadField?: (fieldKey: string) => void;
+  onEditField?: (field: OaFormField, nextValue: string) => Promise<void> | void;
   disabled?: boolean;
 }) {
   const effectiveButtons = card.actionState === 'available' ? (actionButtons || card.actionButtons || []) : [];
@@ -178,6 +180,9 @@ export default function ProcessConversationCard({
       tone={getTone(card.stage)}
       fields={card.fields}
       emptyText="当前没有可展示的表单字段"
+      editable={card.stage === 'confirming' && card.actionState === 'available'}
+      editingDisabled={disabled}
+      onCommitFieldEdit={onEditField}
       footer={footer}
     />
   );

@@ -1,0 +1,195 @@
+{
+  "oaVendor": "xpu",
+  "processCode": "flow_fe0e50d9",
+  "processName": "西安工程大学用印申请单",
+  "processCategory": "行政",
+  "description": "XPU OA URL 直达用印申请流程",
+  "sourceVersion": "xpu-url-bridge-v2-seal",
+  "schema": {
+    "fields": [
+      {
+        "key": "fileSummary",
+        "label": "文件类型、名称及份数",
+        "type": "textarea",
+        "required": true,
+        "id": "field0050_id"
+      },
+      {
+        "key": "sealAttachment",
+        "label": "用印附件",
+        "type": "file",
+        "required": true,
+        "id": "field0052_id"
+      },
+      {
+        "key": "sealTypes",
+        "label": "用印类型",
+        "type": "checkbox",
+        "required": true,
+        "multiple": true,
+        "options": [
+          { "label": "党委公章", "value": "党委公章" },
+          { "label": "学校公章", "value": "学校公章" },
+          { "label": "书记签名章", "value": "书记签名章" },
+          { "label": "校长签名章", "value": "校长签名章" },
+          { "label": "单位介绍信", "value": "单位介绍信" },
+          { "label": "事业单位法人证书", "value": "事业单位法人证书" },
+          { "label": "校学术委员会主任章", "value": "校学术委员会主任章" },
+          { "label": "法人身份证复印件", "value": "法人身份证复印件" }
+        ]
+      }
+    ]
+  },
+  "platform": {
+    "entryUrl": "https://sz.xpu.edu.cn/#/home?component=thirdScreen",
+    "businessBaseUrl": "https://oa2023.xpu.edu.cn",
+    "targetBaseUrl": "https://oa2023.xpu.edu.cn",
+    "jumpUrlTemplate": "https://oa2023.xpu.edu.cn/seeyon/collaboration/collaboration.do?method=newColl&from=templateNewColl&templateId=9155715239054624993&showTab=true",
+    "portalSsoBridge": {
+      "enabled": true,
+      "mode": "oa_info",
+      "portalUrl": "https://sz.xpu.edu.cn/#/home?component=thirdScreen",
+      "oaInfoUrl": "https://sz.xpu.edu.cn/gate/lobby/api/oa/info",
+      "sourcePath": "coordinateUrl",
+      "targetPathTemplate": "/seeyon/collaboration/collaboration.do?method=newColl&from=templateNewColl&templateId=9155715239054624993&showTab=true",
+      "required": true
+    }
+  },
+  "runtime": {
+    "executorMode": "browser",
+    "browserProvider": "playwright",
+    "preflight": {
+      "steps": [
+        {
+          "type": "upload",
+          "fieldKey": "sealAttachment",
+          "target": {
+            "kind": "upload",
+            "label": "用印附件"
+          },
+          "description": "上传用印附件"
+        },
+        {
+          "type": "evaluate",
+          "builtin": "capture_form_submit",
+          "description": "通过通用表单提交捕获插件填充页面并提取保存待发载荷",
+          "options": {
+            "frame": {
+              "name": "zwIframe"
+            },
+            "fieldMappings": [
+              {
+                "fieldKey": "fileSummary",
+                "fieldType": "textarea",
+                "sources": ["fileSummary", "文件类型、名称及份数"],
+                "target": { "id": "field0050_id" }
+              },
+              {
+                "fieldKey": "sealTypes",
+                "fieldType": "checkbox",
+                "sources": ["sealTypes", "用印类型"],
+                "options": [{ "label": "党委公章", "value": "党委公章" }],
+                "target": { "id": "field0053_id" }
+              },
+              {
+                "fieldKey": "sealTypes",
+                "fieldType": "checkbox",
+                "sources": ["sealTypes", "用印类型"],
+                "options": [{ "label": "学校公章", "value": "学校公章" }],
+                "target": { "id": "field0054_id" }
+              },
+              {
+                "fieldKey": "sealTypes",
+                "fieldType": "checkbox",
+                "sources": ["sealTypes", "用印类型"],
+                "options": [{ "label": "书记签名章", "value": "书记签名章" }],
+                "target": { "id": "field0055_id" }
+              },
+              {
+                "fieldKey": "sealTypes",
+                "fieldType": "checkbox",
+                "sources": ["sealTypes", "用印类型"],
+                "options": [{ "label": "校长签名章", "value": "校长签名章" }],
+                "target": { "id": "field0056_id" }
+              },
+              {
+                "fieldKey": "sealTypes",
+                "fieldType": "checkbox",
+                "sources": ["sealTypes", "用印类型"],
+                "options": [{ "label": "单位介绍信", "value": "单位介绍信" }],
+                "target": { "id": "field0057_id" }
+              },
+              {
+                "fieldKey": "sealTypes",
+                "fieldType": "checkbox",
+                "sources": ["sealTypes", "用印类型"],
+                "options": [{ "label": "事业单位法人证书", "value": "事业单位法人证书" }],
+                "target": { "id": "field0058_id" }
+              },
+              {
+                "fieldKey": "sealTypes",
+                "fieldType": "checkbox",
+                "sources": ["sealTypes", "用印类型"],
+                "options": [{ "label": "校学术委员会主任章", "value": "校学术委员会主任章" }],
+                "target": { "id": "field0059_id" }
+              },
+              {
+                "fieldKey": "sealTypes",
+                "fieldType": "checkbox",
+                "sources": ["sealTypes", "用印类型"],
+                "options": [{ "label": "法人身份证复印件", "value": "法人身份证复印件" }],
+                "target": { "id": "field0060_id" }
+              }
+            ],
+            "fileMappings": [
+              {
+                "fieldKey": "sealAttachment",
+                "target": {
+                  "id": "field0052_id",
+                  "label": "用印附件"
+                }
+              }
+            ],
+            "trigger": {
+              "text": "保存待发",
+              "exact": true,
+              "scope": "root"
+            },
+            "capture": {
+              "actionPattern": "collaboration\\.do\\?method=saveDraft",
+              "timeoutMs": 15000
+            },
+            "output": {
+              "captureKey": "saveDraft",
+              "fieldsKey": "saveDraftFields",
+              "csrfKey": "csrfToken",
+              "filledFieldsKey": "filledFields",
+              "captureEventCountKey": "captureEventCount",
+              "attachmentFieldMapKey": "attachmentFieldMap",
+              "headersKey": "submitRequestHeaders",
+              "rawBodyKey": "submitRawBody"
+            }
+          }
+        }
+      ]
+    },
+    "networkSubmit": {
+      "url": "{{preflight.saveDraft.action}}",
+      "method": "{{preflight.saveDraft.method}}",
+      "bodyMode": "{{preflight.saveDraft.bodyMode}}",
+      "successMode": "http2xx",
+      "completionKind": "draft",
+      "headers": {
+        "Origin": "{{preflight.saveDraft.origin}}",
+        "Referer": "{{jumpUrl}}"
+      },
+      "body": {
+        "source": "preflight.saveDraft.fields"
+      }
+    }
+  },
+  "executionModes": {
+    "submit": ["url"],
+    "queryStatus": []
+  }
+}

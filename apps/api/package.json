@@ -14,7 +14,9 @@
     "prisma:migrate": "corepack pnpm exec prisma migrate dev --schema ../../prisma/schema.prisma",
     "prisma:seed": "corepack pnpm exec tsx ../../prisma/seed.ts",
     "debug:xpu:seed-connector": "corepack pnpm exec tsx scripts/ensure-xpu-whitelist-connector.ts",
-    "debug:xpu:verify-whitelist-login": "corepack pnpm exec tsx scripts/verify-xpu-whitelist-login.ts"
+    "debug:xpu:verify-whitelist-login": "corepack pnpm exec tsx scripts/verify-xpu-whitelist-login.ts",
+    "verify:frontend:mobile-ui": "node scripts/verify-frontend-mobile-user-ui.js",
+    "verify:frontend:chat-resume-reset": "node scripts/verify-frontend-chat-resume-reset.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",

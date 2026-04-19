@@ -6,6 +6,7 @@ import ProcessConversationCard, {
   ActionButton,
   ProcessCard,
 } from '../components/ProcessConversationCard';
+import type { OaFormField } from '../components/OaFormPreview';
 import { apiClient } from '../lib/api-client';
 import { shouldPollChatSession } from '../lib/chat-process-polling';
 import { sortChatSessions } from '../lib/chat-session-list';
@@ -114,6 +115,15 @@ interface ChatSidebarProps {
   onAction?: () => void;
 }
 
+interface ChatHistoryListProps {
+  currentSessionId: string | null;
+  deletingSessionId: string | null;
+  sessions: ChatSession[];
+  onDeleteRequest: (session: ChatSession) => void;
+  onSelectSession: (sessionId: string) => void;
+  onAction?: () => void;
+}
+
 function formatRelativeTime(date: string) {
   const now = new Date();
   const target = new Date(date);
@@ -182,6 +192,84 @@ function getActionMarker(action: string) {
   return actionMap[action] || action;
 }
 
+function ChatHistoryList({
+  currentSessionId,
+  deletingSessionId,
+  sessions,
+  onDeleteRequest,
+  onSelectSession,
+  onAction,
+}: ChatHistoryListProps) {
+  if (sessions.length === 0) {
+    return (
+      <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">
+        暂无历史对话
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-2">
+      {sessions.map((session) => {
+        const badge = getSessionBadge(session);
+        return (
+          <div
+            key={session.id}
+            className={`w-full rounded-2xl border px-4 py-3 transition-all ${
+              currentSessionId === session.id
+                ? 'border-sky-200 bg-sky-50 shadow-sm'
+                : 'border-transparent bg-white hover:border-slate-200 hover:bg-slate-50'
+            }`}
+          >
+            <button
+              type="button"
+              onClick={() => {
+                onSelectSession(session.id);
+                onAction?.();
+              }}
+              className="w-full text-left"
+            >
+              <div className="flex items-start justify-between gap-3">
+                <div className="min-w-0">
+                  <div className="truncate text-sm font-semibold text-slate-900">
+                    {session.title || '新对话'}
+                  </div>
+                  <div className="mt-1 truncate text-xs text-slate-500">
+                    {session.processName || session.lastMessage || '暂无摘要'}
+                  </div>
+                </div>
+                {badge ? (
+                  <span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${badge.className}`}>
+                    {badge.label}
+                  </span>
+                ) : null}
+              </div>
+              <div className="mt-2 flex items-center justify-between gap-3 text-xs text-slate-400">
+                <span>{session.messageCount} 条消息</span>
+                <span>{formatRelativeTime(session.timestamp)}</span>
+              </div>
+            </button>
+            <div className="mt-2 flex justify-end">
+              <button
+                type="button"
+                onClick={(event) => {
+                  event.stopPropagation();
+                  onDeleteRequest(session);
+                }}
+                disabled={deletingSessionId === session.id}
+                className="rounded-full px-2 py-1 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-50"
+                title={session.hasBusinessRecord ? '从历史中移除，可在我的申请中恢复' : '永久删除'}
+              >
+                <i className="fas fa-trash text-[11px]"></i>
+              </button>
+            </div>
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
 function ChatSidebar({
   currentSessionId,
   deletingSessionId,
@@ -228,73 +316,17 @@ function ChatSidebar({
         </button>
       </div>
 
-      <div className="flex-1 overflow-y-auto">
+        <div className="chat-scroll-region flex-1 min-h-0 overflow-y-auto overscroll-contain">
         {showHistory ? (
-          <div className="space-y-2 p-3">
-            {sessions.length === 0 ? (
-              <div className="rounded-2xl border border-dashed border-slate-200 bg-slate-50 px-4 py-10 text-center text-sm text-slate-500">
-                暂无历史对话
-              </div>
-            ) : (
-              sessions.map((session) => {
-                const badge = getSessionBadge(session);
-                return (
-                  <div
-                    key={session.id}
-                    className={`w-full rounded-2xl border px-4 py-3 transition-all ${
-                      currentSessionId === session.id
-                        ? 'border-sky-200 bg-sky-50 shadow-sm'
-                        : 'border-transparent bg-white hover:border-slate-200 hover:bg-slate-50'
-                    }`}
-                  >
-                    <button
-                      type="button"
-                      onClick={() => {
-                        onSelectSession(session.id);
-                        onAction?.();
-                      }}
-                      className="w-full text-left"
-                    >
-                      <div className="flex items-start justify-between gap-3">
-                        <div className="min-w-0">
-                          <div className="truncate text-sm font-semibold text-slate-900">
-                            {session.title || '新对话'}
-                          </div>
-                          <div className="mt-1 truncate text-xs text-slate-500">
-                            {session.processName || session.lastMessage || '暂无摘要'}
-                          </div>
-                        </div>
-                        {badge ? (
-                          <span className={`rounded-full px-2 py-1 text-[10px] font-semibold ${badge.className}`}>
-                            {badge.label}
-                          </span>
-                        ) : null}
-                      </div>
-                      <div className="mt-2 flex items-center justify-between gap-3 text-xs text-slate-400">
-                        <span>{session.messageCount} 条消息</span>
-                        <div className="flex items-center gap-3">
-                          <span>{formatRelativeTime(session.timestamp)}</span>
-                        </div>
-                      </div>
-                    </button>
-                    <div className="mt-2 flex justify-end">
-                      <button
-                        type="button"
-                        onClick={(event) => {
-                          event.stopPropagation();
-                          onDeleteRequest(session);
-                        }}
-                        disabled={deletingSessionId === session.id}
-                        className="rounded-full px-2 py-1 text-slate-400 transition-colors hover:bg-rose-50 hover:text-rose-600 disabled:cursor-not-allowed disabled:opacity-50"
-                        title={session.hasBusinessRecord ? '从历史中移除，可在我的申请中恢复' : '永久删除'}
-                      >
-                        <i className="fas fa-trash text-[11px]"></i>
-                      </button>
-                    </div>
-                  </div>
-                );
-              })
-            )}
+          <div className="p-3">
+            <ChatHistoryList
+              currentSessionId={currentSessionId}
+              deletingSessionId={deletingSessionId}
+              sessions={sessions}
+              onDeleteRequest={onDeleteRequest}
+              onSelectSession={onSelectSession}
+              onAction={onAction}
+            />
           </div>
         ) : (
           <div className="p-4">
@@ -345,6 +377,7 @@ export default function ChatPage() {
   const searchParams = useSearchParams();
   const flowCode = searchParams.get('flow');
   const requestedSessionId = searchParams.get('sessionId');
+  const resumePromptRequested = searchParams.get('resumePrompt') === '1';
 
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [input, setInput] = useState('');
@@ -356,6 +389,7 @@ export default function ChatPage() {
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [pendingFiles, setPendingFiles] = useState<ChatAttachment[]>([]);
   const [uploading, setUploading] = useState(false);
+  const [formUpdating, setFormUpdating] = useState(false);
   const [uploadError, setUploadError] = useState('');
   const [uploadTargetFieldKey, setUploadTargetFieldKey] = useState<string | null>(null);
   const [authorizingMessageId, setAuthorizingMessageId] = useState<string | null>(null);
@@ -364,10 +398,21 @@ export default function ChatPage() {
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const shouldAutoScrollRef = useRef(true);
   const fileInputRef = useRef<HTMLInputElement>(null);
+  const composerTextareaRef = useRef<HTMLTextAreaElement>(null);
   const flowBootstrappedRef = useRef<string | null>(null);
+  const requestedSessionLoadRef = useRef<string | null>(null);
   const [showScrollToBottom, setShowScrollToBottom] = useState(false);
+  const [showResumeChoicePrompt, setShowResumeChoicePrompt] = useState(false);
   const [deletingSessionId, setDeletingSessionId] = useState<string | null>(null);
   const [deleteConfirmSession, setDeleteConfirmSession] = useState<ChatSession | null>(null);
+  const currentSession = sessions.find((item) => item.id === sessionId) || null;
+  const currentTitle = sessionState?.processName
+    || currentSession?.processName
+    || currentSession?.title
+    || (messages.length > 0 ? '当前对话' : '新对话');
+  const currentSubtitle = sessionState?.activeProcessCard?.statusText
+    || currentSession?.processStatusText
+    || (messages.length > 0 ? '继续当前办理进度' : '开始新的办事对话');
 
   const isNearBottom = useCallback(() => {
     const container = messagesContainerRef.current;
@@ -398,6 +443,14 @@ export default function ChatPage() {
     setShowScrollToBottom(!nearBottom);
   }, [isNearBottom]);
 
+  const handleComposerFocus = useCallback(() => {
+    window.setTimeout(() => {
+      shouldAutoScrollRef.current = true;
+      setShowScrollToBottom(false);
+      scrollToBottom('smooth');
+    }, 120);
+  }, [scrollToBottom]);
+
   useEffect(() => {
     if (showHistory) {
       return;
@@ -415,6 +468,18 @@ export default function ChatPage() {
       window.cancelAnimationFrame(frameId);
     };
   }, [loading, messages, scrollToBottom, showHistory]);
+
+  useEffect(() => {
+    const textarea = composerTextareaRef.current;
+    if (!textarea) {
+      return;
+    }
+
+    textarea.style.height = '0px';
+    const nextHeight = Math.min(Math.max(textarea.scrollHeight, 24), 160);
+    textarea.style.height = `${nextHeight}px`;
+    textarea.style.overflowY = textarea.scrollHeight > 160 ? 'auto' : 'hidden';
+  }, [input]);
 
   const ensureSession = useCallback(() => {
     if (hasClientSession()) {
@@ -451,7 +516,7 @@ export default function ChatPage() {
         setShowScrollToBottom(false);
       }
       setMessages(Array.isArray(data.messages) ? data.messages : []);
-      setSessionId(id);
+      setSessionId(data.session?.id || id);
       setSessionState(data.session?.sessionState || null);
       if (!isPassiveRefresh) {
         setSidebarOpen(false);
@@ -459,10 +524,38 @@ export default function ChatPage() {
         setUploadError('');
         setAuthorizingMessageId(null);
       }
+      return true;
     } catch (error) {
       console.error('Failed to load session:', error);
+      return false;
     }
   }, []);
+
+  const handleInlineFieldEdit = useCallback(async (field: OaFormField, nextValue: string) => {
+    if (!sessionId) {
+      throw new Error('当前没有可更新的会话');
+    }
+
+    setFormUpdating(true);
+    setUploadError('');
+    try {
+      const response = await apiClient.post(`/assistant/sessions/${sessionId}/form`, {
+        fieldKey: field.key,
+        value: nextValue,
+      });
+      const data = response.data || {};
+      setMessages(Array.isArray(data.messages) ? data.messages : []);
+      setSessionId(data.session?.id || sessionId);
+      setSessionState(data.session?.sessionState || null);
+      void loadSessions();
+    } catch (error: any) {
+      const message = error.response?.data?.message || error.message || '字段修改失败';
+      setUploadError(typeof message === 'string' ? message : JSON.stringify(message));
+      throw error;
+    } finally {
+      setFormUpdating(false);
+    }
+  }, [loadSessions, sessionId]);
 
   const sendMessage = useCallback(async (
     text?: string,
@@ -567,15 +660,42 @@ export default function ChatPage() {
   }, [authReady, loadSessions]);
 
   useEffect(() => {
-    if (!authReady || !requestedSessionId) {
-      return;
-    }
-    if (sessionId === requestedSessionId) {
+    if (!requestedSessionId) {
+      requestedSessionLoadRef.current = null;
       return;
     }
 
-    void loadSession(requestedSessionId, { source: 'manual' });
-  }, [authReady, loadSession, requestedSessionId, sessionId]);
+    if (!authReady) {
+      return;
+    }
+    if (requestedSessionLoadRef.current === requestedSessionId) {
+      return;
+    }
+
+    let cancelled = false;
+
+    void (async () => {
+      const loaded = await loadSession(requestedSessionId, { source: 'manual' });
+      if (!cancelled && loaded) {
+        requestedSessionLoadRef.current = requestedSessionId;
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [authReady, loadSession, requestedSessionId]);
+
+  useEffect(() => {
+    const shouldShowPrompt = Boolean(
+      authReady
+      && resumePromptRequested
+      && requestedSessionId
+      && sessionId === requestedSessionId
+      && messages.length > 0,
+    );
+    setShowResumeChoicePrompt(shouldShowPrompt);
+  }, [authReady, messages.length, requestedSessionId, resumePromptRequested, sessionId]);
 
   useEffect(() => {
     if (!authReady) {
@@ -631,10 +751,11 @@ export default function ChatPage() {
     setSessionId(null);
     setSessionState(null);
     setPendingFiles([]);
-    setUploadError('');
-    setUploadTargetFieldKey(null);
-    setAuthorizingMessageId(null);
-    setDeleteConfirmSession(null);
+      setUploadError('');
+      setUploadTargetFieldKey(null);
+      setAuthorizingMessageId(null);
+      setFormUpdating(false);
+      setDeleteConfirmSession(null);
     if (!options?.keepHistoryView) {
       setShowHistory(false);
     }
@@ -848,7 +969,19 @@ export default function ChatPage() {
     void sendMessage(getActionMarker(action), { displayText: actionLabel });
   };
 
-  const handleResetSession = async () => {
+  const dismissResumeChoicePrompt = useCallback(() => {
+    setShowResumeChoicePrompt(false);
+    if (!resumePromptRequested) {
+      return;
+    }
+
+    const nextParams = new URLSearchParams(searchParams.toString());
+    nextParams.delete('resumePrompt');
+    const nextQuery = nextParams.toString();
+    router.replace(nextQuery ? `/chat?${nextQuery}` : '/chat', { scroll: false });
+  }, [resumePromptRequested, router, searchParams]);
+
+  const handleResetSession = useCallback(async () => {
     if (!sessionId) {
       return;
     }
@@ -859,7 +992,16 @@ export default function ChatPage() {
     } catch (error) {
       console.error('Failed to reset session:', error);
     }
-  };
+  }, [loadSession, sessionId]);
+
+  const handleResumePromptContinue = useCallback(() => {
+    dismissResumeChoicePrompt();
+  }, [dismissResumeChoicePrompt]);
+
+  const handleResumePromptReset = useCallback(async () => {
+    dismissResumeChoicePrompt();
+    await handleResetSession();
+  }, [dismissResumeChoicePrompt, handleResetSession]);
 
   const handleRequestDeleteSession = useCallback((targetSession: ChatSession) => {
     setDeleteConfirmSession(targetSession);
@@ -899,65 +1041,99 @@ export default function ChatPage() {
   }
 
   return (
-    <div className="flex h-full min-h-0 bg-[linear-gradient(180deg,#f7fbff_0%,#f5f7fb_100%)]">
+    <div className="flex h-full min-h-0 overflow-hidden bg-[linear-gradient(180deg,#f7fbff_0%,#f5f7fb_100%)]">
       {sidebarOpen ? (
         <div
-          className="fixed inset-0 z-40 bg-slate-950/35 lg:hidden"
+          className="fixed inset-0 z-40 bg-slate-950/35 backdrop-blur-[2px] lg:hidden"
           onClick={() => setSidebarOpen(false)}
         />
       ) : null}
 
       <aside
-        className={`fixed inset-y-0 left-0 z-50 flex w-80 flex-col border-r border-slate-200 bg-white transition-transform duration-300 lg:static lg:translate-x-0 ${
+        className={`fixed inset-y-0 left-0 z-50 flex min-h-0 w-[82vw] max-w-[22rem] flex-col overflow-hidden border-r border-slate-200 bg-white shadow-2xl transition-transform duration-300 lg:static lg:w-80 lg:max-w-none lg:rounded-none lg:shadow-none lg:translate-x-0 ${
           sidebarOpen ? 'translate-x-0' : '-translate-x-full'
         }`}
+        style={{ borderTopRightRadius: '1.75rem', borderBottomRightRadius: '1.75rem' }}
       >
         <div className="flex items-center justify-between border-b border-slate-200 px-4 py-4 lg:hidden">
-          <div className="text-base font-semibold text-slate-900">工作台菜单</div>
+          <div className="text-base font-semibold text-slate-900">历史对话</div>
           <button
             onClick={() => setSidebarOpen(false)}
-            className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-500 transition-colors hover:bg-slate-100"
+            className="flex h-9 w-9 items-center justify-center rounded-xl text-slate-500 transition active:scale-95 hover:bg-slate-100"
           >
             <i className="fas fa-times"></i>
           </button>
         </div>
-        <ChatSidebar
-          currentSessionId={sessionId}
-          deletingSessionId={deletingSessionId}
-          sessions={sessions}
-          showHistory={showHistory}
-          onCreateNewChat={createNewChat}
-          onDeleteRequest={handleRequestDeleteSession}
-          onQuickAction={(message) => {
-            void sendMessage(message);
-          }}
-          onSelectSession={(nextSessionId) => {
-            void loadSession(nextSessionId, { source: 'manual' });
-          }}
-          onShowHistoryChange={setShowHistory}
-          onAction={() => setSidebarOpen(false)}
-        />
+        <div className="chat-scroll-region flex-1 overflow-y-auto overscroll-contain p-3 lg:hidden">
+          <ChatHistoryList
+            currentSessionId={sessionId}
+            deletingSessionId={deletingSessionId}
+            sessions={sessions}
+            onDeleteRequest={handleRequestDeleteSession}
+            onSelectSession={(nextSessionId) => {
+              void loadSession(nextSessionId, { source: 'manual' });
+            }}
+            onAction={() => setSidebarOpen(false)}
+          />
+        </div>
+        <div className="hidden lg:flex lg:min-h-0 lg:flex-1 lg:flex-col lg:overflow-hidden">
+          <ChatSidebar
+            currentSessionId={sessionId}
+            deletingSessionId={deletingSessionId}
+            sessions={sessions}
+            showHistory={showHistory}
+            onCreateNewChat={createNewChat}
+            onDeleteRequest={handleRequestDeleteSession}
+            onQuickAction={(message) => {
+              void sendMessage(message);
+            }}
+            onSelectSession={(nextSessionId) => {
+              void loadSession(nextSessionId, { source: 'manual' });
+            }}
+            onShowHistoryChange={setShowHistory}
+            onAction={() => setSidebarOpen(false)}
+          />
+        </div>
       </aside>
 
-      <main className="flex min-h-0 min-w-0 flex-1 flex-col">
-        <div className="px-4 pt-4 lg:hidden">
-          <div className="mx-auto flex max-w-5xl">
+      <main className="flex min-h-0 min-w-0 flex-1 flex-col overflow-hidden">
+        <div className="border-b border-slate-200 bg-white/95 px-4 py-3 backdrop-blur lg:hidden">
+          <div className="mx-auto flex max-w-5xl items-center justify-between gap-3">
             <button
               onClick={() => setSidebarOpen(true)}
-              className="inline-flex h-10 items-center gap-2 rounded-xl border border-slate-200 bg-white px-3 text-sm text-slate-600 shadow-sm transition-colors hover:border-sky-200 hover:bg-sky-50 hover:text-sky-700"
+              className="inline-flex h-10 items-center gap-2 rounded-2xl border border-slate-200 bg-white px-3 text-sm text-slate-600 shadow-sm transition active:scale-[0.98] hover:border-sky-200 hover:bg-sky-50 hover:text-sky-700"
             >
               <i className="fas fa-bars text-xs"></i>
-              菜单
+              历史
+            </button>
+
+            <div className="min-w-0 flex-1 text-center">
+              <div className="truncate text-sm font-semibold text-slate-900">{currentTitle}</div>
+              <div className="mt-1 truncate text-[11px] text-slate-500">
+                {currentSubtitle}
+                {sessionState?.processCategory ? ` · ${sessionState.processCategory}` : ''}
+              </div>
+            </div>
+
+            <button
+              onClick={createNewChat}
+              className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-2xl border border-slate-200 bg-white text-slate-600 shadow-sm transition active:scale-[0.98] hover:border-sky-200 hover:bg-sky-50 hover:text-sky-700"
+              title="新建对话"
+            >
+              <i className="fas fa-plus text-xs"></i>
             </button>
           </div>
         </div>
 
-        {sessionState?.hasActiveProcess && sessionState.activeProcessCard ? (
+        {showResumeChoicePrompt && sessionState?.activeProcessCard ? (
           <div className="border-b border-sky-200 bg-sky-50/90 px-4 py-3">
             <div className="mx-auto flex max-w-5xl items-center justify-between gap-3">
               <div className="min-w-0">
                 <div className="text-sm font-semibold text-sky-900">
-                  正在继续办理：{sessionState.processName}
+                  检测到您是从“我的申请”回到本次对话
+                </div>
+                <div className="mt-1 text-xs text-sky-700">
+                  是否继续沿用这条对话的上下文办理「{sessionState.processName}」
                 </div>
                 <div className="mt-1 text-xs text-sky-700">
                   当前状态：{sessionState.activeProcessCard.statusText}
@@ -970,11 +1146,14 @@ export default function ChatPage() {
                 ) : null}
               </div>
               <div className="flex items-center gap-2">
-                <span className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-sky-700 shadow-sm">
-                  继续办理
-                </span>
                 <button
-                  onClick={() => void handleResetSession()}
+                  onClick={handleResumePromptContinue}
+                  className="rounded-full bg-white px-3 py-1 text-xs font-semibold text-sky-700 shadow-sm transition-colors hover:bg-sky-100"
+                >
+                  继续办理
+                </button>
+                <button
+                  onClick={() => void handleResumePromptReset()}
                   className="rounded-full border border-sky-200 bg-white px-3 py-1 text-xs font-medium text-sky-700 transition-colors hover:bg-sky-100"
                 >
                   重置上下文
@@ -984,24 +1163,28 @@ export default function ChatPage() {
           </div>
         ) : null}
 
-        <div className="relative flex-1 min-h-0">
+        <div className="chat-scroll-root relative flex-1 min-h-0 overflow-hidden">
           <div
             ref={messagesContainerRef}
             onScroll={syncScrollState}
-            className="h-full min-h-0 overflow-y-auto"
+            className="chat-scroll-region h-full min-h-0 overflow-y-auto overscroll-contain"
           >
             <div className="mx-auto flex min-h-full max-w-5xl flex-col px-4 py-6">
             {messages.length === 0 ? (
-              <div className="flex flex-1 flex-col items-center justify-center text-center">
-                <div className="mb-4 flex h-16 w-16 items-center justify-center rounded-[1.75rem] bg-sky-100 text-sky-700">
+              <div className="flex flex-1 flex-col items-center justify-center px-1 text-center">
+                <div className="mb-3 flex h-14 w-14 items-center justify-center rounded-[1.5rem] bg-sky-100 text-sky-700 md:mb-4 md:h-16 md:w-16 md:rounded-[1.75rem]">
                   <i className="fas fa-file-signature text-2xl"></i>
                 </div>
-                <h2 className="text-2xl font-semibold text-slate-900">开始一段新的 OA 办理对话</h2>
-                <p className="mt-3 max-w-xl text-sm leading-7 text-slate-500">
+                <h2 className="text-xl font-semibold text-slate-900 md:text-2xl">开始一段新的 OA 办理对话</h2>
+                <p className="mt-2 max-w-xl text-sm leading-7 text-slate-500 md:mt-3">
                   直接告诉我您想办理什么，我会按正式单据的方式为您补全信息、确认表单并提交。
                 </p>
 
-                <div className="mt-8 grid w-full max-w-2xl grid-cols-1 gap-3 sm:grid-cols-2">
+                <div className="mt-4 rounded-full bg-slate-100 px-4 py-2 text-xs text-slate-400 md:hidden">
+                  在下方输入框直接描述您的需求
+                </div>
+
+                <div className="mt-8 hidden w-full max-w-2xl grid-cols-1 gap-3 sm:grid-cols-2 md:grid">
                   {QUICK_ACTIONS.map((action) => (
                     <button
                       key={action.label}
@@ -1094,7 +1277,8 @@ export default function ChatPage() {
                               actionButtons={message.actionButtons}
                               onAction={(action) => handleActionButton(message.id, action)}
                               onUploadField={(fieldKey) => openFilePicker(fieldKey)}
-                              disabled={loading || authorizingMessageId === message.id}
+                              onEditField={handleInlineFieldEdit}
+                              disabled={loading || formUpdating || authorizingMessageId === message.id}
                             />
                           </div>
                         ) : null}
@@ -1109,7 +1293,7 @@ export default function ChatPage() {
                                     <button
                                       key={field.key}
                                       onClick={() => openFilePicker(field.key)}
-                                      disabled={loading || uploading}
+                                      disabled={loading || uploading || formUpdating}
                                       className="rounded-2xl border border-sky-200 bg-sky-50 px-4 py-2.5 text-sm font-medium text-sky-700 transition-colors hover:bg-sky-100 disabled:opacity-50"
                                     >
                                       <i className={`fas ${uploading ? 'fa-spinner fa-spin' : 'fa-cloud-upload-alt'} mr-2`}></i>
@@ -1120,7 +1304,7 @@ export default function ChatPage() {
                             ) : (
                               <button
                                 onClick={() => openFilePicker()}
-                                disabled={loading || uploading}
+                                disabled={loading || uploading || formUpdating}
                                 className="rounded-2xl border border-sky-200 bg-sky-50 px-4 py-2.5 text-sm font-medium text-sky-700 transition-colors hover:bg-sky-100 disabled:opacity-50"
                               >
                                 <i className={`fas ${uploading ? 'fa-spinner fa-spin' : 'fa-cloud-upload-alt'} mr-2`}></i>
@@ -1162,14 +1346,14 @@ export default function ChatPage() {
                 setShowScrollToBottom(false);
                 scrollToBottom('smooth');
               }}
-              className="absolute bottom-5 right-5 rounded-full border border-sky-200 bg-white px-4 py-2 text-xs font-medium text-sky-700 shadow-sm transition-colors hover:bg-sky-50"
+              className="absolute bottom-[calc(var(--mobile-bottom-nav-total-height)+1.05rem)] right-4 rounded-full border border-sky-200 bg-white px-4 py-2 text-xs font-medium text-sky-700 shadow-sm transition-colors hover:bg-sky-50 md:bottom-5 md:right-5"
             >
               回到底部
             </button>
           ) : null}
         </div>
 
-        <div className="border-t border-slate-200 bg-white/95 px-4 py-4 backdrop-blur" style={{ paddingBottom: 'env(safe-area-inset-bottom, 0px)' }}>
+        <div className="bg-transparent px-4 pb-[var(--mobile-bottom-nav-total-height)] pt-2 md:border-t md:border-slate-200 md:bg-white/95 md:px-4 md:pb-4 md:pt-4 md:backdrop-blur">
           <div className="mx-auto max-w-5xl">
             <input
               ref={fileInputRef}
@@ -1181,20 +1365,20 @@ export default function ChatPage() {
             />
 
             {uploadError ? (
-              <div className="mb-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700">
+              <div className="mb-3 rounded-2xl border border-rose-200 bg-rose-50 px-4 py-3 text-sm text-rose-700 md:rounded-2xl">
                 {uploadError}
               </div>
             ) : null}
 
             {pendingFiles.length > 0 ? (
-              <div className="mb-3 flex flex-wrap gap-2">
+              <div className="mb-2 flex gap-2 overflow-x-auto pb-1 md:mb-3 md:flex-wrap md:overflow-visible md:pb-0">
                 {pendingFiles.map((file) => (
                   <div
                     key={file.fileId}
-                    className="flex items-center gap-2 rounded-full border border-sky-200 bg-sky-50 px-3 py-1.5 text-xs text-sky-700"
+                    className="flex flex-shrink-0 items-center gap-2 rounded-full border border-sky-200 bg-sky-50/95 px-3 py-1.5 text-xs text-sky-700"
                   >
                     <i className="fas fa-paperclip text-[10px]"></i>
-                    <span className="max-w-[180px] truncate">{file.fileName}</span>
+                    <span className="max-w-[140px] truncate md:max-w-[180px]">{file.fileName}</span>
                     <span className="rounded-full bg-white/80 px-2 py-0.5 text-[10px] text-sky-700">
                       {resolveFieldLabel(file.fieldKey)}
                     </span>
@@ -1209,41 +1393,46 @@ export default function ChatPage() {
               </div>
             ) : null}
 
-            <div className="flex items-end gap-3">
+            <div className="rounded-[1.6rem] border border-slate-200 bg-white p-2 shadow-[0_2px_10px_rgba(15,23,42,0.04)] md:rounded-[1.75rem] md:border-0 md:bg-transparent md:p-0 md:shadow-none md:backdrop-blur-0">
+              <div className="flex items-end gap-2 md:gap-3">
               <button
                 onClick={() => openFilePicker()}
-                disabled={loading || uploading}
-                className="flex h-12 w-12 items-center justify-center rounded-2xl border border-slate-200 text-slate-500 transition-colors hover:border-sky-200 hover:bg-sky-50 hover:text-sky-700 disabled:opacity-50"
+                disabled={loading || uploading || formUpdating}
+                className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-2xl border border-slate-200 bg-white text-slate-500 transition active:scale-[0.98] hover:border-sky-200 hover:bg-sky-50 hover:text-sky-700 disabled:opacity-50 md:h-12 md:w-12"
                 title="上传附件"
               >
                 <i className={`fas ${uploading ? 'fa-spinner fa-spin' : 'fa-paperclip'}`}></i>
               </button>
 
-              <div className="flex-1 rounded-[1.75rem] border border-slate-200 bg-slate-50 px-4 py-3 shadow-inner">
+              <div className="flex-1 rounded-[1.5rem] bg-slate-50 px-3 py-2.5 ring-1 ring-inset ring-slate-200 shadow-inner md:rounded-[1.75rem] md:border md:border-slate-200 md:bg-slate-50 md:px-4 md:py-3 md:ring-0">
                 <textarea
+                  ref={composerTextareaRef}
                   rows={1}
-                  className="max-h-40 min-h-[24px] w-full resize-none border-0 bg-transparent text-sm leading-6 text-slate-900 outline-none placeholder:text-slate-400"
+                  className="max-h-32 min-h-[22px] w-full resize-none border-0 bg-transparent text-sm leading-6 text-slate-900 outline-none placeholder:text-slate-400 md:max-h-40 md:min-h-[24px]"
                   placeholder="请输入您的办理需求，或继续补充当前单据信息..."
                   value={input}
                   onChange={(event) => setInput(event.target.value)}
+                  onFocus={handleComposerFocus}
                   onKeyDown={(event) => {
                     if (event.key === 'Enter' && !event.shiftKey) {
                       event.preventDefault();
                       void sendMessage();
                     }
                   }}
-                  disabled={loading}
+                  disabled={loading || formUpdating}
                 />
               </div>
 
               <button
                 onClick={() => void sendMessage()}
-                disabled={loading || (!input.trim() && pendingFiles.length === 0)}
-                className="rounded-2xl bg-sky-600 px-5 py-3 text-sm font-medium text-white transition-colors hover:bg-sky-700 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={loading || formUpdating || (!input.trim() && pendingFiles.length === 0)}
+                title="发送"
+                className="flex h-10 w-10 flex-shrink-0 items-center justify-center rounded-2xl bg-sky-500 text-sm font-medium text-white shadow-sm transition active:scale-[0.98] hover:bg-sky-600 disabled:cursor-not-allowed disabled:opacity-50 md:h-auto md:w-auto md:bg-sky-600 md:px-5 md:py-3 md:hover:bg-sky-700"
               >
-                <i className="fas fa-paper-plane mr-2 text-xs"></i>
-                发送
+                <i className="fas fa-paper-plane text-xs md:mr-2"></i>
+                <span className="hidden md:inline">发送</span>
               </button>
+            </div>
             </div>
           </div>
         </div>

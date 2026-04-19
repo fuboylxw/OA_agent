@@ -36,6 +36,13 @@ type UrlProcessTemplateConfig = {
   runtime?: Record<string, any>;
 };
 
+function resolveScriptDir() {
+  if (typeof __dirname === 'string' && __dirname.trim()) {
+    return __dirname;
+  }
+  return process.cwd();
+}
+
 function parseArgs(argv: string[]): Args {
   const args: Args = {
     dryRun: false,
@@ -150,9 +157,10 @@ function computeSourceHash(config: UrlProcessTemplateConfig) {
 }
 
 function resolveConfigPath(configPath: string) {
+  const scriptDir = resolveScriptDir();
   const candidates = [
     path.resolve(process.cwd(), configPath),
-    path.resolve(__dirname, configPath),
+    path.resolve(scriptDir, configPath),
   ];
 
   for (const candidate of candidates) {
@@ -185,6 +193,11 @@ function mergeUiHints(existingUiHints: unknown, config: UrlProcessTemplateConfig
   const existingPlatform = asRecord(existingRpaDefinition.platform);
   const existingRuntime = asRecord(existingRpaDefinition.runtime);
   const requestedExecutionModes = asRecord(config.executionModes);
+  const schemaFields = Array.isArray(config.schema?.fields)
+    ? config.schema.fields
+    : Array.isArray(existingRpaDefinition.fields)
+      ? existingRpaDefinition.fields
+      : [];
 
   const submitModes = uniqueModes(
     ['url'],
@@ -207,6 +220,7 @@ function mergeUiHints(existingUiHints: unknown, config: UrlProcessTemplateConfig
       ...existingRpaDefinition,
       processCode: config.processCode,
       processName: config.processName,
+      fields: schemaFields,
       platform: {
         ...existingPlatform,
         ...asRecord(config.platform),
@@ -216,6 +230,7 @@ function mergeUiHints(existingUiHints: unknown, config: UrlProcessTemplateConfig
         ...asRecord(config.runtime),
       },
     },
+    endpoints: [],
   };
 }
 

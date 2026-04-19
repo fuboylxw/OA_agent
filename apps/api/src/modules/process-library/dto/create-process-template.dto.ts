@@ -1,5 +1,5 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsEnum, IsNotEmpty, IsOptional, IsString, IsUUID } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsEnum, IsIn, IsNotEmpty, IsOptional, IsString, IsUUID } from 'class-validator';
 
 export class CreateProcessTemplateDto {
   @ApiProperty({ description: '所属连接器 ID' })
@@ -36,8 +36,36 @@ export class CreateProcessTemplateDto {
   @IsEnum(['F0', 'F1', 'F2', 'F3', 'F4'])
   falLevel?: string;
 
+
+  @ApiPropertyOptional({
+    description: '流程录入方式',
+    enum: ['rpa', 'url', 'api'],
+    default: 'url',
+  })
+  @IsOptional()
+  @IsIn(['rpa', 'url', 'api'])
+  accessMode?: 'rpa' | 'url' | 'api';
+
+  @ApiPropertyOptional({
+    description: '管理员在流程库中录入当前流程时采用的方式',
+    enum: ['manual', 'file'],
+    default: 'manual',
+  })
+  @IsOptional()
+  @IsIn(['manual', 'file'])
+  inputMethod?: 'manual' | 'file';
+
+  @ApiPropertyOptional({
+    description: '当前录入内容是简易文字模板还是高级 JSON',
+    enum: ['text', 'json'],
+    default: 'text',
+  })
+  @IsOptional()
+  @IsIn(['text', 'json'])
+  authoringMode?: 'text' | 'json';
+
   @ApiProperty({
-    description: '单个流程定义，支持现有页面/链接流程 JSON 格式',
+    description: '单个流程定义，支持流程库简易文字模板或高级 JSON',
     example: JSON.stringify({
       flows: [{
         processCode: 'leave_request',

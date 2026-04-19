@@ -39,6 +39,7 @@ describe('AssistantService', () => {
   beforeEach(() => {
     prisma = {
       chatSession: {
+        findFirst: jest.fn(),
         update: jest.fn().mockResolvedValue(undefined),
       },
       processTemplate: {
@@ -46,6 +47,7 @@ describe('AssistantService', () => {
       },
       processDraft: {
         create: jest.fn(),
+        update: jest.fn().mockResolvedValue(undefined),
       },
       connector: {
         findFirst: jest.fn(),
@@ -64,7 +66,11 @@ describe('AssistantService', () => {
     };
     formAgent = {
       extractFields: jest.fn(),
-      extractModifications: jest.fn(),
+      extractModifications: jest.fn().mockResolvedValue({
+        modifiedFields: {},
+        fieldOrigins: {},
+      }),
+      normalizeDirectFieldValue: jest.fn(),
     };
     connectorRouter = {
       route: jest.fn(),
@@ -513,6 +519,211 @@ describe('AssistantService', () => {
       }),
     }));
     expect(response.processStatus).toBe(ChatProcessStatus.PARAMETER_COLLECTION);
+  });
+
+  it('treats conflicting user input during parameter collection as direct field modification before continuing to ask missing fields', async () => {
+    const session = {
+      id: 'session-modify-1',
+      metadata: {
+        currentConnectorId: 'connector-leave',
+        currentFieldOrigins: {
+          field_1: 'user',
+        },
+      },
+    };
+    const processContext = {
+      processId: 'process-1',
+      processType: 'submission',
+      processCode: 'leave_request',
+      status: ChatProcessStatus.PARAMETER_COLLECTION,
+      parameters: {
+        field_1: '2026-04-16',
+      },
+      collectedParams: new Set<string>(['field_1']),
+      validationErrors: [],
+      createdAt: new Date('2026-04-16T10:00:00.000Z'),
+      updatedAt: new Date('2026-04-16T10:00:00.000Z'),
+    };
+    const template = {
+      id: 'template-leave-1',
+      tenantId: 'tenant-1',
+      connectorId: 'connector-leave',
+      processCode: 'leave_request',
+      processName: '请假申请',
+      processCategory: '人事',
+      status: 'published',
+      version: 1,
+      schema: {
+        fields: [
+          { key: 'field_1', label: '开始日期', type: 'date', required: true },
+          { key: 'field_2', label: '请假原因', type: 'textarea', required: true },
+        ],
+      },
+      connector: {
+        id: 'connector-leave',
+        name: '网信处',
+        authConfig: {},
+      },
+    };
+
+    jest.spyOn(service as any, 'findTemplateForResolvedFlow').mockResolvedValue(template);
+    formAgent.extractModifications.mockResolvedValue({
+      modifiedFields: {
+        field_1: '2026-04-18',
+      },
+      fieldOrigins: {
+        field_1: 'user',
+      },
+    });
+    formAgent.extractFields.mockResolvedValue({
+      extractedFields: {},
+      fieldOrigins: {},
+      missingFields: [
+        {
+          key: 'field_2',
+          label: '请假原因',
+          question: '请告诉我请假原因。',
+          type: 'textarea',
+        },
+      ],
+      isComplete: false,
+    });
+
+    const response = await (service as any).continueParameterCollection(
+      {
+        tenantId: 'tenant-1',
+        userId: 'user-1',
+        message: '开始日期改成4月18日',
+        identityType: 'teacher',
+        roles: ['user'],
+      },
+      session,
+      processContext,
+      sharedContext,
+      'trace-1',
+    );
+
+    expect(formAgent.extractModifications).toHaveBeenCalledWith(
+      'leave_request',
+      template.schema,
+      '开始日期改成4月18日',
+      processContext.parameters,
+    );
+    expect(formAgent.extractFields).toHaveBeenCalledWith(
+      'leave_request',
+      template.schema,
+      '开始日期改成4月18日',
+      {
+        field_1: '2026-04-18',
+      },
+    );
+    expect(response.processStatus).toBe(ChatProcessStatus.PARAMETER_COLLECTION);
+    expect(response.message).toContain('已按您的意思更新已填写内容');
+    expect(response.formData).toEqual({
+      field_1: '2026-04-18',
+    });
+    expect(prisma.chatSession.update).toHaveBeenCalledWith({
+      where: { id: 'session-modify-1' },
+      data: {
+        metadata: expect.objectContaining({
+          currentFormData: {
+            field_1: '2026-04-18',
+          },
+          currentFieldOrigins: {
+            field_1: 'user',
+          },
+        }),
+      },
+    });
+  });
+
+  it('updates the pending confirmation form field in place for inline confirm-card editing', async () => {
+    prisma.chatSession.findFirst.mockResolvedValue({
+      id: 'session-confirm-1',
+      tenantId: 'tenant-1',
+      userId: 'user-1',
+      metadata: {
+        currentProcessCode: 'leave_request',
+        currentProcessName: '请假申请',
+        currentConnectorId: 'connector-leave',
+        currentFieldOrigins: {
+          field_1: 'user',
+        },
+        currentFormData: {
+          field_1: '2026-04-16',
+          field_2: '事假',
+        },
+        pendingDraftId: 'draft-1',
+        processStatus: ChatProcessStatus.PENDING_CONFIRMATION,
+      },
+    });
+    jest.spyOn(service as any, 'findTemplateForResolvedFlow').mockResolvedValue({
+      id: 'template-leave-1',
+      processCode: 'leave_request',
+      processName: '请假申请',
+      schema: {
+        fields: [
+          { key: 'field_1', label: '开始日期', type: 'date', required: true },
+          { key: 'field_2', label: '请假类型', type: 'select', required: true, options: ['事假', '病假'] },
+        ],
+      },
+    });
+    formAgent.normalizeDirectFieldValue.mockReturnValue('2026-04-18');
+    jest.spyOn(service, 'getMessages').mockResolvedValue({
+      session: {
+        id: 'session-confirm-1',
+        status: 'active',
+        updatedAt: new Date().toISOString(),
+        sessionState: null,
+      },
+      messages: [],
+    } as any);
+
+    const response = await service.updatePendingFormField({
+      sessionId: 'session-confirm-1',
+      tenantId: 'tenant-1',
+      userId: 'user-1',
+      fieldKey: 'field_1',
+      value: '4月18日',
+      identityType: 'teacher',
+      roles: ['user'],
+    });
+
+    expect(formAgent.normalizeDirectFieldValue).toHaveBeenCalledWith(
+      'leave_request',
+      expect.any(Object),
+      'field_1',
+      '4月18日',
+    );
+    expect(prisma.chatSession.update).toHaveBeenCalledWith({
+      where: { id: 'session-confirm-1' },
+      data: {
+        metadata: expect.objectContaining({
+          currentFormData: {
+            field_1: '2026-04-18',
+            field_2: '事假',
+          },
+          currentFieldOrigins: {
+            field_1: 'user',
+          },
+          processStatus: ChatProcessStatus.PENDING_CONFIRMATION,
+        }),
+      },
+    });
+    expect(prisma.processDraft.update).toHaveBeenCalledWith({
+      where: { id: 'draft-1' },
+      data: {
+        formData: {
+          field_1: '2026-04-18',
+          field_2: '事假',
+        },
+        status: 'ready',
+      },
+    });
+    expect(response).toEqual({
+      session: expect.objectContaining({ id: 'session-confirm-1' }),
+      messages: [],
+    });
   });
 
   it('waits for the settled submission status instead of returning the initial pending state', async () => {

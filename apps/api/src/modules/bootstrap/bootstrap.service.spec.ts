@@ -804,6 +804,11 @@ describe('BootstrapService', () => {
                 builtin: 'capture_form_submit',
                 options: expect.objectContaining({
                   trigger: expect.objectContaining({ text: '保存待发' }),
+                  fieldMappings: expect.arrayContaining([
+                    expect.objectContaining({
+                      fieldKey: expect.any(String),
+                    }),
+                  ]),
                 }),
               }),
             ]),
@@ -941,6 +946,106 @@ describe('BootstrapService', () => {
             field_2: '2026-04-02',
             field_3: '家中有事',
           },
+        },
+      }));
+    });
+
+    it('supports beginner-friendly template sections for choice, checkbox, and upload fields', async () => {
+      const mockJob = {
+        id: 'friendly-guide-job-id',
+        tenantId: 'default-tenant',
+        status: 'CREATED',
+      };
+
+      jest.spyOn(prisma.bootstrapJob, 'create').mockResolvedValue(mockJob as any);
+      jest.spyOn(prisma.bootstrapJob, 'findUnique').mockResolvedValue({
+        ...mockJob,
+        queueJobId: 'queue-job-id',
+      } as any);
+
+      await service.createJob({
+        tenantId: 'default-tenant',
+        accessMode: 'text_guide',
+        name: '用印申请',
+        oaUrl: 'https://portal.example.com',
+        identityScope: 'teacher',
+        rpaFlowContent: [
+          '# 系统基本信息',
+          '系统名称: 示例 OA',
+          '系统网址: https://portal.example.com',
+          '适用对象: 教师',
+          '登录说明: 统一认证登录',
+          '办理完成标志: 看到 保存待发成功 就结束',
+          '## 流程: 用印申请',
+          '描述: 用印流程示例',
+          '用户办理时需要补充的信息:',
+          '- 文件类型、名称及份数 | 必填 | 说明: 填写需要用印的文件类型、名称和份数 | 示例: 劳务合同 2份',
+          '- 用印类型 | 必填 | 说明: 选择本次需要办理的印章类型 | 示例: 党委公章、学校公章 | 可选值: 党委公章、学校公章、书记签名章 | 可多选',
+          '- 用印附件 | 必填 | 说明: 上传本次用印对应的附件材料 | 示例: 用印申请材料.pdf | 上传要求: 支持上传多份，未上传视为信息缺失 | 可多选',
+          '办理步骤:',
+          '- 点击 流程中心',
+          '- 点击 用印申请',
+          '- 输入 文件类型、名称及份数',
+          '- 勾选 用印类型',
+          '- 上传 用印附件',
+          '- 点击 保存待发',
+          '- 看到 保存待发成功 就结束',
+          '测试样例:',
+          '- 文件类型、名称及份数: 劳务合同 2份',
+          '- 用印类型: 党委公章、学校公章',
+          '- 用印附件: 用印申请材料.pdf',
+          '特殊说明:',
+          '- 同一个业务字段只写一次；如果是多选，把可选值写在同一行。',
+        ].join('\n'),
+      });
+
+      const createdSource = (prisma.bootstrapSource.create as jest.Mock).mock.calls.find(
+        ([call]) => call.data?.sourceType === 'manual_rpa',
+      )?.[0];
+      const generatedFlow = JSON.parse(createdSource.data.sourceContent);
+      const flow = generatedFlow.flows[0];
+      const sealTypeField = flow.fields.find((field: any) => field.label === '用印类型');
+      const attachmentField = flow.fields.find((field: any) => field.label === '用印附件');
+      const sealTypeStep = flow.actions.submit.steps.find((step: any) => step.fieldKey === sealTypeField?.key);
+
+      expect(flow.platform).toEqual(expect.objectContaining({
+        entryUrl: 'https://portal.example.com',
+        targetSystem: '示例 OA',
+      }));
+      expect(sealTypeField).toEqual(expect.objectContaining({
+        label: '用印类型',
+        type: 'select',
+        required: true,
+        multiple: true,
+        options: [
+          { label: '党委公章', value: '党委公章' },
+          { label: '学校公章', value: '学校公章' },
+          { label: '书记签名章', value: '书记签名章' },
+        ],
+      }));
+      expect(attachmentField).toEqual(expect.objectContaining({
+        label: '用印附件',
+        type: 'file',
+        required: true,
+        multiple: true,
+      }));
+      expect(attachmentField.description).toContain('上传要求：支持上传多份');
+      expect(sealTypeStep).toMatchObject({
+        type: 'select',
+        fieldKey: sealTypeField.key,
+      });
+      expect(sealTypeStep.value).toBeUndefined();
+      expect(flow.actions.submit.steps).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'upload', fieldKey: attachmentField.key }),
+        ]),
+      );
+      expect(flow.metadata).toEqual(expect.objectContaining({
+        textGuide: {
+          sampleData: expect.objectContaining({
+            [sealTypeField.key]: '党委公章、学校公章',
+            [attachmentField.key]: '用印申请材料.pdf',
+          }),
         },
       }));
     });

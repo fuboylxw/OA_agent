@@ -277,4 +277,41 @@ describe('FormAgent', () => {
     expect(result.missingFields[0].question).toContain('说明：请上传需要盖章的完整材料');
     expect(result.missingFields[0].question).toContain('示例：盖章申请表.pdf');
   });
+
+  it('normalizes multi-select values when the field is marked multiple even if the type is select', async () => {
+    const schema = {
+      fields: [
+        {
+          key: 'seal_types',
+          label: '用印类型',
+          type: 'select',
+          required: true,
+          multiple: true,
+          options: ['党委公章', '学校公章', '书记签名章'],
+        },
+      ],
+    };
+
+    (agent as any).llmClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: JSON.stringify({
+          modifiedFields: {
+            seal_types: '党委公章、学校公章',
+          },
+        }),
+      }),
+    };
+
+    const result = await agent.extractModifications(
+      'seal_apply',
+      schema,
+      '把用印类型改成党委公章、学校公章',
+      {
+        seal_types: ['党委公章'],
+      },
+    );
+
+    expect(result.modifiedFields.seal_types).toEqual(['党委公章', '学校公章']);
+    expect(agent.normalizeDirectFieldValue('seal_apply', schema, 'seal_types', '党委公章、学校公章')).toEqual(['党委公章', '学校公章']);
+  });
 });

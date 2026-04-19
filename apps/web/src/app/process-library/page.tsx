@@ -8,6 +8,17 @@ import { apiClient, authFetch } from '../lib/api-client';
 import { withBrowserApiBase } from '../lib/browser-api-base-url';
 import { getClientUserInfo, hasClientSession } from '../lib/client-auth';
 import { IDENTITY_SCOPE_META, normalizeIdentityScope } from '../lib/identity-scope';
+import {
+  PROCESS_ACCESS_MODE_META,
+  PROCESS_FILE_ACCEPT,
+  PROCESS_INPUT_MODE_META,
+  PROCESS_TEXT_TEMPLATE_PLACEHOLDERS,
+  resolveProcessAuthoringAccessMode,
+  resolveProcessAuthoringInputMode,
+  resolveProcessAuthoringTextTemplate,
+  type ProcessAuthoringAccessMode,
+  type ProcessAuthoringInputMode,
+} from './process-authoring';
 
 interface ProcessTemplate {
   id: string;
@@ -45,7 +56,10 @@ type CreateFormState = {
   processCategory: string;
   description: string;
   falLevel: string;
-  rpaFlowContent: string;
+  accessMode: ProcessAuthoringAccessMode;
+  inputMethod: ProcessAuthoringInputMode;
+  textTemplateContent: string;
+  uploadedFileName: string;
 };
 
 type ProcessEditorMode = 'create' | 'edit';
@@ -66,28 +80,10 @@ function createEmptyFormState(): CreateFormState {
     processCategory: '',
     description: '',
     falLevel: 'F2',
-    rpaFlowContent: JSON.stringify({
-      flows: [{
-        processCode: 'leave_request',
-        processName: '请假申请',
-        fields: [
-          { key: 'start_date', label: '开始日期', type: 'date', required: true },
-          { key: 'end_date', label: '结束日期', type: 'date', required: true },
-          { key: 'reason', label: '请假原因', type: 'textarea', required: true },
-        ],
-        actions: {
-          submit: {
-            steps: [
-              { type: 'goto', value: 'https://oa.example.com/leave' },
-              { type: 'input', fieldKey: 'start_date', target: { kind: 'text', value: '开始日期' } },
-              { type: 'input', fieldKey: 'end_date', target: { kind: 'text', value: '结束日期' } },
-              { type: 'input', fieldKey: 'reason', target: { kind: 'text', value: '请假原因' } },
-              { type: 'click', target: { kind: 'text', value: '提交' } },
-            ],
-          },
-        },
-      }],
-    }, null, 2),
+    accessMode: 'url',
+    inputMethod: 'manual',
+    textTemplateContent: '',
+    uploadedFileName: '',
   };
 }
 
@@ -107,7 +103,6 @@ function ProcessLibraryContent() {
   const [editorMode, setEditorMode] = useState<ProcessEditorMode>('create');
   const [editingProcessId, setEditingProcessId] = useState<string | null>(null);
   const [deletingProcessId, setDeletingProcessId] = useState<string | null>(null);
-  const [showAdvancedDefinition, setShowAdvancedDefinition] = useState(true);
 
   const canManage = (() => {
     const roles = getClientUserInfo().roles || [];
@@ -239,13 +234,20 @@ function ProcessLibraryContent() {
     };
   };
 
+  const activeFlowContent = createForm.textTemplateContent.trim();
+
   const handleFileUpload = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
     if (!file) return;
     const reader = new FileReader();
     reader.onload = (loadEvent) => {
       const content = String(loadEvent.target?.result || '');
-      setCreateForm((prev) => ({ ...prev, rpaFlowContent: content }));
+      setCreateForm((prev) => ({
+        ...prev,
+        inputMethod: 'file',
+        uploadedFileName: file.name || '',
+        textTemplateContent: content,
+      }));
     };
     reader.readAsText(file);
     event.target.value = '';
@@ -262,7 +264,10 @@ function ProcessLibraryContent() {
         processCategory: createForm.processCategory.trim() || undefined,
         description: createForm.description.trim() || undefined,
         falLevel: createForm.falLevel,
-        rpaFlowContent: createForm.rpaFlowContent,
+        accessMode: createForm.accessMode,
+        authoringMode: 'text',
+        inputMethod: createForm.inputMethod,
+        rpaFlowContent: createForm.textTemplateContent,
       };
       if (editorMode === 'edit' && editingProcessId) {
         await apiClient.put(`/process-library/id/${editingProcessId}`, payload);
@@ -285,7 +290,6 @@ function ProcessLibraryContent() {
     setCreateForm(createEmptyFormState());
     setEditorMode('create');
     setEditingProcessId(null);
-    setShowAdvancedDefinition(true);
   };
 
   const openCreateEditor = () => {
@@ -293,7 +297,6 @@ function ProcessLibraryContent() {
     setEditingProcessId(null);
     setCreateForm(createEmptyFormState());
     setCreateError('');
-    setShowAdvancedDefinition(true);
     setShowCreateModal(true);
   };
 
@@ -301,6 +304,10 @@ function ProcessLibraryContent() {
     const definition = process.uiHints && typeof process.uiHints === 'object'
       ? process.uiHints.rpaDefinition
       : null;
+    const accessMode = resolveProcessAuthoringAccessMode({
+      uiHints: process.uiHints,
+      definition,
+    });
 
     setEditorMode('edit');
     setEditingProcessId(process.id);
@@ -312,9 +319,18 @@ function ProcessLibraryContent() {
       processCategory: process.processCategory || '',
       description: process.description || '',
       falLevel: process.falLevel || 'F2',
-      rpaFlowContent: definition ? JSON.stringify({ flows: [definition] }, null, 2) : createEmptyFormState().rpaFlowContent,
+      accessMode,
+      inputMethod: resolveProcessAuthoringInputMode({
+        uiHints: process.uiHints,
+      }),
+      textTemplateContent: resolveProcessAuthoringTextTemplate({
+        uiHints: process.uiHints,
+        definition,
+        processName: process.processName,
+        processCode: process.processCode,
+      }),
+      uploadedFileName: '',
     });
-    setShowAdvancedDefinition(false);
     setShowCreateModal(true);
   };
 
@@ -454,6 +470,17 @@ function ProcessLibraryContent() {
                 <div className="flex-1">
                   <div className="flex items-center gap-3 mb-2">
                     <h3 className="text-xl font-semibold">{process.processName}</h3>
+                    {(() => {
+                      const mode = resolveProcessAuthoringAccessMode({
+                        uiHints: process.uiHints,
+                        definition: process.uiHints?.rpaDefinition,
+                      });
+                      return (
+                        <span className="rounded-full bg-blue-50 px-2.5 py-1 text-xs font-semibold text-blue-700">
+                          {PROCESS_ACCESS_MODE_META[mode].badge}
+                        </span>
+                      );
+                    })()}
                     {getStatusIcon(process.status)}
                     <span className="text-sm text-gray-500">{getStatusText(process.status)}</span>
                   </div>
@@ -578,14 +605,14 @@ function ProcessLibraryContent() {
 
       {showCreateModal && (
         <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50 p-4">
-          <div className="flex max-h-[90vh] w-full max-w-4xl flex-col rounded-2xl bg-white shadow-xl">
+          <div className="flex max-h-[92vh] w-full max-w-6xl flex-col rounded-2xl bg-white shadow-xl">
             <div className="flex items-center justify-between border-b border-gray-200 px-8 py-5">
               <div>
                 <h2 className="text-xl font-bold text-gray-900">{editorMode === 'edit' ? '修改流程' : '单个添加流程'}</h2>
                 <p className="mt-0.5 text-sm text-gray-500">
                   {editorMode === 'edit'
-                    ? '默认只修改基础信息；如需调整底层执行逻辑，再展开高级配置。'
-                    : '流程库中的流程必须先选择所属连接器。'}
+                    ? '这里修改的是流程库里的管理配置；保存后会发布一个新版本。'
+                    : '流程库中的单个流程，必须先选择所属连接器。'}
                 </p>
               </div>
               <button onClick={closeEditor} className="flex h-8 w-8 items-center justify-center rounded-lg hover:bg-gray-100">
@@ -652,58 +679,176 @@ function ProcessLibraryContent() {
               </section>
 
               <section className="space-y-4 rounded-xl border border-gray-200 p-4">
-                <div className="flex items-center justify-between gap-4">
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-900">办理方式</h3>
+                  <p className="mt-1 text-xs text-gray-500">URL、RPA、API 三种方式完全分开选择，避免把链接直达、模拟点击、接口接入混在一起。</p>
+                </div>
+                <div className="grid grid-cols-1 gap-3 lg:grid-cols-3">
+                  {(['url', 'rpa', 'api'] as ProcessAuthoringAccessMode[]).map((mode) => {
+                    const meta = PROCESS_ACCESS_MODE_META[mode];
+                    const selected = createForm.accessMode === mode;
+                    return (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => setCreateForm((prev) => ({ ...prev, accessMode: mode }))}
+                        className={`rounded-xl border p-4 text-left transition ${selected ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-blue-300 hover:bg-blue-50/40'}`}
+                      >
+                        <div className="flex items-center gap-2">
+                          <span className={`rounded-full px-2 py-0.5 text-xs font-semibold ${selected ? 'bg-blue-600 text-white' : 'bg-gray-100 text-gray-700'}`}>{meta.badge}</span>
+                          <span className="text-sm font-medium text-gray-900">{meta.label}</span>
+                        </div>
+                        <p className="mt-2 text-xs leading-5 text-gray-500">{meta.description}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+
+              <section className="space-y-4 rounded-xl border border-gray-200 p-4">
+                <div>
+                  <h3 className="text-sm font-semibold text-gray-900">录入方式</h3>
+                  <p className="mt-1 text-xs text-gray-500">这里只是录入流程配置的方式，不是业务办理时让用户上传正式材料的入口。</p>
+                </div>
+                <div className="grid grid-cols-1 gap-3 md:grid-cols-2">
+                  {(['manual', 'file'] as ProcessAuthoringInputMode[]).map((mode) => {
+                    const meta = PROCESS_INPUT_MODE_META[mode];
+                    const selected = createForm.inputMethod === mode;
+                    return (
+                      <button
+                        key={mode}
+                        type="button"
+                        onClick={() => setCreateForm((prev) => ({ ...prev, inputMethod: mode }))}
+                        className={`rounded-xl border p-4 text-left transition ${selected ? 'border-blue-500 bg-blue-50' : 'border-gray-200 hover:border-blue-300 hover:bg-blue-50/40'}`}
+                      >
+                        <div className="text-sm font-medium text-gray-900">{meta.label}</div>
+                        <p className="mt-2 text-xs leading-5 text-gray-500">{meta.description}</p>
+                      </button>
+                    );
+                  })}
+                </div>
+              </section>
+
+              <section className="grid grid-cols-1 gap-6 xl:grid-cols-[minmax(0,1.65fr)_minmax(280px,0.85fr)]">
+                <div className="space-y-4 rounded-xl border border-gray-200 p-4">
                   <div>
-                    <h3 className="text-sm font-semibold text-gray-900">{editorMode === 'edit' ? '高级配置' : '流程定义'}</h3>
-                    <p className="mt-1 text-xs text-gray-500">
-                      {editorMode === 'edit'
-                        ? '小白管理者通常只改上面的基础信息即可；只有确实需要改底层执行逻辑时，才展开并修改原始定义。'
-                        : '使用现有页面/链接流程定义文件。单个添加只允许一个流程定义。'}
+                    <h3 className="text-sm font-semibold text-gray-900">
+                      {createForm.inputMethod === 'file' ? '上传后编辑' : '粘贴 / 手动填写'}
+                    </h3>
+                    <p className="mt-1 text-xs leading-5 text-gray-500">
+                      全程都按纯文字方式维护。你只需要写清楚该流程需要填写什么、上传什么、最后如何提交或判断完成。
                     </p>
                   </div>
-                  <div className="flex items-center gap-2">
-                    {editorMode === 'edit' && (
-                      <button
-                        type="button"
-                        onClick={() => setShowAdvancedDefinition((prev) => !prev)}
-                        className="rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 hover:border-blue-400 hover:bg-blue-50"
-                      >
-                        {showAdvancedDefinition ? '收起高级配置' : '展开高级配置'}
-                      </button>
-                    )}
-                    {(editorMode === 'create' || showAdvancedDefinition) && (
-                      <label className="inline-flex cursor-pointer items-center justify-center rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 hover:border-blue-400 hover:bg-blue-50">
-                        <input type="file" className="hidden" accept=".json,.txt" onChange={handleFileUpload} />
-                        上传流程文件
-                      </label>
-                    )}
+
+                  <div className="rounded-xl border border-blue-100 bg-blue-50/60 px-4 py-3 text-xs leading-5 text-blue-800">
+                    当前办理方式：<span className="font-semibold">{PROCESS_ACCESS_MODE_META[createForm.accessMode].label}</span>；
+                    录入方式：<span className="font-semibold">{PROCESS_INPUT_MODE_META[createForm.inputMethod].label}</span>。
+                    模板里写了几个“需要填写的信息”或“需要上传的材料”，系统就按几个字段解析，不会默认多加字段。
+                  </div>
+
+                  {createForm.inputMethod === 'file' && (
+                    <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4">
+                      <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+                        <div>
+                          <div className="text-sm font-medium text-gray-900">上传模板文件</div>
+                          <p className="mt-1 text-xs leading-5 text-gray-500">
+                            支持把现成的说明文档读进来，再继续在下面直接改文字。
+                          </p>
+                          {createForm.uploadedFileName && (
+                            <p className="mt-2 text-xs text-gray-700">当前文件：{createForm.uploadedFileName}</p>
+                          )}
+                        </div>
+                        <label className="inline-flex cursor-pointer items-center justify-center rounded-lg border border-gray-300 bg-white px-4 py-2.5 text-sm font-medium text-gray-700 hover:border-blue-400 hover:bg-blue-50">
+                          <input type="file" className="hidden" accept={PROCESS_FILE_ACCEPT[createForm.accessMode]} onChange={handleFileUpload} />
+                          选择文件
+                        </label>
+                      </div>
+                    </div>
+                  )}
+
+                  <div>
+                    <label className="mb-2 block text-sm font-medium text-gray-700">
+                      {createForm.inputMethod === 'file' ? '文件内容（可继续修改）' : '流程模板内容'}
+                    </label>
+                    <textarea
+                      rows={18}
+                      className="w-full rounded-lg border border-gray-300 px-3 py-2.5 font-mono text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
+                      value={createForm.textTemplateContent}
+                      onChange={(e) => setCreateForm((prev) => ({ ...prev, textTemplateContent: e.target.value }))}
+                      placeholder={PROCESS_TEXT_TEMPLATE_PLACEHOLDERS[createForm.accessMode]}
+                    />
+                  </div>
+
+                  <p className="text-xs text-gray-500">
+                    这里维护的是流程库配置文本。后续真正给办理人展示的“需补充信息 / 文件上传入口”，会根据这里识别出的字段自动生成。
+                  </p>
+                </div>
+
+                <div className="space-y-4 rounded-xl border border-gray-200 bg-gray-50 p-4">
+                  <div>
+                    <h3 className="text-sm font-semibold text-gray-900">{PROCESS_ACCESS_MODE_META[createForm.accessMode].helperTitle}</h3>
+                    <p className="mt-1 text-xs leading-5 text-gray-600">{PROCESS_ACCESS_MODE_META[createForm.accessMode].helperText}</p>
+                  </div>
+
+                  <div className="rounded-xl border border-gray-200 bg-white p-4">
+                    <div className="text-sm font-medium text-gray-900">当前建议你这样写</div>
+                    <ul className="mt-3 space-y-2 text-xs leading-5 text-gray-600">
+                      <li>• 先写清楚流程名称、流程编码、流程描述。</li>
+                      <li>• 再写“需要填写的信息”和“需要上传的材料”。</li>
+                      <li>• URL / RPA 模式补充步骤；API 模式补充提交接口和查询接口。</li>
+                      <li>• 附件字段是否必传，直接在模板里写说明和示例即可。</li>
+                    </ul>
+                  </div>
+
+                  <div className="rounded-xl border border-gray-200 bg-white p-4">
+                    <div className="text-sm font-medium text-gray-900">当前配置摘要</div>
+                    <dl className="mt-3 space-y-2 text-xs text-gray-600">
+                      <div className="flex items-start justify-between gap-4">
+                        <dt className="text-gray-500">办理方式</dt>
+                        <dd className="text-right font-medium text-gray-900">{PROCESS_ACCESS_MODE_META[createForm.accessMode].label}</dd>
+                      </div>
+                      <div className="flex items-start justify-between gap-4">
+                        <dt className="text-gray-500">录入方式</dt>
+                        <dd className="text-right font-medium text-gray-900">{PROCESS_INPUT_MODE_META[createForm.inputMethod].label}</dd>
+                      </div>
+                      <div className="flex items-start justify-between gap-4">
+                        <dt className="text-gray-500">流程编码</dt>
+                        <dd className="text-right font-medium text-gray-900">{createForm.processCode.trim() || '未填写'}</dd>
+                      </div>
+                      <div className="flex items-start justify-between gap-4">
+                        <dt className="text-gray-500">流程名称</dt>
+                        <dd className="text-right font-medium text-gray-900">{createForm.processName.trim() || '未填写'}</dd>
+                      </div>
+                      <div className="flex items-start justify-between gap-4">
+                        <dt className="text-gray-500">所属连接器</dt>
+                        <dd className="text-right font-medium text-gray-900">
+                          {connectorOptions.find((item) => item.id === createForm.connectorId)?.name || '未选择'}
+                        </dd>
+                      </div>
+                    </dl>
                   </div>
                 </div>
-                {editorMode === 'create' || showAdvancedDefinition ? (
-                  <textarea
-                    rows={14}
-                    className="w-full rounded-lg border border-gray-300 px-3 py-2.5 font-mono text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
-                    value={createForm.rpaFlowContent}
-                    onChange={(e) => setCreateForm((prev) => ({ ...prev, rpaFlowContent: e.target.value }))}
-                  />
-                ) : (
-                  <div className="rounded-lg border border-dashed border-gray-300 bg-gray-50 px-4 py-4 text-sm text-gray-600">
-                    当前已隐藏底层流程定义，避免直接编辑 JSON。若确实需要调整底层动作、跳转或提交细节，请点击“展开高级配置”。
-                  </div>
-                )}
               </section>
             </div>
 
             <div className="flex items-center gap-3 border-t border-gray-200 bg-gray-50 px-8 py-5">
               <button onClick={closeEditor} className="rounded-lg border border-gray-300 px-5 py-2.5 text-sm font-medium text-gray-700 hover:bg-gray-100">取消</button>
               <div className="flex-1 text-xs text-gray-500">
-                {editorMode === 'edit'
-                  ? '保存后会发布一个新版本，并自动归档当前已发布版本。'
-                  : '没有连接器时，请先去初始化中心创建或批量初始化一个连接器。'}
+                <div>
+                  当前将按
+                  <span className="mx-1 font-semibold text-gray-700">{PROCESS_INPUT_MODE_META[createForm.inputMethod].label}</span>
+                  录入，办理方式为
+                  <span className="mx-1 font-semibold text-gray-700">{PROCESS_ACCESS_MODE_META[createForm.accessMode].label}</span>。
+                </div>
+                <div className="mt-1">
+                  {editorMode === 'edit'
+                    ? '保存后会发布一个新版本，并自动归档当前已发布版本。'
+                    : '没有连接器时，请先去初始化中心创建或批量初始化一个连接器。'}
+                </div>
               </div>
               <button
                 onClick={handleCreate}
-                disabled={creating || !createForm.connectorId || !createForm.processCode.trim() || !createForm.processName.trim() || !createForm.rpaFlowContent.trim()}
+                disabled={creating || !createForm.connectorId || !createForm.processCode.trim() || !createForm.processName.trim() || !activeFlowContent}
                 className="rounded-lg bg-blue-600 px-6 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {creating ? (editorMode === 'edit' ? '保存中...' : '创建中...') : (editorMode === 'edit' ? '保存修改' : '创建流程')}

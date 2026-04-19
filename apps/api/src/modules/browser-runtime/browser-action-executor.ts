@@ -105,7 +105,12 @@ export class BrowserActionExecutor {
   private resolveElement(sessionId: string, tabId: string, step: RpaStepDefinition) {
     const element = this.refCache.resolveElement(sessionId, tabId, step);
     if (!element) {
-      if (step.selector || step.target?.kind === 'selector' || step.target?.kind === 'text') {
+      if (
+        step.selector
+        || step.target?.kind === 'selector'
+        || step.target?.kind === 'text'
+        || step.target?.kind === 'upload'
+      ) {
         return this.buildAdHocElement(step);
       }
       throw new Error(`Unable to resolve target for step ${step.type}`);
@@ -200,10 +205,14 @@ export class BrowserActionExecutor {
     return {
       ref: `adhoc-${step.fieldKey || step.type}`,
       role: this.mapStepRole(step),
-      selector: step.target?.kind === 'selector' ? step.target.value : step.selector,
+      selector: step.target?.kind === 'selector'
+        ? step.target.value
+        : (step.target?.kind === 'upload' ? step.target.value : step.selector),
       fieldKey: step.fieldKey,
       label: step.target?.label || step.target?.value || step.description,
-      text: step.target?.kind === 'text' ? step.target.value : undefined,
+      text: step.target?.kind === 'text' || step.target?.kind === 'upload'
+        ? step.target.value
+        : undefined,
       targetHints: step.target ? [step.target] : undefined,
     };
   }
