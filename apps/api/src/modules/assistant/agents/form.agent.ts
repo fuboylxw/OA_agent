@@ -1475,17 +1475,23 @@ ${fieldDescriptions.join('\n')}
       return this.generateQuestion(field);
     }
 
+    if (
+      (field.type === 'file' || field.semanticKind === 'attachment')
+      && /[|｜]|(?:说明|描述|示例|样例|上传要求|附件要求)\s*[:：=]/iu.test(sanitized)
+    ) {
+      return this.generateQuestion(field);
+    }
+
     if (!/[。？！!?]$/.test(sanitized)) {
       sanitized += '。';
     }
 
-    return this.appendFieldHelp(sanitized, field);
+    return sanitized;
   }
 
   private generateQuestion(field: ProcessField): string {
     if (field.type === 'file' || field.semanticKind === 'attachment') {
-      const uploadHint = field.multiple ? '支持上传多份文件。' : '';
-      return this.appendFieldHelp(`还需要上传${field.label}。${uploadHint}`, field);
+      return `还需要上传${field.label}。`;
     }
 
     if (field.semanticKind === 'leave_type') {
@@ -1501,7 +1507,7 @@ ${fieldDescriptions.join('\n')}
     }
 
     if (field.semanticKind === 'reason') {
-      return this.appendFieldHelp(`请告诉我${field.label}。`, field);
+      return `请告诉我${field.label}。`;
     }
 
     if (this.isOptionLikeField(field)) {
@@ -1524,22 +1530,6 @@ ${fieldDescriptions.join('\n')}
       return '还需要补充一项信息，请再具体说明。';
     }
 
-    return this.appendFieldHelp(`请告诉我${field.label}。`, field);
-  }
-
-  private appendFieldHelp(question: string, field: ProcessField): string {
-    const extras: string[] = [];
-    if (field.description) {
-      extras.push(`说明：${field.description}`);
-    }
-    if (field.example) {
-      extras.push(`示例：${field.example}`);
-    }
-
-    if (extras.length === 0) {
-      return question;
-    }
-
-    return `${question} ${extras.join(' ')}`.trim();
+    return `请告诉我${field.label}。`;
   }
 }

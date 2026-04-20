@@ -575,7 +575,15 @@ export class BootstrapService {
       throw new BadRequestException('页面流程内容无效，无法识别可执行步骤');
     }
 
-    const generated = (await this.tryBuildTextGuideFlowBundleWithLlm(rpaFlowContent, input))
+    const ruleParsed = this.parseStructuredTextGuideDocument(rpaFlowContent)
+      ? this.buildTextGuideFlowBundleFromDescription(rpaFlowContent, {
+          connectorName: input.connectorName,
+          oaUrl: input.oaUrl,
+          platformConfig: input.platformConfig,
+        })
+      : null;
+    const generated = ruleParsed
+      || (await this.tryBuildTextGuideFlowBundleWithLlm(rpaFlowContent, input))
       || this.buildTextGuideFlowBundleFromDescription(rpaFlowContent, {
         connectorName: input.connectorName,
         oaUrl: input.oaUrl,
@@ -1619,6 +1627,11 @@ export class BootstrapService {
               inputMatch.label,
               this.inferFieldTypeV2(inputMatch.label, inputMatch.value),
             );
+        const field = fieldKey ? fields.find((item) => item.key === fieldKey) : null;
+        if (field && field.type === 'file') {
+          field.type = this.resolveNonFileFieldType(inputMatch.label, inputMatch.value, field.type);
+          field.multiple = undefined;
+        }
         steps.push({
           type: 'input',
           fieldKey,
@@ -1642,6 +1655,10 @@ export class BootstrapService {
         const fieldKey = authKind
           ? undefined
           : this.ensureGuideField(fields, fieldKeyByLabel, selectMatch.label, 'select');
+        const field = fieldKey ? fields.find((item) => item.key === fieldKey) : null;
+        if (field) {
+          field.type = 'select';
+        }
         steps.push({
           type: 'select',
           fieldKey,
@@ -1660,6 +1677,13 @@ export class BootstrapService {
       if (uploadMatch) {
         const label = this.normalizeGuideLabelV2(uploadMatch[1]);
         const fieldKey = this.ensureGuideField(fields, fieldKeyByLabel, label, 'file');
+        const field = fields.find((item) => item.key === fieldKey);
+        if (field) {
+          field.type = 'file';
+          if (field.multiple === undefined) {
+            field.multiple = false;
+          }
+        }
         steps.push({
           type: 'upload',
           fieldKey,
@@ -1977,7 +2001,7 @@ export class BootstrapService {
   }
 
   private isGuideFieldSectionHeader(line: string) {
-    return /^(?:#{1,6}\s*)?(?:参数|字段|用户办理时需要补充的信息|待补充信息|需要补充的信息)(?:定义)?\s*[:：]?$/u.test(line);
+    return /^(?:#{1,6}\s*)?(?:(?:用户办理时)?需要(?:填写|补充)的信息|待(?:填写|补充)信息|填写信息|补充信息|参数|字段)(?:定义)?\s*[:：]?$/u.test(line);
   }
 
   private isGuideTestDataSectionHeader(line: string) {
@@ -2613,6 +2637,14 @@ export class BootstrapService {
     }
 
     return false;
+  }
+
+  private resolveNonFileFieldType(label: string, sampleValue?: string, currentType?: string) {
+    if (currentType && currentType !== 'file') {
+      return currentType;
+    }
+    const inferred = this.inferFieldTypeV2(label, sampleValue);
+    return inferred === 'file' ? 'text' : inferred;
   }
 
   private looksLikeNumericField(text: string) {

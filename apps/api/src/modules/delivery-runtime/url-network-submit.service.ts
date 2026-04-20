@@ -90,7 +90,7 @@ export class UrlNetworkSubmitService {
     const response = await this.client.request(request);
     const responseBody = response.data;
     const responseMetadata = this.mapResponse(requestDef, responseBody);
-    const success = this.resolveSuccess(input.action, requestDef, response.status, responseMetadata);
+    const success = this.resolveSuccess(input.action, requestDef, request, response.status, responseMetadata);
     const summary = this.resolveSummary(input, success, responseMetadata.message);
     const artifactRefs = this.toArtifactRefs(preflight.snapshots);
     const metadata = sanitizeStructuredData({
@@ -113,7 +113,7 @@ export class UrlNetworkSubmitService {
         data: responseBody,
       },
       preflight: {
-        extractedValues: preflight.extractedValues,
+        extractedValues: requestContext.preflight,
         session: preflight.session,
       },
       deliveryPath: 'url',
@@ -199,6 +199,10 @@ export class UrlNetworkSubmitService {
     input: UrlNetworkExecutionInput,
     preflightValues: Record<string, any>,
   ) {
+    const normalizedPreflight = this.normalizePreflightValues(
+      preflightValues,
+      this.asRecord(input.payload?.formData),
+    );
     const auth = input.context.authConfig || {};
     const platformConfig = this.asRecord(auth.platformConfig);
     return {
@@ -213,9 +217,51 @@ export class UrlNetworkSubmitService {
       formData: input.payload.formData || {},
       attachments: Array.isArray(input.payload.attachments) ? input.payload.attachments : [],
       payload: input.payload,
-      preflight: preflightValues,
-      page: preflightValues,
+      preflight: normalizedPreflight,
+      page: normalizedPreflight,
+      capturedFormSnapshot: normalizedPreflight.submitFormSnapshot,
       submissionId: input.payload.submissionId,
+    };
+  }
+
+  private normalizePreflightValues(
+    extractedValues: Record<string, any>,
+    formData: Record<string, any>,
+  ) {
+    const preflight = this.asRecord(extractedValues);
+    if (Object.keys(preflight).length === 0) {
+      return preflight;
+    }
+
+    const candidates = this.collectPreflightPayloadCandidates(preflight);
+    const preferredPayload = this.selectPreferredPreflightPayloadCandidate(candidates, formData);
+    if (!preferredPayload) {
+      return preflight;
+    }
+
+    const submitCapture = this.asRecord(preflight.submitCapture);
+    const mergedSubmitFields = this.mergeRequestPayloadValues(
+      preferredPayload.fields,
+      preflight.submitFields ?? submitCapture.fields,
+    );
+    const mergedSubmitHeaders = {
+      ...this.asRecord(preferredPayload.headers),
+      ...this.asRecord(preflight.submitRequestHeaders),
+    };
+    const mergedSubmitRawBody = this.normalizeString(preferredPayload.rawBody)
+      || this.normalizeString(preflight.submitRawBody)
+      || this.normalizeString(submitCapture.rawBody);
+    const mergedSubmitBodyMode = this.normalizeString(preflight.submitBodyMode)
+      || this.normalizeString(submitCapture.bodyMode)
+      || this.normalizeString(preferredPayload.bodyMode);
+
+    return {
+      ...preflight,
+      submitFields: mergedSubmitFields,
+      submitRequestHeaders: mergedSubmitHeaders,
+      ...(mergedSubmitRawBody ? { submitRawBody: mergedSubmitRawBody } : {}),
+      ...(mergedSubmitBodyMode ? { submitBodyMode: mergedSubmitBodyMode } : {}),
+      submitPayloadSource: preferredPayload.source,
     };
   }
 
@@ -312,7 +358,10 @@ export class UrlNetworkSubmitService {
     }
 
     if (this.isMappingRule(template)) {
-      return this.resolveRule(template as RpaNetworkMappingRule, context);
+      const resolved = this.resolveRule(template as RpaNetworkMappingRule, context);
+      if (resolved !== undefined) {
+        return resolved;
+      }
     }
 
     if (Array.isArray(template)) {
@@ -322,6 +371,13 @@ export class UrlNetworkSubmitService {
     const mergeSources = this.resolveMergeSources(template, context);
     if (mergeSources) {
       return mergeSources;
+    }
+
+    if (this.isSingleSourceTemplate(template)) {
+      const resolved = this.resolveSingleSourceTemplate(template, context);
+      if (resolved !== undefined) {
+        return resolved;
+      }
     }
 
     const result: Record<string, any> = {};
@@ -571,10 +627,6 @@ export class UrlNetworkSubmitService {
         continue;
       }
 
-      if (!this.isChoiceField(field) && this.hasSuccessfulDomBinding(field, filledFields)) {
-        continue;
-      }
-
       if (
         this.hasPatchedRequestValue(
           field,
@@ -620,6 +672,189 @@ export class UrlNetworkSubmitService {
       .filter((item): item is string => Boolean(item));
 
     return candidateKeys.some((key) => filledFields[key] === true);
+  }
+
+  private collectPreflightPayloadCandidates(preflight: Record<string, any>) {
+    const candidates: Array<{
+      source: string;
+      fields: any;
+      rawBody?: string;
+      headers?: Record<string, any>;
+      bodyMode?: string;
+    }> = [];
+    const pushCandidate = (
+      source: string,
+      record: Record<string, any>,
+      fallback: {
+        fields?: any;
+        rawBody?: any;
+        headers?: Record<string, any>;
+        bodyMode?: any;
+      } = {},
+    ) => {
+      const fields = record.fields ?? fallback.fields;
+      const rawBody = this.normalizeString(record.rawBody) || this.normalizeString(fallback.rawBody);
+      const headers = {
+        ...this.asRecord(fallback.headers),
+        ...this.asRecord(record.headers),
+      };
+      const bodyMode = this.normalizeString(record.bodyMode) || this.normalizeString(fallback.bodyMode);
+      if (fields === undefined && !rawBody) {
+        return;
+      }
+      candidates.push({
+        source,
+        fields,
+        rawBody,
+        headers,
+        bodyMode,
+      });
+    };
+
+    pushCandidate('submitCapture', this.asRecord(preflight.submitCapture), {
+      fields: preflight.submitFields,
+      rawBody: preflight.submitRawBody,
+      headers: this.asRecord(preflight.submitRequestHeaders),
+      bodyMode: preflight.submitBodyMode,
+    });
+    pushCandidate('submitFormSnapshot', this.asRecord(preflight.submitFormSnapshot));
+    pushCandidate('submitPayloadCapture', this.asRecord(preflight.submitPayloadCapture));
+
+    return candidates;
+  }
+
+  private selectPreferredPreflightPayloadCandidate(
+    candidates: Array<{
+      source: string;
+      fields: any;
+      rawBody?: string;
+      headers?: Record<string, any>;
+      bodyMode?: string;
+    }>,
+    formData: Record<string, any>,
+  ) {
+    if (!Array.isArray(candidates) || candidates.length === 0) {
+      return undefined;
+    }
+
+    const comparableValues = this.collectComparableFormValues(formData);
+    const scored = candidates.map((candidate, index) => {
+      const coverageScore = comparableValues.reduce((count, value) => (
+        this.requestContainsValue(candidate.fields, value)
+        || this.requestContainsValue(candidate.rawBody, value)
+          ? count + 1
+          : count
+      ), 0);
+      const richnessScore = this.measurePayloadRichness(candidate.fields)
+        + Math.min(40, Math.floor((candidate.rawBody?.length || 0) / 64))
+        + (candidate.source === 'submitCapture' ? 1 : 0);
+      return {
+        candidate,
+        score: coverageScore * 1000 + richnessScore,
+        index,
+      };
+    });
+
+    scored.sort((left, right) => {
+      if (right.score !== left.score) {
+        return right.score - left.score;
+      }
+      return left.index - right.index;
+    });
+
+    return scored[0]?.candidate;
+  }
+
+  private collectComparableFormValues(formData: Record<string, any>) {
+    const results = new Set<string>();
+    const visit = (value: any) => {
+      if (this.isEmptyRuntimeValue(value)) {
+        return;
+      }
+      if (Array.isArray(value)) {
+        value.forEach((item) => visit(item));
+        return;
+      }
+      if (value && typeof value === 'object') {
+        Object.values(value).forEach((item) => visit(item));
+        return;
+      }
+      const normalized = this.normalizeString(value);
+      if (normalized) {
+        results.add(normalized);
+      }
+    };
+
+    Object.values(this.asRecord(formData)).forEach((value) => visit(value));
+    return [...results];
+  }
+
+  private measurePayloadRichness(value: any): number {
+    if (value === undefined || value === null) {
+      return 0;
+    }
+    if (typeof value === 'string') {
+      if (this.looksLikeJson(value)) {
+        const parsed = this.safeParseJson(value);
+        if (parsed !== undefined) {
+          return this.measurePayloadRichness(parsed);
+        }
+      }
+      return this.normalizeString(value) ? 1 : 0;
+    }
+    if (Array.isArray(value)) {
+      return value.reduce((count, item) => count + this.measurePayloadRichness(item), 0);
+    }
+    if (typeof value === 'object') {
+      return Object.values(value as Record<string, any>).reduce<number>(
+        (count, item) => count + this.measurePayloadRichness(item),
+        0,
+      );
+    }
+    return 1;
+  }
+
+  private mergeRequestPayloadValues(primary: any, fallback: any): any {
+    if (primary === undefined) {
+      return fallback;
+    }
+    if (fallback === undefined) {
+      return primary;
+    }
+
+    if (typeof primary === 'string' && this.looksLikeJson(primary)) {
+      const parsedPrimary = this.safeParseJson(primary);
+      if (parsedPrimary !== undefined) {
+        const parsedFallback = typeof fallback === 'string' && this.looksLikeJson(fallback)
+          ? this.safeParseJson(fallback)
+          : fallback;
+        const merged = this.mergeRequestPayloadValues(parsedPrimary, parsedFallback);
+        return typeof merged === 'string'
+          ? merged
+          : JSON.stringify(merged);
+      }
+    }
+
+    if (Array.isArray(primary)) {
+      return primary.length > 0 ? primary : fallback;
+    }
+    if (Array.isArray(fallback)) {
+      return this.isEmptyRuntimeValue(primary) ? fallback : primary;
+    }
+
+    if (primary && typeof primary === 'object' && fallback && typeof fallback === 'object') {
+      const result: Record<string, any> = {
+        ...fallback,
+      };
+      for (const [key, value] of Object.entries(primary)) {
+        result[key] = this.mergeRequestPayloadValues(value, (fallback as Record<string, any>)[key]);
+      }
+      return result;
+    }
+
+    return this.isEmptyRuntimeValue(primary) && !this.isEmptyRuntimeValue(fallback)
+      ? fallback
+      : primary;
   }
 
   private hasPatchedRequestValue(
@@ -688,7 +923,7 @@ export class UrlNetworkSubmitService {
       return this.buildChoiceBodyPatchCandidates(field, submittedValue, body, deliveryContext);
     }
 
-    return this.inferBodyPatchPaths(field, body).map((path) => ({
+    return this.inferBodyPatchPaths(field, body, deliveryContext).map((path) => ({
       path,
       value: submittedValue,
     }));
@@ -747,7 +982,11 @@ export class UrlNetworkSubmitService {
     return candidates;
   }
 
-  private inferBodyPatchPaths(field: RpaFieldBinding, body: any) {
+  private inferBodyPatchPaths(
+    field: RpaFieldBinding,
+    body: any,
+    deliveryContext?: UrlDeliveryExecutionContext,
+  ) {
     const paths = new Set<string>();
     const directCandidates = [
       this.normalizeString(field.requestFieldName),
@@ -760,8 +999,26 @@ export class UrlNetworkSubmitService {
       }
     }
 
-    const capFieldToken = this.extractCapFieldToken(field);
-    if (capFieldToken) {
+    const captureMappingTokens = deliveryContext
+      ? this.getCaptureFormFieldMappings(deliveryContext, field.key)
+        .map((mapping) => this.extractCapFieldToken({
+          id: this.normalizeString(mapping?.target?.id),
+          selector: this.normalizeString(mapping?.target?.selector),
+          requestFieldName: this.normalizeString(mapping?.target?.name),
+        }))
+        .filter((item): item is string => Boolean(item))
+      : [];
+    const capFieldTokens = Array.from(new Set([
+      this.extractCapFieldToken(field),
+      ...captureMappingTokens,
+    ].filter((item): item is string => Boolean(item))));
+    for (const capFieldToken of capFieldTokens) {
+      for (const path of this.findFieldTokenPaths(body, capFieldToken)) {
+        paths.add(path);
+      }
+      if ([...paths].some((path) => path.endsWith(`.${capFieldToken}`) || path === capFieldToken)) {
+        continue;
+      }
       const colMainDataRoots = this.findColMainDataRoots(body);
       for (const root of colMainDataRoots) {
         paths.add(root ? `${root}.colMainData.${capFieldToken}` : `colMainData.${capFieldToken}`);
@@ -977,6 +1234,45 @@ export class UrlNetworkSubmitService {
     }
 
     return [...new Set(roots)];
+  }
+
+  private findFieldTokenPaths(value: any, fieldToken: string, prefix = ''): string[] {
+    const normalizedFieldToken = this.normalizeString(fieldToken);
+    if (!normalizedFieldToken) {
+      return [];
+    }
+
+    const current = typeof value === 'string' && this.looksLikeJson(value)
+      ? this.safeParseJson(value)
+      : value;
+    if (!current || typeof current !== 'object') {
+      return [];
+    }
+
+    const paths: string[] = [];
+    if (!Array.isArray(current) && Object.prototype.hasOwnProperty.call(current, normalizedFieldToken)) {
+      paths.push(prefix ? `${prefix}.${normalizedFieldToken}` : normalizedFieldToken);
+    }
+
+    if (Array.isArray(current)) {
+      return paths;
+    }
+
+    for (const [key, child] of Object.entries(current)) {
+      if (child === undefined || child === null) {
+        continue;
+      }
+      const childValue = typeof child === 'string' && this.looksLikeJson(child)
+        ? this.safeParseJson(child)
+        : child;
+      if (!childValue || typeof childValue !== 'object') {
+        continue;
+      }
+      const nextPrefix = prefix ? `${prefix}.${key}` : key;
+      paths.push(...this.findFieldTokenPaths(childValue, normalizedFieldToken, nextPrefix));
+    }
+
+    return [...new Set(paths)];
   }
 
   private getFieldBindings(deliveryContext: UrlDeliveryExecutionContext) {
@@ -1275,6 +1571,24 @@ export class UrlNetworkSubmitService {
     }
   }
 
+  private isSingleSourceTemplate(value: unknown) {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return false;
+    }
+    const keys = Object.keys(value as Record<string, any>);
+    return keys.length === 1 && keys[0] === 'source';
+  }
+
+  private resolveSingleSourceTemplate(
+    template: Record<string, any>,
+    context: Record<string, any>,
+  ) {
+    const sourcePath = this.normalizeString(template.source);
+    return sourcePath
+      ? this.getNestedValue(context, sourcePath)
+      : undefined;
+  }
+
   private resolveBodyMode(
     value: RpaNetworkRequestDefinition['bodyMode'],
     context: Record<string, any>,
@@ -1299,9 +1613,14 @@ export class UrlNetworkSubmitService {
   private resolveSuccess(
     action: 'submit' | 'queryStatus',
     definition: RpaNetworkRequestDefinition,
+    request: AxiosRequestConfig,
     statusCode: number,
     responseMetadata: { success?: any; status?: string; message?: string; submissionId?: string },
   ) {
+    if (action === 'submit' && this.isNonPersistingRequest(definition, request)) {
+      return false;
+    }
+
     if (definition.successMode === 'http2xx') {
       return statusCode >= 200 && statusCode < 400;
     }
@@ -1322,6 +1641,26 @@ export class UrlNetworkSubmitService {
     }
 
     return true;
+  }
+
+  private isNonPersistingRequest(definition: RpaNetworkRequestDefinition, request?: AxiosRequestConfig) {
+    const parts = [
+      this.normalizeString(definition.url),
+      this.normalizeString(definition.method),
+      this.normalizeString(JSON.stringify(definition.body ?? '')),
+      this.normalizeString(request?.url),
+      this.normalizeString(JSON.stringify(request?.params ?? '')),
+      this.normalizeString(
+        typeof request?.data === 'string'
+          ? request.data
+          : JSON.stringify(request?.data ?? ''),
+      ),
+    ]
+      .filter(Boolean)
+      .join('\n')
+      .toLowerCase();
+
+    return /notsavedb=true/.test(parts);
   }
 
   private resolveSummary(
@@ -1521,6 +1860,24 @@ export class UrlNetworkSubmitService {
   }
 
   private maskBody(body: any) {
+    if (body && typeof body?.entries === 'function') {
+      try {
+        return Array.from(body.entries()).map(([key, value]: [string, any]) => [
+          key,
+          typeof value === 'string'
+            ? value
+            : {
+                name: this.normalizeString(value?.name) || 'blob',
+                type: this.normalizeString(value?.type) || 'application/octet-stream',
+              },
+        ]);
+      } catch {
+        return '[unserializable_form_data]';
+      }
+    }
+    if (typeof body?.toString === 'function' && body?.constructor?.name === 'URLSearchParams') {
+      return String(body);
+    }
     if (typeof body === 'string') {
       return body;
     }

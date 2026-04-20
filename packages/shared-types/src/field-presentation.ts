@@ -33,13 +33,14 @@ export function resolveAssistantFieldPresentation(
 ): AssistantFieldPresentation {
   const key = String(input.key || '').trim();
   const rawLabel = String(input.label || key || '').trim();
+  const sanitizedRawLabel = sanitizeStructuredFieldLabel(rawLabel);
   const rawType = String(input.type || 'text').trim().toLowerCase();
   const processCode = String(input.processCode || '').trim().toLowerCase();
-  const normalized = normalizeLookupText([key, rawLabel, processCode]);
+  const normalized = normalizeLookupText([key, sanitizedRawLabel, rawLabel, processCode]);
   const semanticKind = inferSemanticKind(normalized, processCode);
-  const label = inferFriendlyLabel(rawLabel, normalized, semanticKind, processCode);
+  const label = inferFriendlyLabel(sanitizedRawLabel || rawLabel, normalized, semanticKind, processCode);
   const type = inferFriendlyType(rawType, semanticKind, input.options || []);
-  const aliases = buildAliases(key, rawLabel, label, semanticKind);
+  const aliases = buildAliases(key, rawLabel, sanitizedRawLabel, label, semanticKind);
 
   return {
     label,
@@ -84,6 +85,27 @@ function inferSemanticKind(
   }
 
   return 'generic';
+}
+
+function sanitizeStructuredFieldLabel(value: string): string {
+  let label = String(value || '')
+    .trim()
+    .replace(/^[-*•]\s*/, '')
+    .replace(/^\d+[.)、]\s*/, '')
+    .trim();
+
+  if (!label) {
+    return '';
+  }
+
+  label = label.split(/[|｜]/u)[0]?.trim() || label;
+  label = label.replace(
+    /\s*(?:说明|描述|示例|样例|参考值|上传要求|附件要求|可选值|选项|候选值|是否必填|required|optional|multiple)\s*[:：=].*$/iu,
+    '',
+  ).trim();
+  label = label.replace(/\s*(?:必填|选填|可选|可多选|多选|支持多份)$/iu, '').trim();
+
+  return label;
 }
 
 function inferFriendlyLabel(
@@ -156,6 +178,7 @@ function inferFriendlyType(
 function buildAliases(
   key: string,
   rawLabel: string,
+  sanitizedRawLabel: string,
   label: string,
   semanticKind: AssistantFieldSemanticKind,
 ): string[] {
@@ -167,6 +190,7 @@ function buildAliases(
 
   add(key);
   add(rawLabel);
+  add(sanitizedRawLabel);
   add(label);
   add(humanizeIdentifier(key));
   add(humanizeIdentifier(rawLabel));

@@ -236,6 +236,31 @@ async function loadFlow(prisma: PrismaClient, connectorId: string, processCode: 
   };
 }
 
+function loadFlowFromFile(flowFile: string) {
+  const resolved = path.resolve(process.cwd(), flowFile);
+  const raw = JSON.parse(fs.readFileSync(resolved, 'utf8')) as Record<string, any>;
+  const flow = raw?.schema?.fields
+    ? {
+        processCode: raw.processCode,
+        processName: raw.processName,
+        description: raw.description,
+        fields: raw.schema.fields,
+        platform: raw.platform,
+        runtime: raw.runtime,
+        executionModes: raw.executionModes,
+      }
+    : raw;
+
+  if (!flow || typeof flow !== 'object') {
+    throw new Error(`Invalid flow file: ${resolved}`);
+  }
+
+  return {
+    templateId: `file:${resolved}`,
+    flow: flow as RpaFlowDefinition,
+  };
+}
+
 function resolveTargetTourl(flow: RpaFlowDefinition) {
   const explicit = String(flow.platform?.portalSsoBridge?.targetPathTemplate || '').trim();
   if (explicit) {
@@ -317,10 +342,13 @@ async function main() {
   const connectorId = getArg('--connector-id', '234a8eaa-9297-4c69-a9f5-29fb8e23dd5e');
   const processCode = getArg('--process-code', 'leave_request');
   const account = getArg('--account', 'cloudcam');
+  const flowFile = getArg('--flow-file');
   const prisma = new PrismaClient();
 
   try {
-    const loaded = await loadFlow(prisma, String(connectorId), String(processCode));
+    const loaded = flowFile
+      ? loadFlowFromFile(String(flowFile))
+      : await loadFlow(prisma, String(connectorId), String(processCode));
     const flow = loaded.flow;
     const portalUrl = getArg(
       '--portal-url',
@@ -330,7 +358,8 @@ async function main() {
       '--oa-info-url',
       String(flow.platform?.portalSsoBridge?.oaInfoUrl || 'https://sz.xpu.edu.cn/gate/lobby/api/oa/info'),
     );
-    const targetTourl = getArg('--tourl', resolveTargetTourl(flow));
+    const explicitTourl = getArg('--tourl');
+    const targetTourl = explicitTourl || resolveTargetTourl(flow);
     const authState = await buildAuthenticatedState({
       account: String(account),
       portalUrl: String(portalUrl),
@@ -340,12 +369,16 @@ async function main() {
 
     const runtime = new BrowserTaskRuntime();
     const formData = {
-      reason: getArg('--reason', '出差开会'),
-      startDate: getArg('--start-date', '2026-04-20'),
-      endDate: getArg('--end-date', '2026-04-21'),
-      location: getArg('--location', '西安'),
-      contact: getArg('--contact', '18291622202'),
-      returnDate: getArg('--return-date', '2026-04-22'),
+      field_1: getArg('--field-1', getArg('--reason', '出差开会')),
+      field_2: getArg('--field-2', getArg('--start-date', '2026-04-20')),
+      field_3: getArg('--field-3', getArg('--end-date', '2026-04-21')),
+      field_4: getArg('--field-4', getArg('--location', '西安')),
+      field_5: getArg('--field-5', getArg('--contact', '18291622202')),
+      reason: getArg('--reason', getArg('--field-1', '出差开会')),
+      startDate: getArg('--start-date', getArg('--field-2', '2026-04-20')),
+      endDate: getArg('--end-date', getArg('--field-3', '2026-04-21')),
+      location: getArg('--location', getArg('--field-4', '西安')),
+      contactPhone: getArg('--contact', getArg('--field-5', '18291622202')),
     };
 
     const preflight = flow.runtime?.preflight;

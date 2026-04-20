@@ -774,6 +774,10 @@ function buildTextGuideFlowFromStepLines(input: {
             inferFieldType(inputMatch.label, inputMatch.value),
           );
       const field = fieldKey ? fields.find((item) => item.key === fieldKey) : null;
+      if (field && field.type === 'file') {
+        field.type = resolveNonFileFieldType(inputMatch.label, inputMatch.value, field.type);
+        field.multiple = undefined;
+      }
       if (field && inputMatch.description && !field.description) {
         field.description = inputMatch.description;
       }
@@ -794,7 +798,7 @@ function buildTextGuideFlowFromStepLines(input: {
       continue;
     }
 
-    const selectMatch = parseGuideInstruction(line, ['选择', '选中']);
+    const selectMatch = parseGuideInstruction(line, ['选择', '选中', '勾选', '勾上', '打勾', '打钩']);
     if (selectMatch) {
       if (!selectMatch.value) {
         steps.push({
@@ -811,6 +815,9 @@ function buildTextGuideFlowFromStepLines(input: {
 
       const fieldKey = ensureGuideField(fields, fieldKeyByLabel, selectMatch.label, 'select');
       const field = fields.find((item) => item.key === fieldKey);
+      if (field) {
+        field.type = 'select';
+      }
       if (field && selectMatch.description && !field.description) {
         field.description = selectMatch.description;
       }
@@ -835,6 +842,12 @@ function buildTextGuideFlowFromStepLines(input: {
     if (uploadMatch) {
       const fieldKey = ensureGuideField(fields, fieldKeyByLabel, uploadMatch.label, 'file');
       const field = fields.find((item) => item.key === fieldKey);
+      if (field) {
+        field.type = 'file';
+        if (field.multiple === undefined) {
+          field.multiple = false;
+        }
+      }
       if (field && uploadMatch.description && !field.description) {
         field.description = uploadMatch.description;
       }
@@ -1485,11 +1498,11 @@ function isGuideFieldSectionHeader(line: string) {
 }
 
 function isGuideFillFieldSectionHeader(line: string) {
-  return /^(?:#{1,6}\s*)?(?:需要填写的信息|待填写信息|填写信息|需要补充的信息)\s*[:：]?$/u.test(line);
+  return /^(?:#{1,6}\s*)?(?:(?:用户办理时)?需要(?:填写|补充)的信息|待(?:填写|补充)信息|填写信息|补充信息)\s*[:：]?$/u.test(line);
 }
 
 function isGuideUploadFieldSectionHeader(line: string) {
-  return /^(?:#{1,6}\s*)?(?:需要上传的材料|需要上传的信息|需要上传的文件|上传材料|上传文件|附件材料|附件信息)\s*[:：]?$/u.test(line);
+  return /^(?:#{1,6}\s*)?(?:需要上传的材料|需要上传的文件|上传材料|上传文件|附件材料|附件信息)\s*[:：]?$/u.test(line);
 }
 
 function isGuideTestDataSectionHeader(line: string) {
@@ -2093,7 +2106,28 @@ function looksLikeAttachmentField(text: string) {
     return false;
   }
 
-  return /(附件|证明|材料|文件|扫描件|图片|照片|pdf|doc|docx|zip|rar|upload|file)/.test(normalized);
+  if (normalized.includes('附件')) {
+    return true;
+  }
+
+  if (/(upload|上传)/.test(normalized)) {
+    return true;
+  }
+
+  if (normalized.includes('文件')) {
+    return /(附件|上传|扫描件|图片|照片|pdf|doc|docx|word|excel|zip|rar|压缩包)/.test(normalized);
+  }
+
+  return /(证明|材料|扫描件|图片|照片|pdf|doc|docx|zip|rar|upload|file)/.test(normalized);
+}
+
+function resolveNonFileFieldType(label: string, sampleValue?: string, currentType?: string) {
+  if (currentType && currentType !== 'file') {
+    return currentType;
+  }
+
+  const inferred = inferFieldType(label, sampleValue);
+  return inferred === 'file' ? 'text' : inferred;
 }
 
 function looksLikeNumericField(text: string) {

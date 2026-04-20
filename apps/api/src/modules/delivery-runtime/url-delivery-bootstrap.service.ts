@@ -166,38 +166,41 @@ export class UrlDeliveryBootstrapService {
     }
 
     const platform = this.asRecord(flow.platform);
+    let nextFlow = this.normalizeLegacyUrlRuntime(flow);
+
     if (platform.portalSsoBridge && typeof platform.portalSsoBridge === 'object') {
-      return flow;
+      return nextFlow;
     }
 
-    const runtime = this.asRecord(flow.runtime);
+    const nextPlatform = this.asRecord(nextFlow.platform);
+    const runtime = this.asRecord(nextFlow.runtime);
     const requiresSessionBootstrap = Boolean(
       runtime.preflight
       || runtime.networkSubmit
       || runtime.networkStatus,
     );
     if (!requiresSessionBootstrap) {
-      return flow;
+      return nextFlow;
     }
 
     const platformConfig = this.asRecord(authConfig.platformConfig);
     const portalUrl = this.normalizeUrl(
       platformConfig.entryUrl
-      || platform.entryUrl
+      || nextPlatform.entryUrl
       || platformConfig.portalUrl,
     );
     const targetBaseUrl = this.normalizeUrl(
-      platform.businessBaseUrl
-      || platform.targetBaseUrl
-      || platform.targetSystem,
+      nextPlatform.businessBaseUrl
+      || nextPlatform.targetBaseUrl
+      || nextPlatform.targetSystem,
     );
 
     if (!portalUrl || !targetBaseUrl || this.sameOrigin(portalUrl, targetBaseUrl)) {
-      return flow;
+      return nextFlow;
     }
 
-    const nextPlatform = {
-      ...platform,
+    const mergedPlatform = {
+      ...nextPlatform,
       portalSsoBridge: {
         enabled: true,
         mode: 'oa_info' as const,
@@ -209,9 +212,200 @@ export class UrlDeliveryBootstrapService {
     };
 
     return {
-      ...flow,
-      platform: nextPlatform,
+      ...nextFlow,
+      platform: mergedPlatform,
     };
+  }
+
+  private normalizeLegacyUrlRuntime(flow: any) {
+    const runtime = this.asRecord(flow?.runtime);
+    const preflight = this.asRecord(runtime.preflight);
+    const rawSteps = Array.isArray(preflight.steps) ? preflight.steps : null;
+    const fields = Array.isArray(flow?.fields)
+      ? flow.fields.filter((item) => item && typeof item === 'object' && !Array.isArray(item))
+      : [];
+
+    if (!rawSteps || fields.length === 0) {
+      return flow;
+    }
+
+    const textFields = fields.filter((field) => this.normalizeString(field.type)?.toLowerCase() !== 'file');
+    const fileFields = fields.filter((field) => this.normalizeString(field.type)?.toLowerCase() === 'file');
+    let stepsChanged = false;
+
+    const nextSteps = rawSteps.map((rawStep) => {
+      if (!rawStep || typeof rawStep !== 'object' || Array.isArray(rawStep)) {
+        return rawStep;
+      }
+      if (this.normalizeString(rawStep.builtin) !== 'capture_form_submit') {
+        return rawStep;
+      }
+
+      const options = this.asRecord(rawStep.options);
+      const normalizedFieldMappings = this.normalizeCaptureMappings(
+        Array.isArray(options.fieldMappings) ? options.fieldMappings : [],
+        textFields,
+      );
+      const normalizedFileMappings = this.normalizeCaptureMappings(
+        Array.isArray(options.fileMappings) ? options.fileMappings : [],
+        fileFields,
+      );
+
+      const fieldMappingsChanged = JSON.stringify(normalizedFieldMappings) !== JSON.stringify(options.fieldMappings || []);
+      const fileMappingsChanged = JSON.stringify(normalizedFileMappings) !== JSON.stringify(options.fileMappings || []);
+      if (!fieldMappingsChanged && !fileMappingsChanged) {
+        return rawStep;
+      }
+
+      stepsChanged = true;
+      return {
+        ...rawStep,
+        options: {
+          ...options,
+          fieldMappings: normalizedFieldMappings,
+          fileMappings: normalizedFileMappings,
+        },
+      };
+    });
+
+    if (!stepsChanged) {
+      return flow;
+    }
+
+    return {
+      ...flow,
+      runtime: {
+        ...runtime,
+        preflight: {
+          ...preflight,
+          steps: nextSteps,
+        },
+      },
+    };
+  }
+
+  private normalizeCaptureMappings(
+    rawMappings: any[],
+    fields: Array<Record<string, any>>,
+  ) {
+    const usedFieldKeys = new Set<string>();
+    return rawMappings.map((mapping, index) => {
+      const base = this.asRecord(mapping);
+      const matchedField = this.matchFieldForCaptureMapping(base, fields, usedFieldKeys, index);
+      if (!matchedField) {
+        return mapping;
+      }
+
+      const matchedKey = this.normalizeString(matchedField.key);
+      if (matchedKey) {
+        usedFieldKeys.add(matchedKey);
+      }
+
+      return this.mergeCaptureMapping(base, matchedField);
+    });
+  }
+
+  private matchFieldForCaptureMapping(
+    mapping: Record<string, any>,
+    fields: Array<Record<string, any>>,
+    usedFieldKeys: Set<string>,
+    index: number,
+  ) {
+    const explicitKey = this.normalizeString(mapping.fieldKey);
+    if (explicitKey) {
+      const exactField = fields.find((field) => this.normalizeString(field.key) === explicitKey);
+      if (exactField) {
+        return exactField;
+      }
+    }
+
+    const target = this.asRecord(mapping.target);
+    const expectedId = this.normalizeString(target.id);
+    const expectedName = this.normalizeString(target.name);
+    const expectedLabel = this.normalizeString(target.label || target.text || target.placeholder);
+    const expectedSelector = this.normalizeString(target.selector);
+
+    const matchedByMetadata = fields.find((field) => {
+      const fieldId = this.normalizeString(field.id);
+      const fieldName = this.normalizeString(field.name || field.requestFieldName);
+      const fieldLabel = this.normalizeString(field.label);
+      const fieldSelector = this.normalizeString(field.selector);
+      if (expectedId && fieldId && expectedId === fieldId) {
+        return true;
+      }
+      if (expectedName && fieldName && expectedName === fieldName) {
+        return true;
+      }
+      if (expectedLabel && fieldLabel && expectedLabel === fieldLabel) {
+        return true;
+      }
+      if (expectedSelector && fieldSelector && expectedSelector === fieldSelector) {
+        return true;
+      }
+      return false;
+    });
+    if (matchedByMetadata) {
+      return matchedByMetadata;
+    }
+
+    return fields.find((field, fieldIndex) => {
+      const fieldKey = this.normalizeString(field.key);
+      if (!fieldKey || usedFieldKeys.has(fieldKey)) {
+        return false;
+      }
+      return fieldIndex === index;
+    }) || null;
+  }
+
+  private mergeCaptureMapping(
+    mapping: Record<string, any>,
+    field: Record<string, any>,
+  ) {
+    const existingSources = [
+      ...(Array.isArray(mapping.sources) ? mapping.sources : []),
+      mapping.source,
+    ].map((item) => this.normalizeString(item)).filter((item): item is string => Boolean(item));
+    const fieldSources = [
+      field.key,
+      field.label,
+    ].map((item) => this.normalizeString(item)).filter((item): item is string => Boolean(item));
+
+    const normalizedOptions = Array.isArray(mapping.options) && mapping.options.length > 0
+      ? mapping.options
+      : this.buildMappingOptionsFromField(field);
+
+    return {
+      ...mapping,
+      fieldKey: this.normalizeString(mapping.fieldKey) || this.normalizeString(field.key),
+      fieldType: this.normalizeString(mapping.fieldType) || this.normalizeString(field.type),
+      sources: Array.from(new Set([...fieldSources, ...existingSources])),
+      ...(normalizedOptions.length > 0 ? { options: normalizedOptions } : {}),
+      target: {
+        ...this.asRecord(field),
+        ...this.asRecord(mapping.target),
+        label: this.normalizeString(this.asRecord(mapping.target).label) || this.normalizeString(field.label),
+      },
+    };
+  }
+
+  private buildMappingOptionsFromField(field: Record<string, any>) {
+    if (!Array.isArray(field.options)) {
+      return [];
+    }
+
+    return field.options
+      .map((option) => {
+        if (!option || typeof option !== 'object' || Array.isArray(option)) {
+          return null;
+        }
+        const label = this.normalizeString(option.label || option.value);
+        const value = this.normalizeString(option.value || option.label);
+        if (!label || !value) {
+          return null;
+        }
+        return { label, value };
+      })
+      .filter((option): option is { label: string; value: string } => Boolean(option));
   }
 
   private firstRecord(values: unknown[]) {
@@ -229,6 +423,11 @@ export class UrlDeliveryBootstrapService {
       return '';
     }
     return raw;
+  }
+
+  private normalizeString(value: unknown) {
+    const raw = String(value ?? '').trim();
+    return raw || '';
   }
 
   private sameOrigin(left: string, right: string) {

@@ -7,6 +7,36 @@ const readPath = (input, path) => String(path || '')
   .filter(Boolean)
   .reduce((current, key) => current?.[key], input);
 const normalizeText = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
+const buildCapturePreference = (captureOptions) => {
+  if (!captureOptions || typeof captureOptions !== 'object') {
+    return {
+      includePatterns: [],
+      excludePatterns: [],
+      settleTimeMs: 800,
+    };
+  }
+  const toPatternList = (value) => (Array.isArray(value) ? value : [value])
+    .map((item) => normalizeText(item))
+    .filter(Boolean)
+    .map((item) => new RegExp(item, 'i'));
+  const actionPattern = normalizeText(captureOptions.actionPattern);
+  return {
+    includePatterns: [
+      ...(actionPattern ? [new RegExp(actionPattern, 'i')] : []),
+      ...toPatternList(captureOptions.includePatterns),
+    ],
+    excludePatterns: toPatternList(captureOptions.excludePatterns),
+    settleTimeMs: Number(captureOptions.settleTimeMs || 800),
+  };
+};
+const shouldExcludeCaptureRecord = (record, preference) => {
+  const haystack = [
+    String(record?.action || ''),
+    String(record?.url || ''),
+    String(record?.rawBody || ''),
+  ].join('\n');
+  return (preference?.excludePatterns || []).some((pattern) => pattern.test(haystack));
+};
 const normalizeValue = (value) => {
   if (value === undefined || value === null) {
     return '';
@@ -84,27 +114,116 @@ const resolveDocuments = (frameOptions) => {
   }
   return matched;
 };
-const extractElementLabel = (element) => {
-  if (!element) {
-    return '';
+const normalizeLabelKey = (value) => normalizeText(value)
+  .replace(/[：:]/g, '')
+  .replace(/[（(]\s*必填\s*[)）]/g, '')
+  .replace(/[*＊]/g, '')
+  .replace(/\s+/g, '')
+  .toLowerCase();
+const isMeaningfulLabelValue = (value) => {
+  const normalized = normalizeText(value);
+  if (!normalized) {
+    return false;
   }
+  if (!/[A-Za-z0-9\u4e00-\u9fa5]/.test(normalized)) {
+    return false;
+  }
+  return !/^[-—–~～:：*（）()]+$/.test(normalized);
+};
+const dedupeTextValues = (values) => {
+  const results = [];
+  const seen = new Set();
+  for (const value of Array.isArray(values) ? values : [values]) {
+    const normalized = normalizeText(value);
+    if (!normalized || seen.has(normalized)) {
+      continue;
+    }
+    seen.add(normalized);
+    results.push(normalized);
+  }
+  return results;
+};
+const collectElementTableLabelCandidates = (element) => {
+  const cell = element.closest?.('td, th') || null;
+  const row = element.closest?.('tr') || null;
+  const precedingCells = [];
+  let cursor = cell?.previousElementSibling || null;
+  while (cursor) {
+    precedingCells.unshift(cursor);
+    cursor = cursor.previousElementSibling;
+  }
+  const siblingCells = row
+    ? Array.from(row.children || []).filter((candidate) =>
+      candidate
+      && candidate !== cell
+      && candidate.matches?.('td, th'))
+    : [];
+  const descriptiveSibling = siblingCells.find((candidate) =>
+    !candidate.querySelector?.('input, textarea, select')
+    && isMeaningfulLabelValue(candidate.textContent));
+  return dedupeTextValues([
+    ...precedingCells.map((candidate) => candidate.textContent),
+    descriptiveSibling?.textContent,
+    row?.querySelector?.('th')?.textContent,
+    row?.previousElementSibling?.textContent,
+    row?.parentElement?.previousElementSibling?.textContent,
+  ]).filter(isMeaningfulLabelValue);
+};
+const collectElementLabelCandidates = (element) => {
+  if (!element) {
+    return [];
+  }
+  const collectSequentialAliases = (target) => {
+    const row = target?.closest?.('tr');
+    if (!row) {
+      return [];
+    }
+    const rowText = normalizeText(row.textContent || '');
+    if (!/(时间|日期|期间|起止|开始|结束|截止|--|——|~|～|至)/.test(rowText)) {
+      return [];
+    }
+    const editableElements = Array.from(
+      row.querySelectorAll('input:not([type="hidden"]):not([type="file"]), textarea, select'),
+    );
+    if (editableElements.length < 2) {
+      return [];
+    }
+    const currentIndex = editableElements.indexOf(target);
+    if (currentIndex < 0) {
+      return [];
+    }
+    const aliases = [];
+    if (currentIndex === 0) {
+      aliases.push('开始', '开始日期', '开始时间', '起始日期', '起始时间');
+    }
+    if (currentIndex === editableElements.length - 1) {
+      aliases.push('结束', '结束日期', '结束时间', '截止日期', '截止时间');
+    }
+    return aliases;
+  };
   const capTitle = element.closest?.('.cap-field, .cap4-checkbox, .cap4-attach, .cap4-textarea, .cap4-input');
   const capFieldTitle = capTitle?.querySelector?.('.field-title, .cap4-attach__left, .cap4-checkbox__left, .cap4-textarea__left, .cap4-input__left');
   const labelNode = element.closest('label')
     || (element.id ? element.ownerDocument.querySelector('label[for="' + element.id + '"]') : null)
     || element.parentElement?.querySelector?.('label')
     || null;
-  return normalizeText(
-    capFieldTitle?.textContent
-    || capTitle?.getAttribute?.('title')
-    || labelNode?.textContent
-    || element.getAttribute?.('aria-label')
-    || element.getAttribute?.('title')
-    || element.getAttribute?.('placeholder')
-    || element.getAttribute?.('name')
-    || element.getAttribute?.('id')
-    || ''
-  );
+  return dedupeTextValues([
+    capFieldTitle?.textContent,
+    capTitle?.getAttribute?.('title'),
+    labelNode?.textContent,
+    element.getAttribute?.('aria-label'),
+    element.getAttribute?.('title'),
+    element.getAttribute?.('placeholder'),
+    ...collectElementTableLabelCandidates(element),
+    ...collectSequentialAliases(element),
+    element.previousElementSibling?.textContent,
+    element.nextElementSibling?.textContent,
+    element.getAttribute?.('name'),
+    element.getAttribute?.('id'),
+  ]);
+};
+const extractElementLabel = (element) => {
+  return collectElementLabelCandidates(element)[0] || '';
 };
 const isFileInputElement = (element) => {
   if (!element) {
@@ -266,6 +385,80 @@ const shouldMatchCaptureRecord = (record, pattern) => {
   return pattern.test(String(record?.action || record?.url || ''))
     || pattern.test(String(record?.rawBody || ''));
 };
+const looksLikeTerminalSubmitRecord = (record) => {
+  const action = String(record?.action || record?.url || '').toLowerCase();
+  const rawBody = String(record?.rawBody || '').toLowerCase();
+  const body = String(action) + '\n' + String(rawBody);
+  if (/checktemplatecanuse|templatesend|notsavedb=true/.test(body)) {
+    return false;
+  }
+  if (/method=send\b|\/send\b|sendcollaboration|handleandsubmit/.test(body)) {
+    return true;
+  }
+  if (/method=savedraft\b|endsavedraft|savewaitsend|waitsend/.test(body)) {
+    return true;
+  }
+  if (record?.type === 'form.submit' && /method=(send|savedraft)\b|\/(send|savedraft)\b/.test(body)) {
+    return true;
+  }
+  return false;
+};
+const shouldCaptureSubmitRecord = (record, preference) => {
+  if (shouldExcludeCaptureRecord(record, preference)) {
+    return false;
+  }
+  const includePatterns = Array.isArray(preference?.includePatterns)
+    ? preference.includePatterns
+    : [];
+  if (includePatterns.length > 0) {
+    return includePatterns.some((pattern) => shouldMatchCaptureRecord(record, pattern));
+  }
+  return looksLikeTerminalSubmitRecord(record);
+};
+const selectPreferredCaptureRecord = (records, preference) => {
+  const recordList = Array.isArray(records) ? records.filter(Boolean) : [];
+  if (recordList.length === 0) {
+    return null;
+  }
+  const included = (preference?.includePatterns || []).length > 0
+    ? recordList.filter((record) => (preference.includePatterns || []).some((pattern) => shouldMatchCaptureRecord(record, pattern)))
+    : [...recordList];
+  const withoutExcluded = included.filter((record) => !shouldExcludeCaptureRecord(record, preference));
+  const candidatePool = withoutExcluded.length > 0 ? withoutExcluded : included;
+  const scored = candidatePool.map((record, index) => {
+    const url = String(record?.action || record?.url || '').toLowerCase();
+    const rawBody = String(record?.rawBody || '').toLowerCase();
+    const body = String(url) + '\n' + String(rawBody);
+    let score = index;
+    if (/method=send\b|\/send\b|sendcollaboration|handleandsubmit/.test(body)) {
+      score += 100;
+    }
+    if (/method=savedraft\b|endsavedraft|savewaitsend|waitsend/.test(body)) {
+      score += 60;
+    }
+    if (/notsavedb=true/.test(body)) {
+      score -= 120;
+    }
+    if (/method=saveorupdate\b/.test(body)) {
+      score -= 20;
+    }
+    if (record?.type === 'form.submit') {
+      score += 40;
+    }
+    return {
+      record,
+      score,
+      index,
+    };
+  });
+  scored.sort((left, right) => {
+    if (right.score !== left.score) {
+      return right.score - left.score;
+    }
+    return right.index - left.index;
+  });
+  return scored[0]?.record || recordList[recordList.length - 1];
+};
 const createStubResponsePayload = (record) => {
   const contentType = normalizeText(record?.headers?.['content-type'] || '').toLowerCase();
   if (contentType.includes('application/json') || /json|ajax/i.test(String(record?.action || ''))) {
@@ -278,6 +471,321 @@ const createStubResponsePayload = (record) => {
     body: '',
     contentType: 'text/plain',
   };
+};
+const snapshotDocumentForms = (documents) => {
+  const snapshots = [];
+  for (const entry of documents) {
+    const doc = entry?.document;
+    const ownerWindow = entry?.window || window;
+    if (!doc) {
+      continue;
+    }
+    const forms = Array.from(doc.forms || []);
+    for (const form of forms) {
+      const snapshot = createSubmitRecord({
+        type: 'form.snapshot',
+        action: form?.getAttribute?.('action') || form?.action || ownerWindow.location?.href || '',
+        method: normalizeText(form?.getAttribute?.('method') || form?.method || 'post').toLowerCase(),
+        body: new ownerWindow.FormData(form),
+        enctype: normalizeText(form?.getAttribute?.('enctype') || form?.enctype || '').toLowerCase(),
+        ownerWindow,
+      });
+      snapshots.push(snapshot);
+    }
+  }
+  return snapshots;
+};
+const selectPreferredFormSnapshot = (records, matched, preference) => {
+  const snapshots = Array.isArray(records) ? records.filter(Boolean) : [];
+  if (snapshots.length === 0) {
+    return null;
+  }
+  if (matched?.action) {
+    const matchedAction = normalizeText(matched.action);
+    const matchedMethod = normalizeText(matched.method || '').toLowerCase();
+    const exactMatches = snapshots.filter((record) =>
+      normalizeText(record?.action) === matchedAction
+      && (!matchedMethod || normalizeText(record?.method || '').toLowerCase() === matchedMethod));
+    if (exactMatches.length > 0) {
+      return exactMatches[exactMatches.length - 1];
+    }
+  }
+  return selectPreferredCaptureRecord(snapshots, preference);
+};
+const collectComparablePayloadValues = (values) => {
+  const results = [];
+  const seen = new Set();
+  const visit = (value) => {
+    if (value === undefined || value === null) {
+      return;
+    }
+    if (Array.isArray(value)) {
+      value.forEach((item) => visit(item));
+      return;
+    }
+    if (typeof value === 'object') {
+      Object.values(value).forEach((item) => visit(item));
+      return;
+    }
+    const normalized = normalizeValue(value);
+    if (!normalized || seen.has(normalized)) {
+      return;
+    }
+    seen.add(normalized);
+    results.push(normalized);
+  };
+  visit(values);
+  return results;
+};
+const measureRecordFieldRichness = (value) => {
+  if (value === undefined || value === null) {
+    return 0;
+  }
+  if (typeof value === 'string') {
+    if (looksLikeJson(value)) {
+      try {
+        return measureRecordFieldRichness(JSON.parse(value));
+      } catch {
+        return normalizeText(value) ? 1 : 0;
+      }
+    }
+    return normalizeText(value) ? 1 : 0;
+  }
+  if (Array.isArray(value)) {
+    return value.reduce((count, item) => count + measureRecordFieldRichness(item), 0);
+  }
+  if (typeof value === 'object') {
+    return Object.values(value).reduce((count, item) => count + measureRecordFieldRichness(item), 0);
+  }
+  return 1;
+};
+const recordContainsComparableValue = (record, value) => {
+  const normalizedValue = normalizeText(value);
+  if (!normalizedValue) {
+    return false;
+  }
+  const contains = (target) => {
+    if (target === undefined || target === null) {
+      return false;
+    }
+    if (typeof target === 'string') {
+      if (looksLikeJson(target)) {
+        try {
+          return contains(JSON.parse(target));
+        } catch {
+          return target.includes(normalizedValue);
+        }
+      }
+      return target.includes(normalizedValue);
+    }
+    if (Array.isArray(target)) {
+      return target.some((item) => contains(item));
+    }
+    if (typeof target === 'object') {
+      return Object.values(target).some((item) => contains(item));
+    }
+    return String(target) === normalizedValue;
+  };
+  return contains(record?.fields) || contains(record?.rawBody);
+};
+const looksLikePayloadCarrierRecord = (record) => {
+  const action = String(record?.action || record?.url || '').toLowerCase();
+  const rawBody = String(record?.rawBody || '').toLowerCase();
+  const body = String(action) + '\n' + String(rawBody);
+  if (/method=saveorupdate\b|saveorupdate/.test(body)) {
+    return true;
+  }
+  if (/_json_params/.test(body) && /(field\d{4}|formmain_|formson_|colmaindata)/i.test(body)) {
+    return true;
+  }
+  const fieldKeys = Object.keys(record?.fields || {});
+  if (fieldKeys.some((key) => /_json_params|field\d{4}|formmain_|formson_|colMainData/i.test(String(key)))) {
+    return true;
+  }
+  return measureRecordFieldRichness(record?.fields) >= 6;
+};
+const selectPreferredPayloadRecord = (records, comparableValues, matched) => {
+  const recordList = Array.isArray(records) ? records.filter(Boolean) : [];
+  if (recordList.length === 0) {
+    return null;
+  }
+  const filtered = recordList.filter((record) => looksLikePayloadCarrierRecord(record));
+  const candidatePool = filtered.length > 0 ? filtered : recordList;
+  const scored = candidatePool.map((record, index) => {
+    const action = String(record?.action || record?.url || '').toLowerCase();
+    const rawBody = String(record?.rawBody || '').toLowerCase();
+    const body = String(action) + '\n' + String(rawBody);
+    const coverageScore = collectComparablePayloadValues(comparableValues)
+      .reduce((count, value) => count + (recordContainsComparableValue(record, value) ? 1 : 0), 0);
+    let score = coverageScore * 1000;
+    score += measureRecordFieldRichness(record?.fields);
+    score += Math.min(60, Math.floor(String(record?.rawBody || '').length / 64));
+    if (/notsavedb=true/.test(body)) {
+      score += 120;
+    }
+    if (/method=saveorupdate\b|saveorupdate/.test(body)) {
+      score += 80;
+    }
+    if (matched?.origin && matched.origin === record?.origin) {
+      score += 5;
+    }
+    return {
+      record,
+      score,
+      index,
+    };
+  });
+  scored.sort((left, right) => {
+    if (right.score !== left.score) {
+      return right.score - left.score;
+    }
+    return right.index - left.index;
+  });
+  return scored[0]?.record || null;
+};
+const isHiddenFieldElement = (element) => {
+  if (!element) {
+    return false;
+  }
+  const inputType = normalizeText(element.getAttribute?.('type') || element.type || '').toLowerCase();
+  return inputType === 'hidden';
+};
+const isActionInputElement = (element) => {
+  if (!element) {
+    return false;
+  }
+  const inputType = normalizeText(element.getAttribute?.('type') || element.type || '').toLowerCase();
+  return /^(button|submit|reset|image)$/.test(inputType);
+};
+const collectRowEditableElements = (element, options = {}) => {
+  const row = element?.closest?.('tr');
+  if (!row) {
+    return [];
+  }
+  const allowFileInput = options.allowFileInput !== false;
+  return Array.from(row.querySelectorAll('input, textarea, select')).filter((candidate) => {
+    if (isHiddenFieldElement(candidate) || isActionInputElement(candidate)) {
+      return false;
+    }
+    if (!allowFileInput && isFileInputElement(candidate)) {
+      return false;
+    }
+    return true;
+  });
+};
+const calculateLabelMatchScore = (aliases, expectedLabel) => {
+  const expectedKey = normalizeLabelKey(expectedLabel);
+  if (!expectedKey) {
+    return 0;
+  }
+  let bestScore = 0;
+  for (const alias of Array.isArray(aliases) ? aliases : [aliases]) {
+    const aliasKey = normalizeLabelKey(alias);
+    if (!aliasKey) {
+      continue;
+    }
+    if (aliasKey === expectedKey) {
+      bestScore = Math.max(bestScore, 120);
+      continue;
+    }
+    if (aliasKey.includes(expectedKey) || expectedKey.includes(aliasKey)) {
+      bestScore = Math.max(bestScore, Math.max(70, 100 - Math.abs(aliasKey.length - expectedKey.length)));
+    }
+  }
+  return bestScore;
+};
+const inferRangeFieldIndex = (input) => {
+  const raw = normalizeText([
+    input?.label,
+    input?.text,
+    input?.placeholder,
+    input?.fieldKey,
+    input?.fieldType,
+  ].filter(Boolean).join(' ')).toLowerCase();
+  const compact = normalizeLabelKey(raw);
+  const isStart = /(开始|起始|start|begin|from)/.test(compact) || /\b(start|begin|from)\b/.test(raw);
+  const isEnd = /(结束|截止|截至|终止|到期|end|until|expiry|expire)/.test(compact) || /\b(end|until|expiry|expire)\b/.test(raw);
+  if (isStart && !isEnd) {
+    return 0;
+  }
+  if (isEnd) {
+    return 1;
+  }
+  return null;
+};
+const looksLikeRangeFieldTarget = (input) => {
+  const raw = normalizeText([
+    input?.label,
+    input?.text,
+    input?.placeholder,
+    input?.fieldKey,
+    input?.fieldType,
+  ].filter(Boolean).join(' ')).toLowerCase();
+  const compact = normalizeLabelKey(raw);
+  const normalizedFieldType = normalizeText(input?.fieldType || '').toLowerCase();
+  return /date|time|datetime/.test(normalizedFieldType)
+    || /(日期|时间|时段|期限|区间|起止|有效期)/.test(compact)
+    || /\b(date|time|datetime|range|period|duration)\b/.test(raw);
+};
+const rowLooksRangeLike = (element) => {
+  const row = element?.closest?.('tr');
+  if (!row) {
+    return false;
+  }
+  const rowText = normalizeText(row.textContent || '');
+  const rowAliases = collectElementTableLabelCandidates(element);
+  const rowCompact = normalizeLabelKey([
+    rowText,
+    ...rowAliases,
+  ].join(' '));
+  return /--|——|~|～|至/.test(rowText)
+    || /(日期|时间|时段|期限|区间|起止|有效期)/.test(rowCompact)
+    || /\b(date|time|datetime|range|period|duration)\b/.test(rowText.toLowerCase());
+};
+const scoreRangeFieldMatch = (element, target, options = {}) => {
+  if (!element?.matches?.('input, textarea, select')) {
+    return 0;
+  }
+  const desiredIndex = inferRangeFieldIndex({
+    ...target,
+    fieldType: options.fieldType,
+    fieldKey: options.fieldKey,
+  });
+  if (desiredIndex === null) {
+    return 0;
+  }
+  const rowEditableElements = collectRowEditableElements(element, options);
+  if (rowEditableElements.length < 2) {
+    return 0;
+  }
+  const actualIndex = rowEditableElements.findIndex((candidate) => candidate === element);
+  if (actualIndex < 0) {
+    return 0;
+  }
+  const targetLooksRangeLike = looksLikeRangeFieldTarget({
+    ...target,
+    fieldType: options.fieldType,
+    fieldKey: options.fieldKey,
+  });
+  const rowMatchesRange = rowLooksRangeLike(element);
+  if (!targetLooksRangeLike && !rowMatchesRange) {
+    return 0;
+  }
+  const matchedIndex = desiredIndex === 0 ? 0 : rowEditableElements.length - 1;
+  if (actualIndex !== matchedIndex) {
+    return 0;
+  }
+  let score = 45;
+  if (targetLooksRangeLike) {
+    score += 15;
+  }
+  if (rowMatchesRange) {
+    score += 15;
+  }
+  if (rowEditableElements.length === 2) {
+    score += 10;
+  }
+  return score;
 };
 const resolveNamedElement = (documents, target, options = {}) => {
   if (!Array.isArray(documents) || !target || typeof target !== 'object') {
@@ -325,23 +833,51 @@ const resolveNamedElement = (documents, target, options = {}) => {
   if (!expectedLabel) {
     return null;
   }
+  const rankedCandidates = [];
+  let domOrder = 0;
   for (const entry of documents) {
     const doc = entry.document;
     const selector = expectAttachmentComponent
       ? '.cap4-attach, .cap4-attach__cnt, .cap4-attach__picker, [class*="cap4-attach"]'
       : 'input, textarea, select, .cap-field, .cap4-checkbox, .cap4-textarea, .cap4-input';
-    const field = Array.from(doc.querySelectorAll(selector)).find((element) => {
+    Array.from(doc.querySelectorAll(selector)).forEach((element) => {
+      const candidateOrder = domOrder;
+      domOrder += 1;
       if (!allowFileInput && isFileInputElement(element)) {
-        return false;
+        return;
       }
       if (expectAttachmentComponent && !isCapAttachmentElement(element)) {
-        return false;
+        return;
       }
-      return extractElementLabel(element).includes(expectedLabel);
+      if (isHiddenFieldElement(element) || isActionInputElement(element)) {
+        return;
+      }
+      const directScore = calculateLabelMatchScore(collectElementLabelCandidates(element), expectedLabel);
+      const rangeScore = directScore > 0 ? 0 : scoreRangeFieldMatch(resolveEditableTarget(element), target, {
+        ...options,
+        allowFileInput,
+      });
+      const score = Math.max(directScore, rangeScore);
+      if (score <= 0) {
+        return;
+      }
+      rankedCandidates.push({
+        element,
+        document: doc,
+        window: entry.window,
+        score: score + (element.matches?.('input, textarea, select') ? 2 : 0),
+        order: candidateOrder,
+      });
     });
-    if (field) {
-      return { element: field, document: doc, window: entry.window };
+  }
+  rankedCandidates.sort((left, right) => {
+    if (right.score !== left.score) {
+      return right.score - left.score;
     }
+    return left.order - right.order;
+  });
+  if (rankedCandidates[0]) {
+    return rankedCandidates[0];
   }
   if (expectAttachmentComponent) {
     return null;
@@ -368,6 +904,7 @@ const resolveNamedElement = (documents, target, options = {}) => {
         input.id ? doc.querySelector('label[for="' + input.id + '"]')?.textContent : '',
         input.parentElement?.textContent,
         input.closest('[class*="upload"], [class*="attach"], [id*="upload"], [id*="attach"]')?.textContent,
+        ...collectElementTableLabelCandidates(input),
         input.previousElementSibling?.textContent,
         input.nextElementSibling?.textContent,
       ].filter(Boolean).join(' '));
@@ -491,7 +1028,7 @@ const collectElementAliases = (element) => {
     normalizeText(element.nextElementSibling?.textContent),
     normalizeText(element.previousElementSibling?.textContent),
     normalizeText(componentRoot?.textContent),
-    extractElementLabel(element),
+    ...collectElementLabelCandidates(element),
   ].filter(Boolean)));
 };
 const resolveChoiceGroup = (target, inputType) => {
@@ -779,8 +1316,8 @@ const resolveTriggerElement = (trigger, rootDocuments, frameDocuments) => {
   }
   return null;
 };
-const ensureCaptureStore = (windows, actionPattern) => {
-  const pattern = actionPattern ? new RegExp(String(actionPattern), 'i') : null;
+const ensureCaptureStore = (windows, captureOptions) => {
+  const preference = buildCapturePreference(captureOptions);
   const store = window.__uniflowSubmitCaptureStore || {
     events: [],
     matches: [],
@@ -799,7 +1336,7 @@ const ensureCaptureStore = (windows, actionPattern) => {
     const originalSetRequestHeader = currentWindow.XMLHttpRequest?.prototype?.setRequestHeader;
     const recordRequest = (record) => {
       store.events.push(record);
-      if (shouldMatchCaptureRecord(record, pattern)) {
+      if (shouldCaptureSubmitRecord(record, preference)) {
         store.matches.push(record);
         return true;
       }
@@ -967,26 +1504,56 @@ const originKey = output.originKey || 'submitOrigin';
 const attachmentFieldMapKey = output.attachmentFieldMapKey || 'attachmentFieldMap';
 const headersKey = output.headersKey || 'submitRequestHeaders';
 const rawBodyKey = output.rawBodyKey || 'submitRawBody';
+const formSnapshotKey = output.formSnapshotKey || 'submitFormSnapshot';
+const payloadCaptureKey = output.payloadCaptureKey || 'submitPayloadCapture';
 const rootDocuments = getAccessibleDocuments().filter((entry) => entry.document === document);
 const frameDocuments = resolveDocuments(options.frame);
 const allWindows = getAccessibleWindows();
-const captureStore = ensureCaptureStore(allWindows, options.capture?.actionPattern);
+const captureStore = ensureCaptureStore(allWindows, options.capture);
+const previousEventCount = captureStore.events.length;
 const previousMatchCount = captureStore.matches.length;
 const fieldMappings = Array.isArray(options.fieldMappings) ? options.fieldMappings : [];
 const fileMappings = Array.isArray(options.fileMappings) ? options.fileMappings : [];
 const filledFields = {};
-  const attachmentFieldMap = {};
+const attachmentFieldMap = {};
+const claimedElements = new WeakSet();
+const resolvedComparableValues = [];
 
 for (const mapping of fieldMappings) {
-  const targetMatch = resolveNamedElement(
+  let targetMatch = null;
+  const candidateDocumentSets = [
     frameDocuments.length > 0 ? frameDocuments : rootDocuments,
-    mapping?.target,
-    { allowFileInput: false },
-  );
+    rootDocuments,
+    [...frameDocuments, ...rootDocuments].filter(Boolean),
+  ];
+  for (const candidateDocuments of candidateDocumentSets) {
+    targetMatch = resolveNamedElement(
+      candidateDocuments,
+      mapping?.target,
+      {
+        allowFileInput: false,
+        fieldType: mapping?.fieldType,
+        fieldKey: mapping?.fieldKey,
+      },
+    );
+    const candidateElement = targetMatch?.element;
+    if (!candidateElement) {
+      continue;
+    }
+    const claimedTarget = resolveEditableTarget(candidateElement) || candidateElement;
+    if (claimedElements.has(claimedTarget)) {
+      targetMatch = null;
+      continue;
+    }
+    break;
+  }
   const target = targetMatch?.element;
   const targetKey = mapping?.target?.id || mapping?.target?.name || mapping?.target?.label || mapping?.target?.selector || mapping?.fieldKey || 'unknown';
   const fieldKey = normalizeText(mapping?.fieldKey || '');
   const resolvedValue = resolveSourceValue(mapping);
+  if (resolvedValue !== undefined && resolvedValue !== null) {
+    resolvedComparableValues.push(resolvedValue);
+  }
   if (fieldKey && filledFields[fieldKey] === undefined) {
     filledFields[fieldKey] = false;
   }
@@ -996,6 +1563,9 @@ for (const mapping of fieldMappings) {
   }
   const filled = await fillMappedField(target, resolvedValue, mapping);
   filledFields[targetKey] = filled;
+  if (filled) {
+    claimedElements.add(resolveEditableTarget(target) || target);
+  }
   if (fieldKey) {
     filledFields[fieldKey] = Boolean(filledFields[fieldKey]) || filled;
   }
@@ -1046,7 +1616,34 @@ while (captureStore.matches.length <= previousMatchCount) {
   await wait(250);
 }
 
-const matched = captureStore.matches[captureStore.matches.length - 1];
+const settleTimeMs = Math.max(0, Number(options.capture?.settleTimeMs || 800));
+let lastMatchCount = captureStore.matches.length;
+let lastChangedAt = Date.now();
+while (Date.now() - lastChangedAt < settleTimeMs) {
+  if (Date.now() - startedAt > timeoutMs) {
+    break;
+  }
+  await wait(100);
+  if (captureStore.matches.length !== lastMatchCount) {
+    lastMatchCount = captureStore.matches.length;
+    lastChangedAt = Date.now();
+  }
+}
+
+const currentEvents = captureStore.events.slice(previousEventCount);
+const currentMatches = captureStore.matches.slice(previousMatchCount);
+const capturePreference = buildCapturePreference(options.capture);
+const matched = selectPreferredCaptureRecord(currentMatches, capturePreference)
+  || captureStore.matches[captureStore.matches.length - 1];
+const formSnapshots = snapshotDocumentForms(frameDocuments.length > 0
+  ? [...frameDocuments, ...rootDocuments].filter(Boolean)
+  : rootDocuments);
+const matchedFormSnapshot = selectPreferredFormSnapshot(formSnapshots, matched, capturePreference);
+const payloadCandidate = selectPreferredPayloadRecord(
+  [...currentEvents, ...formSnapshots],
+  resolvedComparableValues,
+  matched,
+);
 return {
   [csrfKey]: matched?.fields?.CSRFTOKEN ?? '',
   [captureKey]: matched,
@@ -1058,6 +1655,8 @@ return {
   [attachmentFieldMapKey]: attachmentFieldMap,
   [headersKey]: matched?.headers || {},
   [rawBodyKey]: matched?.rawBody || '',
+  [formSnapshotKey]: matchedFormSnapshot,
+  [payloadCaptureKey]: payloadCandidate,
 };
 `.trim();
 

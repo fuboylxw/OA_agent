@@ -376,7 +376,7 @@ describe('ProcessLibraryService', () => {
         }),
         schema: expect.objectContaining({
           fields: expect.arrayContaining([
-            expect.objectContaining({ label: '文件类型、名称及份数' }),
+            expect.objectContaining({ label: '文件类型、名称及份数', type: 'text' }),
             expect.objectContaining({ label: '用印附件', type: 'file' }),
           ]),
         }),

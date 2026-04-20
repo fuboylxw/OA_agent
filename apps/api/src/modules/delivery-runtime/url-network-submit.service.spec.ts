@@ -219,6 +219,181 @@ describe('UrlNetworkSubmitService', () => {
     });
   });
 
+  it('resolves single-source body templates directly from preflight values', async () => {
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      data: {
+        success: true,
+      },
+    });
+    mockedAxios.create.mockReturnValue({
+      request,
+    } as any);
+
+    const service = new UrlNetworkSubmitService({
+      run: jest.fn().mockResolvedValue({
+        success: true,
+        extractedValues: {
+          submitFields: {
+            field_1: '出差',
+            field_2: '2026-04-21',
+          },
+        },
+      }),
+    } as any);
+
+    await service.execute({
+      action: 'submit',
+      connectorId: 'connector-1',
+      processCode: 'leave_apply',
+      processName: '请假申请',
+      payload: {
+        formData: {
+          field_1: '出差',
+          field_2: '2026-04-21',
+        },
+      },
+      context: {
+        path: 'url',
+        action: 'submit',
+        authConfig: {
+          sessionCookie: 'SESSION=abc123',
+        },
+        ticket: {
+          jumpUrl: 'https://oa.example.com/form/leave',
+        },
+        runtime: {
+          preflight: {
+            steps: [
+              { type: 'evaluate', builtin: 'capture_form_submit' },
+            ],
+          },
+          networkSubmit: {
+            url: 'https://oa.example.com/api/leave/submit',
+            method: 'POST',
+            bodyMode: 'form',
+            successMode: 'http2xx',
+            body: {
+              source: 'preflight.submitFields',
+            },
+          },
+        },
+        navigation: {},
+        rpaFlow: {
+          processCode: 'leave_apply',
+          processName: '请假申请',
+          rpaDefinition: {
+            processCode: 'leave_apply',
+            processName: '请假申请',
+          },
+        },
+      } as any,
+    });
+
+    const data = String(request.mock.calls[0][0].data);
+    expect(decodeURIComponent(data.replace(/\+/g, '%20'))).toContain('field_1=出差');
+    expect(decodeURIComponent(data.replace(/\+/g, '%20'))).toContain('field_2=2026-04-21');
+  });
+
+  it('prefers richer preflight payload fields when submitCapture points at a shallow autosave request', async () => {
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      data: {
+        success: true,
+      },
+    });
+    mockedAxios.create.mockReturnValue({
+      request,
+    } as any);
+
+    const service = new UrlNetworkSubmitService({
+      run: jest.fn().mockResolvedValue({
+        success: true,
+        extractedValues: {
+          submitCapture: {
+            action: 'https://oa.example.com/form/leave/saveDraft',
+            method: 'post',
+            bodyMode: 'form',
+            fields: {
+              _json_params: JSON.stringify({
+                colMainData: {
+                  subject: '请假申请',
+                },
+              }),
+            },
+            rawBody: '_json_params=%7B%22colMainData%22%3A%7B%22subject%22%3A%22%E8%AF%B7%E5%81%87%E7%94%B3%E8%AF%B7%22%7D%7D',
+          },
+          submitFields: {
+            _json_params: JSON.stringify({
+              colMainData: {
+                subject: '请假申请',
+              },
+              formmain_0187: {
+                field0004: '出差',
+                field0005: '2026-04-21',
+                field0006: '2026-04-23',
+              },
+            }),
+          },
+        },
+      }),
+    } as any);
+
+    await service.execute({
+      action: 'submit',
+      connectorId: 'connector-1',
+      processCode: 'leave_apply',
+      processName: '请假申请',
+      payload: {
+        formData: {
+          reason: '出差',
+          startDate: '2026-04-21',
+          endDate: '2026-04-23',
+        },
+      },
+      context: {
+        path: 'url',
+        action: 'submit',
+        authConfig: {
+          sessionCookie: 'SESSION=abc123',
+        },
+        ticket: {
+          jumpUrl: 'https://oa.example.com/form/leave/new',
+        },
+        runtime: {
+          preflight: {
+            steps: [
+              { type: 'evaluate', builtin: 'capture_form_submit' },
+            ],
+          },
+          networkSubmit: {
+            url: '{{preflight.submitCapture.action}}',
+            method: '{{preflight.submitCapture.method}}',
+            bodyMode: '{{preflight.submitCapture.bodyMode}}',
+            successMode: 'http2xx',
+            body: {
+              source: 'preflight.submitFields',
+            },
+          },
+        },
+        navigation: {},
+        rpaFlow: {
+          processCode: 'leave_apply',
+          processName: '请假申请',
+          rpaDefinition: {
+            processCode: 'leave_apply',
+            processName: '请假申请',
+          },
+        },
+      } as any,
+    });
+
+    const data = decodeURIComponent(String(request.mock.calls[0][0].data).replace(/\+/g, '%20'));
+    expect(data).toContain('"field0004":"出差"');
+    expect(data).toContain('"field0005":"2026-04-21"');
+    expect(data).toContain('"field0006":"2026-04-23"');
+  });
+
   it('derives Cookie header from storageState when no sessionCookie is set', async () => {
     const request = jest.fn().mockResolvedValue({
       status: 200,
@@ -493,6 +668,83 @@ describe('UrlNetworkSubmitService', () => {
       success: true,
     });
     expect(result.summary).toBe('请假申请 draft saved through URL network runtime');
+  });
+
+  it('does not treat non-persisting draft-style requests as successful business saves', async () => {
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      data: {
+        success: 'true',
+      },
+    });
+    mockedAxios.create.mockReturnValue({
+      request,
+    } as any);
+
+    const service = new UrlNetworkSubmitService({
+      run: jest.fn().mockResolvedValue({
+        success: true,
+        extractedValues: {
+          submitCapture: {
+            action: 'https://oa2023.xpu.edu.cn/seeyon/content/content.do?method=saveOrUpdate&onlyGenerateSn=false&notSaveDB=true',
+            method: 'post',
+            bodyMode: 'form',
+            fields: {
+              _json_params: '{"demo":true}',
+            },
+          },
+        },
+      }),
+    } as any);
+
+    const result = await service.execute({
+      action: 'submit',
+      connectorId: 'connector-1',
+      processCode: 'leave_request',
+      processName: '请假申请',
+      payload: {
+        formData: {},
+      },
+      context: {
+        path: 'url',
+        action: 'submit',
+        authConfig: {
+          sessionCookie: 'JSESSIONID=oa-session',
+        },
+        ticket: {
+          jumpUrl: 'https://oa2023.xpu.edu.cn/seeyon/collaboration/collaboration.do?method=newColl',
+        },
+        runtime: {
+          preflight: {
+            steps: [
+              { type: 'evaluate', builtin: 'capture_form_submit' },
+            ],
+          },
+          networkSubmit: {
+            url: '{{preflight.submitCapture.action}}',
+            method: '{{preflight.submitCapture.method}}',
+            bodyMode: '{{preflight.submitCapture.bodyMode}}',
+            successMode: 'http2xx',
+            completionKind: 'draft',
+            body: { source: 'preflight.submitCapture.fields' },
+          },
+        },
+        navigation: {},
+        rpaFlow: {
+          processCode: 'leave_request',
+          processName: '请假申请',
+          rpaDefinition: {
+            processCode: 'leave_request',
+            processName: '请假申请',
+          },
+        },
+      } as any,
+    });
+
+    expect(result.submitResult).toMatchObject({
+      success: false,
+    });
+    expect(result.submitResult?.errorMessage).toContain('URL network submit failed');
   });
 
   it('patches captured form payloads from field-level request mappings before URL submit', async () => {
@@ -784,6 +1036,126 @@ describe('UrlNetworkSubmitService', () => {
 
     const data = String(request.mock.calls[0][0].data);
     expect(decodeURIComponent(data.replace(/\+/g, '%20'))).toContain('"field0050":"合同文本 2份"');
+  });
+
+  it('infers body patch paths from capture mappings when legacy field definitions do not include target ids', async () => {
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      data: {
+        success: true,
+      },
+    });
+    mockedAxios.create.mockReturnValue({
+      request,
+    } as any);
+
+    const service = new UrlNetworkSubmitService({
+      run: jest.fn().mockResolvedValue({
+        success: true,
+        extractedValues: {
+          submitCapture: {
+            action: 'https://oa.example.com/form/leave/saveDraft',
+            method: 'post',
+            bodyMode: 'form',
+            fields: {
+              _json_params: JSON.stringify({
+                workflow_definition: {},
+                formmain_0187: {
+                  field0005: '',
+                  field0006: '',
+                },
+              }),
+            },
+          },
+          filledFields: {
+            '开始日期': true,
+            '结束日期': true,
+          },
+        },
+      }),
+    } as any);
+
+    await service.execute({
+      action: 'submit',
+      connectorId: 'connector-1',
+      processCode: 'leave_apply',
+      processName: '请假申请',
+      payload: {
+        formData: {
+          field_2: '2026-04-21',
+          field_3: '2026-04-23',
+        },
+      },
+      context: {
+        path: 'url',
+        action: 'submit',
+        authConfig: {
+          cookie: 'SESSION=abc123',
+        },
+        ticket: {
+          jumpUrl: 'https://oa.example.com/form/leave/new',
+        },
+        runtime: {
+          preflight: {
+            steps: [
+              {
+                type: 'evaluate',
+                builtin: 'capture_form_submit',
+                options: {
+                  fieldMappings: [
+                    {
+                      fieldKey: 'field_2',
+                      fieldType: 'date',
+                      target: { id: 'field0005', label: '开始日期' },
+                    },
+                    {
+                      fieldKey: 'field_3',
+                      fieldType: 'date',
+                      target: { id: 'field0006', label: '结束日期' },
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          networkSubmit: {
+            url: '{{preflight.submitCapture.action}}',
+            method: '{{preflight.submitCapture.method}}',
+            bodyMode: '{{preflight.submitCapture.bodyMode}}',
+            successMode: 'http2xx',
+            completionKind: 'draft',
+            body: { source: 'preflight.submitCapture.fields' },
+          },
+        },
+        navigation: {},
+        rpaFlow: {
+          processCode: 'leave_apply',
+          processName: '请假申请',
+          rpaDefinition: {
+            processCode: 'leave_apply',
+            processName: '请假申请',
+            fields: [
+              {
+                key: 'field_2',
+                label: '开始日期',
+                type: 'date',
+                required: true,
+              },
+              {
+                key: 'field_3',
+                label: '结束日期',
+                type: 'date',
+                required: true,
+              },
+            ],
+          },
+        },
+      } as any,
+    });
+
+    const data = decodeURIComponent(String(request.mock.calls[0][0].data).replace(/\+/g, '%20'));
+    expect(data).toContain('"field0005":"2026-04-21"');
+    expect(data).toContain('"field0006":"2026-04-23"');
   });
 
   it('infers CAP4 checkbox request patches from capture_form_submit field mappings', async () => {

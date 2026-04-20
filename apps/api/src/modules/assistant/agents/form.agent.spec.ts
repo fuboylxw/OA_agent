@@ -244,7 +244,7 @@ describe('FormAgent', () => {
     expect(leaveTypeField?.question).not.toContain('leave_type');
   });
 
-  it('appends field description and example to user-facing questions and supports multi-file hints', async () => {
+  it('keeps field description and example in metadata only while keeping file upload questions concise', async () => {
     (agent as any).llmClient = {
       chat: jest.fn().mockRejectedValue(new Error('llm unavailable')),
     };
@@ -272,10 +272,46 @@ describe('FormAgent', () => {
       example: '盖章申请表.pdf',
       multiple: true,
     });
-    expect(result.missingFields[0].question).toContain('还需要上传用印附件');
-    expect(result.missingFields[0].question).toContain('支持上传多份文件');
-    expect(result.missingFields[0].question).toContain('说明：请上传需要盖章的完整材料');
-    expect(result.missingFields[0].question).toContain('示例：盖章申请表.pdf');
+    expect(result.missingFields[0].question).toBe('还需要上传用印附件。');
+    expect(result.missingFields[0].question).not.toContain('说明：');
+    expect(result.missingFields[0].question).not.toContain('示例：');
+  });
+
+  it('sanitizes structured labels for upload fields while keeping selectable fields options visible', async () => {
+    (agent as any).llmClient = {
+      chat: jest.fn().mockRejectedValue(new Error('llm unavailable')),
+    };
+
+    const schema = {
+      fields: [
+        {
+          key: 'seal_attachment',
+          label: '用印附件 | 说明: 上传需要盖章的文件 | 示例: 劳务合同.pdf | 上传要求: 支持上传多份，未上传视为信息缺失 | 可多选',
+          type: 'file',
+          required: true,
+          multiple: true,
+        },
+        {
+          key: 'seal_type',
+          label: '印章类型',
+          type: 'select',
+          required: true,
+          options: ['党委公章', '学校公章', '书记签名章'],
+        },
+      ],
+    };
+
+    const result = await agent.extractFields('expense_submit', schema, '我要申请用印');
+    const attachmentField = result.missingFields.find((field) => field.key === 'seal_attachment');
+    const sealTypeField = result.missingFields.find((field) => field.key === 'seal_type');
+
+    expect(attachmentField).toMatchObject({
+      label: '用印附件',
+      question: '还需要上传用印附件。',
+    });
+    expect(attachmentField?.question).not.toContain('说明');
+    expect(attachmentField?.question).not.toContain('示例');
+    expect(sealTypeField?.question).toContain('可选项有：党委公章、学校公章、书记签名章');
   });
 
   it('normalizes multi-select values when the field is marked multiple even if the type is select', async () => {

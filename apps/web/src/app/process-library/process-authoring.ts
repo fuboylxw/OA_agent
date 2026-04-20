@@ -1,5 +1,11 @@
 export type ProcessAuthoringAccessMode = 'rpa' | 'url' | 'api';
 export type ProcessAuthoringInputMode = 'manual' | 'file';
+export type ProcessAuthoringDraft = {
+  connectorId?: string;
+  processCode?: string;
+  processName?: string;
+  textTemplateContent?: string;
+};
 
 export const PROCESS_ACCESS_MODE_META: Record<ProcessAuthoringAccessMode, {
   label: string;
@@ -114,6 +120,32 @@ export const PROCESS_TEXT_TEMPLATE_PLACEHOLDERS: Record<ProcessAuthoringAccessMo
     '- 合同附件 | 说明: 上传合同扫描件或正文文件 | 示例: 合同正文.pdf | 多份',
   ].join('\n'),
 };
+
+export function getProcessAuthoringValidationMessage(input: ProcessAuthoringDraft) {
+  const missing: string[] = [];
+
+  if (!String(input.connectorId || '').trim()) {
+    missing.push('所属连接器');
+  }
+
+  if (!String(input.processCode || '').trim()) {
+    missing.push('流程编码');
+  }
+
+  if (!String(input.processName || '').trim()) {
+    missing.push('流程名称');
+  }
+
+  if (!String(input.textTemplateContent || '').trim()) {
+    missing.push('流程模板内容');
+  }
+
+  if (missing.length === 0) {
+    return '';
+  }
+
+  return `还缺少：${missing.join('、')}。`;
+}
 
 function isDirectLinkDefinition(definition: Record<string, any> | null | undefined) {
   if (!definition || typeof definition !== 'object') {

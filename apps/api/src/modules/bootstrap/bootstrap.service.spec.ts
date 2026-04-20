@@ -607,6 +607,80 @@ describe('BootstrapService', () => {
       });
     });
 
+    it('prefers deterministic structured parsing for templated guides instead of llm guesses', async () => {
+      const mockJob = {
+        id: 'guide-job-structured-id',
+        tenantId: 'default-tenant',
+        status: 'CREATED',
+      };
+
+      mockTextGuideLlmParserService.parse.mockResolvedValue({
+        platformConfig: {},
+        sharedSteps: [],
+        flows: [
+          {
+            processName: '错误流程',
+            fields: [
+              {
+                label: '说明',
+                type: 'text',
+              },
+            ],
+            steps: [
+              '点击 提交',
+            ],
+          },
+        ],
+      });
+
+      jest.spyOn(prisma.bootstrapJob, 'create').mockResolvedValue(mockJob as any);
+      jest.spyOn(prisma.bootstrapJob, 'findUnique').mockResolvedValue({
+        ...mockJob,
+        queueJobId: 'queue-job-id',
+      } as any);
+
+      await service.createJob({
+        tenantId: 'default-tenant',
+        accessMode: 'text_guide',
+        name: '用印申请',
+        oaUrl: 'https://portal.example.com',
+        identityScope: 'both',
+        rpaFlowContent: [
+          '# 系统基本信息',
+          '系统网址: https://portal.example.com',
+          '## 流程: 用印申请',
+          '用户办理时需要补充的信息:',
+          '- 文件类型、名称及份数 | 必填 | 说明: 填写需要用印的文件类型、名称和份数 | 示例: 劳务合同 2份',
+          '- 用印附件 | 必填 | 说明: 上传用印附件 | 示例: 用印材料.pdf | 上传要求: 支持上传多份',
+          '办理步骤:',
+          '- 填写 文件类型、名称及份数',
+          '- 上传 用印附件',
+          '- 点击 保存待发',
+        ].join('\n'),
+      });
+
+      const createdSource = (prisma.bootstrapSource.create as jest.Mock).mock.calls.find(
+        ([call]) => call.data?.sourceType === 'manual_rpa',
+      )?.[0];
+      const generatedFlow = JSON.parse(createdSource.data.sourceContent);
+      const flow = generatedFlow.flows[0];
+      const fillField = flow.fields.find((field: any) => field.label === '文件类型、名称及份数');
+      const uploadField = flow.fields.find((field: any) => field.label === '用印附件');
+
+      expect(fillField).toEqual(expect.objectContaining({
+        label: '文件类型、名称及份数',
+        type: 'text',
+        description: '填写需要用印的文件类型、名称和份数',
+        example: '劳务合同 2份',
+      }));
+      expect(uploadField).toEqual(expect.objectContaining({
+        label: '用印附件',
+        type: 'file',
+        multiple: true,
+      }));
+      expect(flow.fields.some((field: any) => field.label === '说明')).toBe(false);
+    });
+
     it('accepts a multi-flow text-guide document and generates multiple flows with shared steps', async () => {
       const mockJob = {
         id: 'multi-guide-job-id',
@@ -1048,6 +1122,52 @@ describe('BootstrapService', () => {
           }),
         },
       }));
+    });
+
+    it('keeps fill-only fields containing 文件 in text mode when the step is 填写', async () => {
+      const mockJob = {
+        id: 'fill-file-word-job-id',
+        tenantId: 'default-tenant',
+        status: 'CREATED',
+      };
+
+      jest.spyOn(prisma.bootstrapJob, 'create').mockResolvedValue(mockJob as any);
+      jest.spyOn(prisma.bootstrapJob, 'findUnique').mockResolvedValue({
+        ...mockJob,
+        queueJobId: 'queue-job-id',
+      } as any);
+
+      await service.createJob({
+        tenantId: 'default-tenant',
+        accessMode: 'text_guide',
+        name: '用印申请',
+        oaUrl: 'https://portal.example.com',
+        identityScope: 'teacher',
+        rpaFlowContent: [
+          '## 流程: 用印申请',
+          '用户办理时需要补充的信息:',
+          '- 文件类型、名称及份数 | 说明: 填写文本信息 | 示例: 劳务合同 2份',
+          '办理步骤:',
+          '- 填写 文件类型、名称及份数',
+          '- 点击 保存待发',
+        ].join('\n'),
+      });
+
+      const createdSource = (prisma.bootstrapSource.create as jest.Mock).mock.calls.find(
+        ([call]) => call.data?.sourceType === 'manual_rpa',
+      )?.[0];
+      const generatedFlow = JSON.parse(createdSource.data.sourceContent);
+      const flow = generatedFlow.flows[0];
+      const fillField = flow.fields.find((field: any) => field.label === '文件类型、名称及份数');
+
+      expect(fillField).toEqual(expect.objectContaining({
+        type: 'text',
+      }));
+      expect(flow.actions.submit.steps).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'input', fieldKey: fillField.key }),
+        ]),
+      );
     });
   });
 
