@@ -1,6 +1,9 @@
 import {
   API_DELIVERY_PATH,
   DELIVERY_PATHS,
+  getProcessRuntimeDefinition,
+  getProcessRuntimeEndpoints,
+  getProcessRuntimePaths,
   isDeliveryPath,
   type DeliveryPath,
   type RpaFlowDefinition,
@@ -20,12 +23,12 @@ export function resolveAvailablePaths(
     return ordered.filter((path) => isPathEnabled(explicit[path], action));
   }
 
-  const executionModes = (uiHints.executionModes as Record<string, any> | undefined) || {};
-  const rpaDefinition = uiHints.rpaDefinition as RpaFlowDefinition | undefined;
+  const runtimePaths = getProcessRuntimePaths(uiHints, action);
+  const rpaDefinition = getProcessRuntimeDefinition(uiHints) as RpaFlowDefinition | undefined;
   const runtime = rpaDefinition?.runtime;
-  const endpoints = Array.isArray(uiHints.endpoints) ? uiHints.endpoints : [];
+  const endpoints = getProcessRuntimeEndpoints(uiHints);
   const directLink = isDirectLinkDefinition(rpaDefinition);
-  const hasApi = includesMode(executionModes[action], 'api')
+  const hasApi = runtimePaths.includes(API_DELIVERY_PATH)
     || endpoints.some((endpoint) =>
       isApiEndpoint(endpoint)
       && ((action === 'submit' && endpoint?.category === 'submit')
@@ -37,9 +40,9 @@ export function resolveAvailablePaths(
   const hasNetworkRequest = action === 'submit'
     ? hasRuntimeNetworkRequest(runtime?.networkSubmit)
     : hasRuntimeNetworkRequest(runtime?.networkStatus);
-  const hasVision = includesMode(executionModes[action], 'rpa')
+  const hasVision = runtimePaths.includes(VISION_DELIVERY_PATH)
     || (!directLink && hasFlowAction);
-  const hasUrlAction = includesMode(executionModes[action], 'url')
+  const hasUrlAction = runtimePaths.includes(URL_DELIVERY_PATH)
     || (directLink && hasNetworkRequest);
   const hasUrl = hasUrlAction && Boolean(
     rpaDefinition?.platform?.entryUrl
@@ -91,10 +94,6 @@ function isPathEnabled(raw: unknown, action: 'submit' | 'queryStatus') {
 
 function isApiEndpoint(endpoint: any) {
   return String(endpoint?.method || '').toUpperCase() !== 'RPA';
-}
-
-function includesMode(value: unknown, mode: string) {
-  return Array.isArray(value) && value.some((item) => String(item).toLowerCase() === mode);
 }
 
 function hasRuntimeNetworkRequest(value: unknown) {

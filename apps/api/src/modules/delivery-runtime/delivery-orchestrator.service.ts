@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import {
   DEFAULT_DELIVERY_PATH,
   DELIVERY_PATHS,
+  resolveProcessRuntimeManifest,
   type DeliveryPath,
 } from '@uniflow/shared-types';
 import { PrismaService } from '../common/prisma.service';
@@ -134,12 +135,16 @@ export class DeliveryOrchestratorService {
     }
 
     const uiHints = ((template.uiHints as Record<string, any> | null) || {});
+    const runtimeResolution = resolveProcessRuntimeManifest(uiHints);
 
     return {
       taskId: randomUUID(),
       template,
       uiHints,
-      availablePaths: resolveAvailablePaths(uiHints, action),
+      availablePaths: resolveAvailablePaths(
+        runtimeResolution.manifest ? { ...uiHints, runtimeManifest: runtimeResolution.manifest } : uiHints,
+        action,
+      ),
     };
   }
 

@@ -4,6 +4,7 @@ import { useEffect, useState, useSyncExternalStore } from 'react';
 import Link from 'next/link';
 import { apiClient } from '../lib/api-client';
 import { hasRequiredRole } from '../lib/access-control';
+import { buildChatFlowHref } from '../lib/chat-flow-link';
 import {
   getClientAuthServerSnapshot,
   getClientAuthSnapshot,
@@ -280,7 +281,11 @@ export default function HomeContent() {
                 return (
                   <Link
                     key={process.id}
-                    href={`/chat?flow=${encodeURIComponent(process.processCode)}`}
+                    href={buildChatFlowHref({
+                      processCode: process.processCode,
+                      templateId: process.id,
+                      connectorId: process.connector?.id || null,
+                    })}
                     className={`rounded-3xl border px-4 py-4 transition-colors hover:border-sky-200 hover:shadow-sm ${accent.cardClass}`}
                   >
                     <div className={`mb-3 flex h-10 w-10 items-center justify-center rounded-2xl ${accent.iconClass}`}>

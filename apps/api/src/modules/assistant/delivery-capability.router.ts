@@ -4,6 +4,10 @@ import {
   type DeliveryCapabilitySummary,
   type DeliveryHealth,
   type DeliveryPath,
+  getProcessRuntimeDefinition,
+  getProcessRuntimeEndpoints,
+  getProcessRuntimePaths,
+  resolveProcessRuntimeManifest,
   type RpaFlowDefinition,
 } from '@uniflow/shared-types';
 import { PrismaService } from '../common/prisma.service';
@@ -34,22 +38,24 @@ export class DeliveryCapabilityRouter {
       return this.normalizeSummary(explicit, 'delivery');
     }
 
-    const executionModes = (uiHints.executionModes as Record<string, any> | undefined) || {};
-    const rpaDefinition = uiHints.rpaDefinition as RpaFlowDefinition | undefined;
-    const endpoints = Array.isArray(uiHints.endpoints) ? uiHints.endpoints : [];
+    const manifestResolution = resolveProcessRuntimeManifest(uiHints);
+    const submitPaths = getProcessRuntimePaths(uiHints, 'submit');
+    const queryStatusPaths = getProcessRuntimePaths(uiHints, 'queryStatus');
+    const rpaDefinition = getProcessRuntimeDefinition(uiHints) as RpaFlowDefinition | undefined;
+    const endpoints = getProcessRuntimeEndpoints(uiHints);
     const runtime = rpaDefinition?.runtime;
     const isDirectLink = this.isDirectLinkDefinition(rpaDefinition);
-    const hasApiSubmit = this.includesMode(executionModes.submit, 'api')
+    const hasApiSubmit = submitPaths.includes('api')
       || endpoints.some((endpoint) => endpoint?.category === 'submit' && String(endpoint?.method || '').toUpperCase() !== 'RPA');
-    const hasApiQuery = this.includesMode(executionModes.queryStatus, 'api')
+    const hasApiQuery = queryStatusPaths.includes('api')
       || endpoints.some((endpoint) => ['query', 'status_query'].includes(endpoint?.category) && String(endpoint?.method || '').toUpperCase() !== 'RPA');
-    const hasRpaSubmit = this.includesMode(executionModes.submit, 'rpa')
+    const hasRpaSubmit = submitPaths.includes('vision')
       || (!isDirectLink && !!rpaDefinition?.actions?.submit);
-    const hasRpaQuery = this.includesMode(executionModes.queryStatus, 'rpa')
+    const hasRpaQuery = queryStatusPaths.includes('vision')
       || (!isDirectLink && !!rpaDefinition?.actions?.queryStatus);
-    const hasUrlSubmit = this.includesMode(executionModes.submit, 'url')
+    const hasUrlSubmit = submitPaths.includes('url')
       || (isDirectLink && this.hasNetworkRequest(runtime?.networkSubmit));
-    const hasUrlQuery = this.includesMode(executionModes.queryStatus, 'url')
+    const hasUrlQuery = queryStatusPaths.includes('url')
       || (isDirectLink && this.hasNetworkRequest(runtime?.networkStatus));
     const hasVisionTargets = this.hasImageTargets(rpaDefinition);
     const hasUrlEntry = !!(rpaDefinition?.platform?.entryUrl || rpaDefinition?.platform?.jumpUrlTemplate || rpaDefinition?.platform?.ticketBrokerUrl);
@@ -96,7 +102,7 @@ export class DeliveryCapabilityRouter {
         url: { health: urlHealth, available: hasUrlCapability },
         vision: { health: visionHealth, available: hasVisionCapability },
       }),
-      source: 'legacy_ui_hints',
+      source: manifestResolution.source === 'runtime_manifest' ? 'runtime_manifest' : 'legacy_ui_hints',
     };
   }
 
@@ -168,10 +174,6 @@ export class DeliveryCapabilityRouter {
       fallbackOrder: [],
       source: 'inferred',
     };
-  }
-
-  private includesMode(value: unknown, mode: string) {
-    return Array.isArray(value) && value.some((item) => String(item).toLowerCase() === mode);
   }
 
   private hasImageTargets(definition?: RpaFlowDefinition) {

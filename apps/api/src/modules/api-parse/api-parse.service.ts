@@ -66,10 +66,6 @@ export class ApiParseService {
       warnings.push('No business workflows identified from endpoints');
     }
 
-    if (identifyResult.filteredCount > 0) {
-      warnings.push(`${identifyResult.filteredCount} system/admin endpoints filtered out`);
-    }
-
     this.logger.log(`Stage 2 complete: ${identifyResult.workflows.length} workflows identified`);
 
     let validation: ValidationReport | undefined;

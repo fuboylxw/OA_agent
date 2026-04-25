@@ -13,6 +13,10 @@ interface FlowMatchResult {
     processName: string;
     confidence: number;
   };
+  candidateFlows?: Array<{
+    processCode: string;
+    processName: string;
+  }>;
   needsClarification: boolean;
   clarificationQuestion?: string;
 }
@@ -25,25 +29,27 @@ const FLOW_MATCH_SYSTEM_PROMPT = `你是一个 OA 办公系统的流程匹配助
 ## 规则
 1. 先理解用户整句话的真实办事目标，不要只做关键词匹配
 2. 用户可能一次说出流程意图和大量字段信息，例如时间、地点、类型、原因；这些细节通常是为了办理某个流程，不是噪声
-3. 用户可能用口语化、简略的方式表达，例如"请个假"="请假申请"，"报个账"="财务报销"，"申请项目"="项目申请"
-4. 如果能高置信度匹配到一个流程，就直接返回该流程，不要因为字段还不完整而要求澄清流程
-5. 只有在多个流程都合理且无法区分时，才返回 needsClarification=true
+3. 用户可能用口语化、简略的方式表达，应结合可用流程列表理解其真实目标，不要要求用户使用正式流程名称
+4. 只有在用户话语已经提供了足够证据、可以把候选流程明确区分开时，才直接返回该流程
+5. 如果多个流程都合理，但用户话语不足以区分它们，必须返回 needsClarification=true，不能为了减少追问而猜一个
 6. 澄清问题应尽量短，只问最关键的区别，不要重复让用户描述已经说过的信息
 7. 如果完全无法匹配任何流程，返回 needsClarification=true 并列出可用流程供用户选择
+8. 如果两个或多个流程名称相近、都属于同一类业务，而用户只表达了大类意图（例如“我要请假”），通常应先澄清适用对象、类型或关键区别，而不是直接选一个
 
 ## 输出格式（JSON）
 匹配成功：
 {
   "matched": true,
-  "processCode": "LEAVE_REQUEST",
-  "processName": "请假申请",
+  "processCode": "PROCESS_CODE",
+  "processName": "流程名称",
   "confidence": 0.95
 }
 
 需要澄清：
 {
   "matched": false,
-  "clarificationQuestion": "您是想办理"请假申请"还是"财务报销"？"
+  "candidateProcessCodes": ["PROCESS_A", "PROCESS_B"],
+  "clarificationQuestion": "您是想办理“流程A”还是“流程B”？"
 }`;
 
 @Injectable()
@@ -66,7 +72,7 @@ export class FlowAgent {
     try {
       return await this.matchFlowWithLLM(message, availableFlows, intent);
     } catch (error: any) {
-      this.logger.warn(`LLM 流程匹配失败，回退到简单匹配: ${error.message}`);
+      this.logger.warn(`LLM 流程匹配失败，回退到保守解析: ${error.message}`);
       return this.matchFlowFallback(message, availableFlows);
     }
   }
@@ -110,7 +116,8 @@ ${flowList}
 
     if (result.matched && result.processCode) {
       const flow = availableFlows.find(f => f.processCode === result.processCode);
-      if (flow) {
+      const confidence = typeof result.confidence === 'number' ? result.confidence : 0;
+      if (flow && confidence >= 0.9) {
         const displayProcessName = typeof result.processName === 'string' && result.processName.trim()
           ? result.processName.trim()
           : flow.processName;
@@ -119,14 +126,27 @@ ${flowList}
           matchedFlow: {
             processCode: flow.processCode,
             processName: displayProcessName,
-            confidence: result.confidence || 0.9,
+            confidence,
           },
           needsClarification: false,
         };
       }
     }
 
+    const candidateFlows = Array.isArray(result.candidateProcessCodes)
+      ? result.candidateProcessCodes
+          .map((processCode: unknown) => String(processCode || '').trim())
+          .filter(Boolean)
+          .map((processCode: string) => availableFlows.find((flow) => flow.processCode === processCode))
+          .filter((flow): flow is FlowInfo => Boolean(flow))
+          .map((flow) => ({
+            processCode: flow.processCode,
+            processName: flow.processName,
+          }))
+      : [];
+
     return {
+      candidateFlows,
       needsClarification: true,
       clarificationQuestion: result.clarificationQuestion
         || `请问您想办理哪个流程？\n${availableFlows.map((f, i) => `${i + 1}. ${f.processName}`).join('\n')}`,
@@ -134,60 +154,96 @@ ${flowList}
   }
 
   /**
-   * LLM 不可用时的简单回退匹配
+   * LLM 不可用时只做保守兜底，不再通过工程规则猜流程
    */
   private matchFlowFallback(message: string, availableFlows: FlowInfo[]): FlowMatchResult {
-    let bestMatch: { flow: FlowInfo; score: number } | null = null;
-
-    for (const flow of availableFlows) {
-      const name = flow.processName;
-      // 消息包含完整流程名
-      if (message.includes(name)) {
-        return {
-          matchedFlow: {
-            processCode: flow.processCode,
-            processName: flow.processName,
-            confidence: 0.9,
-          },
-          needsClarification: false,
-        };
-      }
-
-      // 检查流程名中的连续子串是否出现在消息中（从最长子串开始）
-      if (name.length >= 2) {
-        let longestOverlap = 0;
-        for (let len = name.length - 1; len >= 2; len--) {
-          for (let start = 0; start <= name.length - len; start++) {
-            if (message.includes(name.substring(start, start + len))) {
-              longestOverlap = Math.max(longestOverlap, len);
-            }
-          }
-          if (longestOverlap > 0) break;
-        }
-        const overlapRatio = longestOverlap / name.length;
-        if (overlapRatio >= 0.4) {
-          const score = overlapRatio * name.length;
-          if (!bestMatch || score > bestMatch.score) {
-            bestMatch = { flow, score };
-          }
-        }
-      }
+    const normalizedMessage = this.normalizeText(message);
+    if (!normalizedMessage) {
+      return this.buildClarificationResult(availableFlows);
     }
 
-    if (bestMatch) {
-      return {
-        matchedFlow: {
-          processCode: bestMatch.flow.processCode,
-          processName: bestMatch.flow.processName,
-          confidence: 0.6,
-        },
-        needsClarification: false,
-      };
+    if (availableFlows.length === 1) {
+      return this.buildMatchedFlowResult(availableFlows[0], 0.82);
     }
 
+    const candidates = availableFlows.filter((flow) => this.messageExplicitlyReferencesFlow(normalizedMessage, flow));
+
+    if (candidates.length === 1) {
+      return this.buildMatchedFlowResult(candidates[0], 0.88);
+    }
+
+    if (candidates.length > 1) {
+      return this.buildClarificationResult(candidates);
+    }
+
+    return this.buildClarificationResult(availableFlows);
+  }
+
+  private messageExplicitlyReferencesFlow(message: string, flow: FlowInfo): boolean {
+    const processCode = this.normalizeText(flow.processCode);
+    const processName = this.normalizeText(flow.processName);
+
+    if (processCode && this.hasStandaloneCodeReference(message, processCode)) {
+      return true;
+    }
+
+    if (!processName) {
+      return false;
+    }
+
+    const compactProcessName = this.compactText(processName);
+    if (!compactProcessName) {
+      return false;
+    }
+
+    return this.extractQuotedPhrases(message).some((phrase) => this.compactText(phrase) === compactProcessName);
+  }
+
+  private hasStandaloneCodeReference(message: string, processCode: string): boolean {
+    const escaped = processCode.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    return new RegExp(`(^|[^a-z0-9_\\-])${escaped}([^a-z0-9_\\-]|$)`, 'i').test(message);
+  }
+
+  private extractQuotedPhrases(message: string): string[] {
+    const matches = message.match(/[“"「『](.+?)[”"」』]/g) || [];
+    return matches
+      .map((value) => value.slice(1, -1).trim())
+      .filter(Boolean);
+  }
+
+  private compactText(value: string): string {
+    return this.normalizeText(value).toLowerCase().replace(/[\s_\-./\\,，。;；:：'"“”‘’()（）【】\[\]]+/g, '');
+  }
+
+  private normalizeText(value: string): string {
+    return String(value || '').trim();
+  }
+
+  private buildMatchedFlowResult(flow: FlowInfo, confidence: number): FlowMatchResult {
     return {
+      candidateFlows: [
+        {
+          processCode: flow.processCode,
+          processName: flow.processName,
+        },
+      ],
+      matchedFlow: {
+        processCode: flow.processCode,
+        processName: flow.processName,
+        confidence,
+      },
+      needsClarification: false,
+    };
+  }
+
+  private buildClarificationResult(flows: FlowInfo[]): FlowMatchResult {
+    return {
+      candidateFlows: flows.map((flow) => ({
+        processCode: flow.processCode,
+        processName: flow.processName,
+      })),
       needsClarification: true,
-      clarificationQuestion: `请问您想办理哪个流程？\n${availableFlows.map((f, i) => `${i + 1}. ${f.processName}`).join('\n')}`,
+      clarificationQuestion: `请问您想办理哪个流程？\n${flows.map((f, i) => `${i + 1}. ${f.processName}`).join('\n')}`,
     };
   }
 }

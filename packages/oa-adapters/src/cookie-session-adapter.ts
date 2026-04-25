@@ -52,45 +52,6 @@ type CookieSessionFlow = {
 
 const DEFAULT_LOGIN_PATH = '/api/auth/login';
 
-const DEFAULT_FLOW_CODE_ALIASES: Record<string, string> = {
-  leave: 'leave',
-  leave_request: 'leave',
-  reimbursement: 'reimbursement',
-  reimburse: 'reimbursement',
-  vehicle: 'vehicle',
-  vehicle_access: 'vehicle',
-  project: 'project',
-  project_application: 'project',
-};
-
-const DEFAULT_FIELD_MAPPINGS: Record<string, Record<string, string>> = {
-  leave: {
-    leave_type: 'leaveType',
-    start_date: 'startDate',
-    end_date: 'endDate',
-    contact_phone: 'contactPhone',
-  },
-  reimbursement: {
-    reimbursement_type: 'reimbursementType',
-    budget_code: 'budgetCode',
-    payee_name: 'payeeName',
-    bank_account: 'bankAccount',
-  },
-  vehicle: {
-    vehicle_plate: 'vehiclePlate',
-    driver_name: 'driverName',
-    enter_date: 'enterDate',
-    exit_date: 'exitDate',
-    companion_count: 'companionCount',
-  },
-  project: {
-    project_name: 'projectName',
-    project_type: 'projectType',
-    start_date: 'startDate',
-    end_date: 'endDate',
-  },
-};
-
 export class CookieSessionAdapter implements OAAdapter {
   private readonly client: AxiosInstance;
   private sessionCookie?: string;
@@ -108,8 +69,8 @@ export class CookieSessionAdapter implements OAAdapter {
     private readonly config: CookieSessionConfig,
     private readonly flows: CookieSessionFlow[] = [],
   ) {
-    this.flowCodeAliases = config.flowCodeAliases || DEFAULT_FLOW_CODE_ALIASES;
-    this.fieldMappings = config.fieldMappings || DEFAULT_FIELD_MAPPINGS;
+    this.flowCodeAliases = config.flowCodeAliases || {};
+    this.fieldMappings = config.fieldMappings || {};
     this.paths = {
       loginPath: config.loginPath || DEFAULT_LOGIN_PATH,
       healthCheckPath: config.healthCheckPath || '/api/health',
@@ -346,30 +307,29 @@ export class CookieSessionAdapter implements OAAdapter {
   // ── Private: field mapping ────────────────────────────────
 
   private resolveFormCode(flowCode: string) {
-    const normalized = flowCode.trim().toLowerCase();
+    const normalized = this.normalizeIdentifier(flowCode);
     if (this.flowCodeAliases[normalized]) return this.flowCodeAliases[normalized];
 
-    const matchedFlow = this.flows.find(f => f.flowCode.trim().toLowerCase() === normalized);
-    if (matchedFlow) return this.resolveFormCodeFromName(matchedFlow.flowName);
+    const matchedFlow = this.flows.find((flow) =>
+      this.normalizeIdentifier(flow.flowCode) === normalized
+      || this.normalizeIdentifier(flow.flowName) === normalized,
+    );
+    if (matchedFlow?.flowCode) return matchedFlow.flowCode;
 
-    return this.resolveFormCodeFromName(flowCode);
+    return flowCode;
   }
 
   private resolveFlowCodeForForm(formCode: string, formName: string) {
-    const matchedFlow = this.flows.find(f => {
-      const n = f.flowCode.trim().toLowerCase();
-      return this.flowCodeAliases[n] === formCode || f.flowName === formName;
+    const normalizedFormCode = this.normalizeIdentifier(formCode);
+    const normalizedFormName = this.normalizeIdentifier(formName);
+    const matchedFlow = this.flows.find((flow) => {
+      const normalizedFlowCode = this.normalizeIdentifier(flow.flowCode);
+      const normalizedFlowName = this.normalizeIdentifier(flow.flowName);
+      return this.flowCodeAliases[normalizedFlowCode] === formCode
+        || normalizedFlowCode === normalizedFormCode
+        || normalizedFlowName === normalizedFormName;
     });
     return matchedFlow?.flowCode || formCode.toUpperCase();
-  }
-
-  private resolveFormCodeFromName(value: string) {
-    const n = value.toLowerCase();
-    if (n.includes('leave') || value.includes('请假')) return 'leave';
-    if (n.includes('reimburse') || value.includes('报销')) return 'reimbursement';
-    if (n.includes('vehicle') || value.includes('进出车')) return 'vehicle';
-    if (n.includes('project') || value.includes('项目')) return 'project';
-    return n;
   }
 
   private mapSubmissionData(formCode: string, formData: Record<string, any>) {
@@ -386,6 +346,15 @@ export class CookieSessionAdapter implements OAAdapter {
   private serializeCookies(rawCookies?: string[] | string) {
     const cookies = Array.isArray(rawCookies) ? rawCookies : rawCookies ? [rawCookies] : [];
     return cookies.map(c => c.split(';')[0]).filter(Boolean).join('; ');
+  }
+
+  private normalizeIdentifier(value: string) {
+    return String(value || '')
+      .trim()
+      .toLowerCase()
+      .replace(/([a-z0-9])([A-Z])/g, '$1_$2')
+      .replace(/[^a-z0-9]+/g, '_')
+      .replace(/^_+|_+$/g, '');
   }
 
   private extractErrorMessage(error: any) {

@@ -10,8 +10,8 @@ import {
 } from '@uniflow/shared-types';
 import { DeliveryOrchestratorService } from '../delivery-runtime/delivery-orchestrator.service';
 import {
+  interpretExternalStatusToSubmissionStatus,
   isUnsupportedStatusQueryResult,
-  mapExternalStatusToSubmissionStatus,
   normalizeSubmissionStatus,
 } from '../common/submission-status.util';
 import { mapSubmissionStatusToChatProcessStatus } from '../common/chat-process-state';
@@ -83,7 +83,20 @@ export class StatusService {
         oaStatus = null;
       } else {
         const queriedAt = new Date();
-        const mappedStatus = mapExternalStatusToSubmissionStatus(result.status, submission.status);
+        const statusInterpretation = await interpretExternalStatusToSubmissionStatus({
+          externalStatus: result.status,
+          fallbackStatus: submission.status,
+          payload: result as Record<string, any>,
+          statusDetail: result.statusDetail as Record<string, any> | undefined,
+          source: 'status_poll',
+          trace: {
+            scope: 'api.status.runtime_judgement',
+            traceId,
+            tenantId: submission.tenantId,
+            userId: submission.userId,
+          },
+        });
+        const mappedStatus = statusInterpretation.mappedStatus;
         const statusRecord = {
           id: `status-${submission.id}-${queriedAt.getTime()}`,
           submissionId: submission.id,

@@ -1,4 +1,5 @@
 import { BadRequestException, Injectable, Logger } from '@nestjs/common';
+import { AttachmentFieldBindingInferenceEngine } from '@uniflow/compat-engine';
 import { PrismaService } from '../common/prisma.service';
 import { IntentAgent } from './agents/intent.agent';
 import { FlowAgent } from './agents/flow.agent';
@@ -38,6 +39,7 @@ import {
   isConversationRestorable,
   shouldApplyChatRetention,
 } from '../common/chat-retention.util';
+import { LLMClientFactory } from '@uniflow/agent-kernel';
 
 interface ChatInput {
   tenantId: string;
@@ -45,6 +47,8 @@ interface ChatInput {
   sessionId?: string;
   message: string;
   attachments?: ChatAttachment[];
+  requestedTemplateId?: string;
+  requestedConnectorId?: string;
   identityType?: string;
   roles?: string[];
 }
@@ -130,6 +134,7 @@ interface ProcessCard {
     description?: string;
     example?: string;
     multiple?: boolean;
+    options?: Array<{ label: string; value: string }>;
   }>;
   actionButtons?: ActionButton[];
   needsAttachment?: boolean;
@@ -173,6 +178,7 @@ export interface ChatResponse {
     description?: string;
     example?: string;
     multiple?: boolean;
+    options?: Array<{ label: string; value: string }>;
   }>;
   processStatus?: ProcessStatus;
   needsAttachment?: boolean;
@@ -235,6 +241,16 @@ interface PendingConnectorSelection {
   name: string;
 }
 
+interface PendingFlowSelection {
+  processCode: string;
+  processName: string;
+}
+
+interface PendingFlowSelectionContext {
+  originalMessage?: string;
+  clarificationQuestion?: string;
+}
+
 interface PendingConnectorSelectionContext {
   originalMessage?: string;
   processCode?: string;
@@ -259,6 +275,7 @@ interface SubmissionResolution {
     processName: string;
     confidence: number;
   };
+  flowCandidates?: PendingFlowSelection[];
   connectorId?: string | null;
   connectorName?: string | null;
   needsConnectorSelection: boolean;
@@ -275,9 +292,23 @@ interface PendingActionExecutionContext {
   processName?: string;
 }
 
+type PendingSelectionKind = 'submission' | 'connector' | 'flow';
+
+type PendingSelectionCandidate = {
+  id: string;
+  label: string;
+  aliases?: string[];
+};
+
+type PendingSelectionResolution =
+  | { action: 'select'; candidateId: string }
+  | { action: 'cancel' | 'retry' | 'unknown' };
+
 @Injectable()
 export class AssistantService {
   private readonly logger = new Logger(AssistantService.name);
+  private readonly attachmentFieldBindingInference = new AttachmentFieldBindingInferenceEngine();
+  private readonly llmClient = LLMClientFactory.createFromEnv();
 
   constructor(
     private readonly prisma: PrismaService,
@@ -302,6 +333,7 @@ export class AssistantService {
     try {
       // Get or create session (may resolve userId to a valid one)
       const session = await this.getOrCreateSession(input);
+      await this.applyRequestedRoutingContext(session, input);
 
       // Use the session's actual userId for all subsequent operations
       const resolvedUserId = session.userId;
@@ -358,9 +390,6 @@ export class AssistantService {
           const missingFileFields = (((session.metadata || {}) as Record<string, any>).missingFields || [])
             .filter((field: any) => field?.type === 'file');
           const missingFileFieldKeys = new Set<string>(missingFileFields.map((field: any) => field.key));
-          const preferredMissingAttachmentField = missingFileFields.find((field: any) =>
-            this.looksLikeAttachmentFieldLabel(field?.label),
-          )?.key || null;
 
           let autoAssignedCount = 0;
           for (const attachment of normalizedAttachments) {
@@ -372,10 +401,17 @@ export class AssistantService {
             if (!targetFieldKey) {
               if (fileFields.length === 1) {
                 targetFieldKey = fileFields[0].key;
-              } else if (preferredMissingAttachmentField) {
-                targetFieldKey = preferredMissingAttachmentField;
               } else if (missingFileFieldKeys.size === 1) {
                 targetFieldKey = [...missingFileFieldKeys][0];
+              } else if (fileFields.length > 1) {
+                targetFieldKey = await this.inferAttachmentTargetFieldKey({
+                  attachment,
+                  fileFields,
+                  missingFileFieldKeys,
+                  currentFormData,
+                  userMessage: input.message,
+                  processCode: processContext.processCode,
+                });
               }
             }
 
@@ -450,6 +486,22 @@ export class AssistantService {
       if (pendingConnectorResponse) {
         const enrichedResponse = await this.enrichChatResponse(
           pendingConnectorResponse,
+          session,
+          input.tenantId,
+        );
+        await this.saveAssistantMessage(session.id, enrichedResponse);
+        return enrichedResponse;
+      }
+
+      const pendingFlowResponse = await this.tryHandlePendingFlowSelection(
+        { ...input, userId: resolvedUserId },
+        session,
+        sharedContext,
+        traceId,
+      );
+      if (pendingFlowResponse) {
+        const enrichedResponse = await this.enrichChatResponse(
+          pendingFlowResponse,
           session,
           input.tenantId,
         );
@@ -633,7 +685,7 @@ export class AssistantService {
           default:
             response = {
               sessionId: session.id,
-              message: '抱歉，我没有理解您的意图。您可以尝试：\n- 发起申请（如"我要报销差旅费"）\n- 查询进度（如"我的请假申请到哪了"）\n- 撤回申请\n- 催办\n- 补件\n- 转办',
+              message: '抱歉，我没有理解您的意图。您可以尝试：\n- 发起申请（如"帮我办理一个流程"）\n- 查询进度（如"我的申请到哪了"）\n- 撤回申请\n- 催办\n- 补件\n- 转办',
               needsInput: true,
               suggestedActions: ['发起申请', '查询进度', '查看流程列表'],
             };
@@ -956,7 +1008,13 @@ export class AssistantService {
     summary?: string;
     formData?: Record<string, any>;
     fieldOrigins?: Record<string, ProcessFieldOrigin>;
-  missingFields?: Array<{ key: string; label: string; question: string; type?: string }>;
+  missingFields?: Array<{
+    key: string;
+    label: string;
+    question: string;
+    type?: string;
+    options?: Array<{ label: string; value: string }>;
+  }>;
     actionButtons?: ActionButton[];
     needsAttachment?: boolean;
     draftId?: string;
@@ -1308,21 +1366,24 @@ export class AssistantService {
   }
 
   private buildMissingFieldsPrompt(
-    missingFields: Array<{ key: string; label: string; question: string; type?: string }>,
+    missingFields: Array<{
+      key: string;
+      label: string;
+      question: string;
+      type?: string;
+      options?: Array<{ label: string; value: string }>;
+    }>,
     processName?: string,
   ) {
-    if (missingFields.length === 1) {
-      return missingFields[0].question;
+    if (missingFields.length === 0) {
+      return '请按下方提示继续补充信息。';
     }
 
-    const allQuestions = missingFields
-      .map((field, index) => `${index + 1}. ${field.question}`)
-      .join('\n');
     const prefix = processName
-      ? `正在为您填写“${processName}”，还需要以下信息：`
-      : '还需要以下信息：';
+      ? `正在为您填写“${processName}”`
+      : '当前流程';
 
-    return `${prefix}\n\n${allQuestions}\n\n您可以一次性告诉我，也可以逐个回答。`;
+    return `${prefix}，还差 ${missingFields.length} 项信息，请按下方提示补充。`;
   }
 
   private async resolveSubmissionTarget(
@@ -1335,15 +1396,29 @@ export class AssistantService {
       identityType: input.identityType,
       roles: input.roles,
     });
-
-    const preferredProcessCode = typeof intentResult?.extractedEntities?.flowCode === 'string'
-      ? intentResult.extractedEntities.flowCode.trim()
+    const requestedTemplateId = typeof sessionMeta.requestedTemplateId === 'string'
+      ? sessionMeta.requestedTemplateId.trim()
       : '';
-    const explicitConnectorId = sessionMeta.routedConnectorId || null;
+    const requestedTemplate = requestedTemplateId
+      ? allFlows.find((flow) => flow.id === requestedTemplateId)
+      : undefined;
 
-    const candidateFromEntity = preferredProcessCode
-      ? allFlows.filter((flow) => flow.processCode === preferredProcessCode)
-      : [];
+    if (requestedTemplate) {
+      return {
+        flows: [requestedTemplate],
+        matchedFlow: {
+          processCode: requestedTemplate.processCode,
+          processName: requestedTemplate.processName,
+          confidence: 1,
+        },
+        connectorId: requestedTemplate.connector?.id || null,
+        connectorName: requestedTemplate.connector?.name || null,
+        needsConnectorSelection: false,
+        needsFlowClarification: false,
+      };
+    }
+
+    const explicitConnectorId = sessionMeta.routedConnectorId || null;
 
     let scopedFlows = allFlows;
     if (explicitConnectorId) {
@@ -1353,8 +1428,7 @@ export class AssistantService {
       }
     }
 
-    const flowCandidates = candidateFromEntity.length > 0 ? candidateFromEntity : scopedFlows;
-    const uniqueFlowCandidates = this.dedupeFlowCandidates(flowCandidates);
+    const uniqueFlowCandidates = this.dedupeFlowCandidates(scopedFlows);
 
     let matchedFlow = uniqueFlowCandidates.length === 1
       ? {
@@ -1365,6 +1439,7 @@ export class AssistantService {
       : undefined;
     let flowClarificationQuestion: string | undefined;
     let needsFlowClarification = false;
+    let clarificationCandidates: PendingFlowSelection[] | undefined;
 
     if (!matchedFlow) {
       const flowResult = await this.flowAgent.matchFlow(
@@ -1380,11 +1455,20 @@ export class AssistantService {
       matchedFlow = flowResult.matchedFlow;
       needsFlowClarification = flowResult.needsClarification || !flowResult.matchedFlow;
       flowClarificationQuestion = flowResult.clarificationQuestion;
+      clarificationCandidates = this.dedupePendingFlowCandidates(
+        Array.isArray(flowResult.candidateFlows) && flowResult.candidateFlows.length > 0
+          ? flowResult.candidateFlows
+          : uniqueFlowCandidates.map((flow) => ({
+              processCode: flow.processCode,
+              processName: flow.processName,
+            })),
+      );
     }
 
     if (!matchedFlow) {
       return {
         flows: allFlows,
+        flowCandidates: clarificationCandidates,
         needsConnectorSelection: false,
         needsFlowClarification: true,
         flowClarificationQuestion,
@@ -1395,7 +1479,7 @@ export class AssistantService {
     const availableConnectors = this.dedupeConnectorCandidates(
       matchedTemplates
         .map((flow) => flow.connector)
-        .filter((connector): connector is NonNullable<typeof flowCandidates[number]['connector']> => Boolean(connector)),
+        .filter((connector): connector is NonNullable<typeof matchedTemplates[number]['connector']> => Boolean(connector)),
     );
 
     if (availableConnectors.length === 0) {
@@ -1441,7 +1525,7 @@ export class AssistantService {
       explicitConnectorId,
       matchedTemplates
         .map((flow) => flow.connector)
-        .filter((connector): connector is NonNullable<typeof flowCandidates[number]['connector']> => Boolean(connector)),
+        .filter((connector): connector is NonNullable<typeof matchedTemplates[number]['connector']> => Boolean(connector)),
     );
 
     if (routeResult.connectorId) {
@@ -1544,7 +1628,13 @@ export class AssistantService {
       }
     }
 
-    return this.processLibraryService.getByCode(tenantId, processCode, undefined, access);
+    return this.processLibraryService.getByCode(
+      tenantId,
+      processCode,
+      undefined,
+      undefined,
+      access,
+    );
   }
 
   private extractProcessContext(session: any): ProcessContext | null {
@@ -1689,17 +1779,10 @@ export class AssistantService {
       // 如果还有缺失字段，一次性列出所有缺失信息
       if (!formResult.isComplete) {
         const hasFileField = formResult.missingFields.some(f => f.type === 'file');
-        let message: string;
-        if (formResult.missingFields.length === 1) {
-          // 只剩一个字段，直接问
-          message = formResult.missingFields[0].question;
-        } else {
-          // 多个字段，编号列出
-          const allQuestions = formResult.missingFields
-            .map((f, i) => `${i + 1}. ${f.question}`)
-            .join('\n');
-          message = `还需要以下信息：\n\n${allQuestions}\n\n您可以一次性告诉我，也可以逐个回答。`;
-        }
+        let message = this.buildMissingFieldsPrompt(
+          formResult.missingFields,
+          this.resolveDisplayProcessName(session, template.processName, processContext.processCode),
+        );
         if (Object.keys(modifiedFields).length > 0) {
           message = `已按您的意思更新已填写内容。\n\n${message}`;
         }
@@ -1751,7 +1834,7 @@ export class AssistantService {
     if (Object.keys(modificationResult.modifiedFields).length === 0) {
       return {
         sessionId: session.id,
-        message: '我还没识别到您要调整的具体字段。可以直接说“把结束时间改成下周一”或“请假类型改成年假”。',
+        message: '我还没识别到您要调整的具体字段。可以直接说“把结束时间改成下周一”或“把选项改成第二个”。',
         needsInput: true,
         formData: processContext.parameters,
         processStatus: ProcessStatus.PARAMETER_COLLECTION,
@@ -1947,7 +2030,7 @@ ${currentFields}
 判断用户的回复属于以下哪种意图：
 1. confirm - 确认提交（如"好的"、"没问题"、"提交吧"、"确认"、"可以"、"行"、"对"、"嗯"）
 2. cancel - 取消申请（如"算了"、"不要了"、"取消"、"不提交了"）
-3. modify - 修改内容（如"把日期改成明天"、"金额改为2000"、"请假类型改成年假"）
+3. modify - 修改内容（如"把日期改成明天"、"金额改为2000"、"把选项改成第二个"）
 
 如果是 modify，请同时提取用户想修改的字段和新值。
 
@@ -1983,17 +2066,6 @@ ${currentFields}
       };
     } catch (error: any) {
       this.logger.error(' detectConfirmIntent LLM failed:', error.message);
-      // LLM 失败时回退到简单规则
-      const lower = message.toLowerCase();
-      if (/^(确认|提交|是|好|ok|yes|没问题|可以|行|对|嗯)$/i.test(lower)) {
-        return { action: 'confirm' };
-      }
-      if (/^(取消|不|no|算了|不要)$/i.test(lower)) {
-        return { action: 'cancel' };
-      }
-      if (/修改|改|换/.test(lower)) {
-        return { action: 'modify' };
-      }
       return { action: 'unknown' };
     }
   }
@@ -2567,7 +2639,7 @@ ${currentFields}
     switch (path) {
       case 'url':
         return {
-          timeoutMs: 30000,
+          timeoutMs: 5000,
           pollIntervalMs: 250,
         };
       case 'api':
@@ -2599,6 +2671,9 @@ ${currentFields}
       delete metadata.pendingDraftId;
       delete metadata.currentProcessCode;
       delete metadata.currentTemplateId;
+      delete metadata.pendingFlowSelection;
+      delete metadata.flowCandidates;
+      delete metadata.pendingFlowSelectionContext;
 
       await this.prisma.chatSession.update({
         where: { id: session.id },
@@ -2629,11 +2704,40 @@ ${currentFields}
         const suggestedFlows = this.dedupeFlowCandidates(resolution.flows || [])
           .slice(0, 5)
           .map((flow) => flow.processName);
+        if (Array.isArray(resolution.flowCandidates) && resolution.flowCandidates.length > 1) {
+          const pendingFlowMetadata = {
+            ...sessionMeta,
+            pendingFlowSelection: true,
+            flowCandidates: resolution.flowCandidates.map((flow) => ({
+              processCode: flow.processCode,
+              processName: flow.processName,
+            })),
+            pendingFlowSelectionContext: {
+              originalMessage: input.message,
+              clarificationQuestion: resolution.flowClarificationQuestion,
+            },
+          } as Record<string, any>;
+          await this.prisma.chatSession.update({
+            where: { id: session.id },
+            data: {
+              metadata: pendingFlowMetadata,
+            },
+          });
+          session.metadata = pendingFlowMetadata;
+        }
         return {
           sessionId: session.id,
-          message: resolution.flowClarificationQuestion || '请问您想办理哪个流程？',
+          message: Array.isArray(resolution.flowCandidates) && resolution.flowCandidates.length > 1
+            ? this.buildPendingFlowPrompt(
+                session.id,
+                resolution.flowCandidates,
+                resolution.flowClarificationQuestion,
+              ).message
+            : (resolution.flowClarificationQuestion || '请问您想办理哪个流程？'),
           needsInput: true,
-          suggestedActions: suggestedFlows,
+          suggestedActions: Array.isArray(resolution.flowCandidates) && resolution.flowCandidates.length > 0
+            ? resolution.flowCandidates.slice(0, 5).map((flow) => flow.processName)
+            : suggestedFlows,
         };
       }
 
@@ -3210,7 +3314,17 @@ ${currentFields}
       return null;
     }
 
-    if (this.isAbortPendingSelectionMessage(input.message)) {
+    const selectionResolution = await this.resolvePendingSelectionWithLlm(
+      'submission',
+      input.message,
+      candidates.map((candidate, index) => ({
+        id: candidate.submissionId,
+        label: `${index + 1}. ${candidate.processName || '未知流程'} - ${candidate.oaSubmissionId || candidate.submissionId}`,
+        aliases: [candidate.oaSubmissionId || '', candidate.processName || ''],
+      })),
+    );
+
+    if (selectionResolution.action === 'cancel' || this.isAbortPendingSelectionMessage(input.message)) {
       await this.clearPendingActionSelection(session);
       return {
         sessionId: session.id,
@@ -3219,12 +3333,16 @@ ${currentFields}
       };
     }
 
-    if (!this.isSelectionLikeInput(input.message)) {
+    if (selectionResolution.action === 'unknown' && !this.isSelectionLikeInput(input.message)) {
       await this.clearPendingActionSelection(session);
       return null;
     }
 
-    const selected = this.resolvePendingSubmissionSelection(input.message, candidates);
+    const selected = this.resolvePendingSubmissionSelection(
+      input.message,
+      candidates,
+      selectionResolution.action === 'select' ? selectionResolution.candidateId : undefined,
+    );
     if (!selected) {
       return this.buildPendingActionPrompt(session.id, pendingAction, candidates);
     }
@@ -3381,7 +3499,17 @@ ${currentFields}
       return null;
     }
 
-    if (this.isAbortPendingSelectionMessage(input.message)) {
+    const selectionResolution = await this.resolvePendingSelectionWithLlm(
+      'connector',
+      input.message,
+      candidates.map((candidate, index) => ({
+        id: candidate.id,
+        label: `${index + 1}. ${candidate.name}`,
+        aliases: [candidate.name],
+      })),
+    );
+
+    if (selectionResolution.action === 'cancel' || this.isAbortPendingSelectionMessage(input.message)) {
       await this.clearPendingConnectorSelection(session);
       return {
         sessionId: session.id,
@@ -3390,7 +3518,11 @@ ${currentFields}
       };
     }
 
-    const selected = this.resolvePendingConnectorSelection(input.message, candidates);
+    const selected = this.resolvePendingConnectorSelection(
+      input.message,
+      candidates,
+      selectionResolution.action === 'select' ? selectionResolution.candidateId : undefined,
+    );
     if (!selected) {
       const context = this.parsePendingConnectorSelectionContext(
         sessionMeta.pendingConnectorSelectionContext,
@@ -3433,6 +3565,89 @@ ${currentFields}
       },
       session,
       followupIntent,
+      sharedContext,
+      traceId,
+    );
+  }
+
+  private async tryHandlePendingFlowSelection(
+    input: ChatInput,
+    session: any,
+    sharedContext: SharedContext,
+    traceId: string,
+  ): Promise<ChatResponse | null> {
+    const sessionMeta = (session.metadata || {}) as Record<string, any>;
+    const pendingFlowSelection = sessionMeta.pendingFlowSelection;
+    const candidates = Array.isArray(sessionMeta.flowCandidates)
+      ? sessionMeta.flowCandidates as PendingFlowSelection[]
+      : [];
+
+    if (!pendingFlowSelection || candidates.length === 0) {
+      return null;
+    }
+
+    const selectionResolution = await this.resolvePendingSelectionWithLlm(
+      'flow',
+      input.message,
+      candidates.map((candidate, index) => ({
+        id: candidate.processCode,
+        label: `${index + 1}. ${candidate.processName}`,
+        aliases: [candidate.processName],
+      })),
+    );
+
+    if (selectionResolution.action === 'cancel' || this.isAbortPendingSelectionMessage(input.message)) {
+      await this.clearPendingFlowSelection(session);
+      return {
+        sessionId: session.id,
+        message: '已取消本次流程选择。如需继续办理，请重新告诉我您要办什么。',
+        needsInput: false,
+      };
+    }
+
+    const selected = this.resolvePendingFlowSelection(
+      input.message,
+      candidates,
+      selectionResolution.action === 'select' ? selectionResolution.candidateId : undefined,
+    );
+    if (!selected) {
+      const context = this.parsePendingFlowSelectionContext(
+        sessionMeta.pendingFlowSelectionContext,
+      );
+      return this.buildPendingFlowPrompt(session.id, candidates, context?.clarificationQuestion);
+    }
+
+    const context = this.parsePendingFlowSelectionContext(
+      sessionMeta.pendingFlowSelectionContext,
+    );
+    const nextMetadata = {
+      ...sessionMeta,
+    } as Record<string, any>;
+    delete nextMetadata.pendingFlowSelection;
+    delete nextMetadata.flowCandidates;
+    delete nextMetadata.pendingFlowSelectionContext;
+
+    await this.prisma.chatSession.update({
+      where: { id: session.id },
+      data: {
+        metadata: nextMetadata,
+      },
+    });
+    session.metadata = nextMetadata;
+
+    return this.handleCreateSubmission(
+      {
+        ...input,
+        message: context?.originalMessage || input.message,
+      },
+      session,
+      {
+        intent: ChatIntent.CREATE_SUBMISSION,
+        confidence: 0.9,
+        extractedEntities: {
+          flowCode: selected.processCode,
+        },
+      },
       sharedContext,
       traceId,
     );
@@ -3571,6 +3786,53 @@ ${currentFields}
         status: 'active',
       },
     });
+  }
+
+  private async applyRequestedRoutingContext(session: any, input: ChatInput) {
+    const requestedTemplateId = String(input.requestedTemplateId || '').trim();
+    const requestedConnectorId = String(input.requestedConnectorId || '').trim();
+    if (!requestedTemplateId && !requestedConnectorId) {
+      return;
+    }
+
+    const currentMetadata = ((session.metadata || {}) as Record<string, any>) || {};
+    if (currentMetadata.currentProcessCode || currentMetadata.pendingDraftId) {
+      return;
+    }
+
+    let resolvedTemplateId = requestedTemplateId || '';
+    let resolvedConnectorId = requestedConnectorId || '';
+
+    if (requestedTemplateId) {
+      try {
+        const template = await this.processLibraryService.getById(requestedTemplateId, input.tenantId, {
+          identityType: input.identityType,
+          roles: input.roles,
+        });
+        resolvedTemplateId = template.id;
+        resolvedConnectorId = resolvedConnectorId || template.connectorId;
+      } catch {
+        resolvedTemplateId = '';
+      }
+    }
+
+    if (!resolvedTemplateId && !resolvedConnectorId) {
+      return;
+    }
+
+    const nextMetadata = {
+      ...currentMetadata,
+      ...(resolvedTemplateId ? { requestedTemplateId: resolvedTemplateId } : {}),
+      ...(resolvedConnectorId ? { routedConnectorId: resolvedConnectorId } : {}),
+    };
+
+    await this.prisma.chatSession.update({
+      where: { id: session.id },
+      data: {
+        metadata: nextMetadata,
+      },
+    });
+    session.metadata = nextMetadata;
   }
 
   async listSessions(tenantId: string, userId: string) {
@@ -4019,14 +4281,104 @@ ${currentFields}
 
   private isAbortPendingSelectionMessage(message: string) {
     const trimmed = message.trim();
-    return /^(取消|算了|不用了|不需要了)$/i.test(trimmed);
+    return trimmed === '__ACTION_CANCEL__';
+  }
+
+  private async resolvePendingSelectionWithLlm(
+    kind: PendingSelectionKind,
+    message: string,
+    candidates: PendingSelectionCandidate[],
+  ): Promise<PendingSelectionResolution> {
+    const trimmed = message.trim();
+    if (!trimmed) {
+      return { action: 'unknown' };
+    }
+
+    try {
+      const candidateList = candidates
+        .map((candidate, index) => {
+          const aliasText = Array.isArray(candidate.aliases)
+            ? candidate.aliases.map((alias) => String(alias || '').trim()).filter(Boolean).join(' / ')
+            : '';
+          return `- 序号: ${index + 1} | id: ${candidate.id} | 名称: ${candidate.label}${aliasText ? ` | 别名: ${aliasText}` : ''}`;
+        })
+        .join('\n');
+
+      const response = await this.llmClient.chat([
+        {
+          role: 'system',
+          content: `你是一个对话候选项选择助手。
+
+任务：
+根据用户回复，判断用户是在：
+1. select: 选择某一个候选项
+2. cancel: 放弃当前选择
+3. retry: 表示还不确定、想重新看看选项
+4. unknown: 无法判断
+
+规则：
+- 优先理解自然语言，不要只做关键词命中。
+- 用户可能说“第二个”“科员那个”“网信处那个”“最新那条”“还是第一个吧”“不要了”“算了”“重新看下选项”等。
+- 只有在能明确对应到一个候选项时，才返回 select。
+- 如果用户表达放弃、取消、不要继续当前选择，返回 cancel。
+- 如果用户表达想重新看选项、还没决定、想再确认，返回 retry。
+- 不要编造不存在的候选项。
+
+返回 JSON：
+{
+  "action": "select" | "cancel" | "retry" | "unknown",
+  "candidateId": "候选项id，仅当 action=select 时提供",
+  "reasoning": "简要说明"
+}`,
+        },
+        {
+          role: 'user',
+          content: `选择类型：${kind}\n候选项：\n${candidateList}\n\n用户回复：\"${trimmed}\"\n\n请返回 JSON。`,
+        },
+      ], {
+        trace: {
+          scope: 'assistant.pending_selection.resolve',
+          metadata: {
+            kind,
+            candidateCount: candidates.length,
+          },
+        },
+      });
+
+      let jsonStr = response.content.trim();
+      if (jsonStr.startsWith('```')) {
+        jsonStr = jsonStr.replace(/^```(?:json)?\n?/, '').replace(/\n?```$/, '');
+      }
+      const result = JSON.parse(jsonStr);
+      const action = String(result.action || '').trim().toLowerCase();
+
+      if (action === 'cancel' || action === 'retry' || action === 'unknown') {
+        return { action };
+      }
+
+      if (action === 'select') {
+        const candidateId = String(result.candidateId || '').trim();
+        if (candidateId && candidates.some((candidate) => candidate.id === candidateId)) {
+          return { action: 'select', candidateId };
+        }
+      }
+    } catch (error: any) {
+      this.logger.warn(`Pending selection resolution LLM failed: ${error.message}`);
+    }
+
+    return { action: 'unknown' };
   }
 
   private resolvePendingSubmissionSelection(
     message: string,
     candidates: PendingSubmissionSelection[],
+    explicitSelectionId?: string,
   ) {
     const trimmed = message.trim();
+
+    if (explicitSelectionId) {
+      return candidates.find((candidate) => candidate.submissionId === explicitSelectionId) || null;
+    }
 
     if (/^\d+$/.test(trimmed)) {
       const index = Number(trimmed) - 1;
@@ -4054,11 +4406,46 @@ ${currentFields}
     };
   }
 
-  private resolvePendingConnectorSelection(
+  private parsePendingFlowSelectionContext(input: unknown): PendingFlowSelectionContext | null {
+    if (!input || typeof input !== 'object' || Array.isArray(input)) {
+      return null;
+    }
+
+    const record = input as Record<string, any>;
+    return {
+      originalMessage: typeof record.originalMessage === 'string' ? record.originalMessage : undefined,
+      clarificationQuestion: typeof record.clarificationQuestion === 'string'
+        ? record.clarificationQuestion
+        : undefined,
+    };
+  }
+
+  private dedupePendingFlowCandidates(candidates: PendingFlowSelection[]) {
+    const seen = new Map<string, PendingFlowSelection>();
+    for (const candidate of candidates) {
+      if (!candidate?.processCode || !candidate?.processName) {
+        continue;
+      }
+      if (!seen.has(candidate.processCode)) {
+        seen.set(candidate.processCode, {
+          processCode: candidate.processCode,
+          processName: candidate.processName,
+        });
+      }
+    }
+    return [...seen.values()];
+  }
+
+  private resolvePendingFlowSelection(
     message: string,
-    candidates: PendingConnectorSelection[],
+    candidates: PendingFlowSelection[],
+    explicitSelectionId?: string,
   ) {
     const trimmed = message.trim();
+
+    if (explicitSelectionId) {
+      return candidates.find((candidate) => candidate.processCode === explicitSelectionId) || null;
+    }
 
     if (/^\d+$/.test(trimmed)) {
       const index = Number(trimmed) - 1;
@@ -4066,10 +4453,27 @@ ${currentFields}
     }
 
     const normalized = trimmed.toLowerCase();
-    return candidates.find((candidate) =>
-      candidate.id.toLowerCase() === normalized
-      || candidate.name.trim().toLowerCase() === normalized,
-    ) || null;
+    return candidates.find((candidate) => candidate.processCode.toLowerCase() === normalized) || null;
+  }
+
+  private resolvePendingConnectorSelection(
+    message: string,
+    candidates: PendingConnectorSelection[],
+    explicitSelectionId?: string,
+  ) {
+    const trimmed = message.trim();
+
+    if (explicitSelectionId) {
+      return candidates.find((candidate) => candidate.id === explicitSelectionId) || null;
+    }
+
+    if (/^\d+$/.test(trimmed)) {
+      const index = Number(trimmed) - 1;
+      return index >= 0 && index < candidates.length ? candidates[index] : null;
+    }
+
+    const normalized = trimmed.toLowerCase();
+    return candidates.find((candidate) => candidate.id.toLowerCase() === normalized) || null;
   }
 
   private buildPendingActionPrompt(
@@ -4105,9 +4509,27 @@ ${currentFields}
 
     return {
       sessionId,
-      message: `${prefix}\n${selectionList}\n\n请回复序号或系统名称。`,
+      message: `${prefix}\n${selectionList}\n\n请回复序号或系统ID。`,
       needsInput: true,
-      suggestedActions: candidates.map((candidate) => candidate.name),
+      suggestedActions: candidates.map((candidate) => candidate.id),
+    };
+  }
+
+  private buildPendingFlowPrompt(
+    sessionId: string,
+    candidates: PendingFlowSelection[],
+    clarificationQuestion?: string,
+  ): ChatResponse {
+    const selectionList = candidates
+      .map((candidate, index) => `${index + 1}. ${candidate.processName}`)
+      .join('\n');
+    const prefix = clarificationQuestion || '当前有多个相近流程，请选择您要办理的流程：';
+
+    return {
+      sessionId,
+      message: `${prefix}\n${selectionList}\n\n请回复序号或流程编码。`,
+      needsInput: true,
+      suggestedActions: candidates.map((candidate) => candidate.processCode),
     };
   }
 
@@ -4245,6 +4667,21 @@ ${currentFields}
     session.metadata = metadata;
   }
 
+  private async clearPendingFlowSelection(session: any) {
+    const metadata = { ...((session.metadata || {}) as Record<string, any>) };
+    delete metadata.pendingFlowSelection;
+    delete metadata.flowCandidates;
+    delete metadata.pendingFlowSelectionContext;
+
+    await this.prisma.chatSession.update({
+      where: { id: session.id },
+      data: {
+        metadata,
+      },
+    });
+    session.metadata = metadata;
+  }
+
   private async clearPendingActionExecution(session: any) {
     const metadata = { ...((session.metadata || {}) as Record<string, any>) };
     delete metadata.pendingActionExecution;
@@ -4367,6 +4804,11 @@ ${currentFields}
           && storedProcessCard?.processInstanceId === sessionState.activeProcessCard.processInstanceId
           ? sessionState.activeProcessCard
           : null;
+        const resolvedContent = this.resolveDecoratedProcessMessageContent({
+          originalContent: message.content,
+          storedProcessCard,
+          currentProcessCard,
+        });
 
         const processCard = (currentProcessCard || storedProcessCard)
           ? {
@@ -4380,7 +4822,7 @@ ${currentFields}
         return {
           id: message.id,
           role: message.role,
-          content: message.content,
+          content: resolvedContent,
           createdAt: message.createdAt,
           messageKind: processCard ? 'process_card' : (messageMeta.messageKind || 'text'),
           attachments: message.role === 'user'
@@ -4395,6 +4837,48 @@ ${currentFields}
           processCard,
         };
       });
+  }
+
+  private resolveDecoratedProcessMessageContent(input: {
+    originalContent: string;
+    storedProcessCard?: Record<string, any> | null;
+    currentProcessCard?: ProcessCard | null;
+  }) {
+    const currentStatus = input.currentProcessCard?.processStatus;
+    const storedStatus = String(input.storedProcessCard?.processStatus || '').trim();
+    if (!currentStatus || currentStatus === storedStatus) {
+      return input.originalContent;
+    }
+
+    const processName = String(
+      input.currentProcessCard?.processName
+      || input.storedProcessCard?.processName
+      || '当前申请',
+    ).trim() || '当前申请';
+    const submissionRef = String(
+      input.currentProcessCard?.oaSubmissionId
+      || input.currentProcessCard?.submissionId
+      || '',
+    ).trim();
+    const submissionLine = submissionRef ? `\n申请编号：${submissionRef}` : '';
+    const reworkReason = String(input.currentProcessCard?.reworkReason || '').trim();
+
+    switch (currentStatus) {
+      case ProcessStatus.DRAFT_SAVED:
+        return `${processName}已保存到 OA 待发箱，尚未正式送审。${submissionLine}`;
+      case ProcessStatus.SUBMITTED:
+        return `${processName}已提交成功，当前为审批中。${submissionLine}`;
+      case ProcessStatus.COMPLETED:
+        return `${processName}已在 OA 系统审批通过，当前申请已完成。${submissionLine}`;
+      case ProcessStatus.CANCELLED:
+        return `${processName}已在 OA 系统中取消或撤回。${submissionLine}`;
+      case ProcessStatus.FAILED:
+        return `${processName}处理失败，请稍后重试。${submissionLine}`;
+      case ProcessStatus.REWORK_REQUIRED:
+        return `${processName}已被退回，请在当前会话继续处理。${submissionLine}${reworkReason ? `\n驳回原因：${reworkReason}` : ''}`;
+      default:
+        return input.originalContent;
+    }
   }
 
   private formatFormData(formData: Record<string, any>, schema: any, processCode?: string): string {
@@ -4881,13 +5365,56 @@ ${currentFields}
     return `已为您整理好“${processName}”，其中${notes.join('，')}，如需修改可直接告诉我。`;
   }
 
-  private looksLikeAttachmentFieldLabel(value: unknown): boolean {
-    const normalized = String(value || '').trim().toLowerCase();
-    if (!normalized) {
-      return false;
+  private async inferAttachmentTargetFieldKey(input: {
+    attachment: {
+      fileName?: string | null;
+      mimeType?: string | null;
+    };
+    fileFields: any[];
+    missingFileFieldKeys: Set<string>;
+    currentFormData: Record<string, any>;
+    userMessage: string;
+    processCode: string;
+  }) {
+    const candidates = input.fileFields
+      .filter((field) => field && typeof field === 'object')
+      .map((field) => ({
+        fieldKey: String(field.key || '').trim(),
+        label: String(field.label || field.key || '').trim(),
+        description: typeof field.description === 'string' ? field.description.trim() : undefined,
+        example: typeof field.example === 'string' ? field.example.trim() : undefined,
+        required: Boolean(field.required),
+        missing: input.missingFileFieldKeys.has(String(field.key || '').trim()),
+        multiple: field.multiple === true,
+        currentAttachmentCount: Array.isArray(input.currentFormData[String(field.key || '').trim()])
+          ? input.currentFormData[String(field.key || '').trim()].length
+          : 0,
+      }))
+      .filter((candidate) => candidate.fieldKey && candidate.label);
+
+    if (candidates.length === 0) {
+      return null;
     }
 
-    return /(附件|上传|材料|扫描件|图片|照片|证明|pdf|word|excel|压缩包|file|upload)/.test(normalized);
+    const judgement = await this.attachmentFieldBindingInference.infer({
+      userMessage: input.userMessage,
+      attachment: {
+        fileName: input.attachment.fileName,
+        mimeType: input.attachment.mimeType,
+      },
+      candidates,
+      trace: {
+        scope: 'assistant.attachment_field_binding',
+        metadata: {
+          processCode: input.processCode,
+          attachmentFileName: input.attachment.fileName || null,
+        },
+      },
+    });
+
+    return judgement.canResolve && judgement.matchedFieldKey
+      ? judgement.matchedFieldKey
+      : null;
   }
 
   private resolveDisplayProcessName(

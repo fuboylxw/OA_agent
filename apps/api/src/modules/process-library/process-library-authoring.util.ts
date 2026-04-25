@@ -25,6 +25,37 @@ export type ProcessLibraryApiToolDefinition = {
   testInput?: Record<string, any>;
 };
 
+export type PageAutomationAccessMode = 'rpa' | 'url' | 'text_guide' | 'direct_link';
+
+export type StructuredGuideFieldDefinition = {
+  label: string;
+  fieldKey?: string;
+  type?: string;
+  required?: boolean;
+  description?: string;
+  example?: string;
+  multiple?: boolean;
+  options?: string[];
+};
+
+export type StructuredGuideFlowDocument = {
+  processName: string;
+  processCode?: string;
+  description?: string;
+  steps: string[];
+  fields: StructuredGuideFieldDefinition[];
+  testData: Record<string, string>;
+  platformConfig: Record<string, any>;
+};
+
+export type StructuredGuideDocument = {
+  sharedSteps: string[];
+  platformConfig: Record<string, any>;
+  flows: StructuredGuideFlowDocument[];
+};
+
+type PageAutomationValidationAccessMode = ProcessLibraryAccessMode | PageAutomationAccessMode;
+
 const VALID_RPA_STEP_TYPES = new Set([
   'goto',
   'wait',
@@ -43,6 +74,7 @@ export function buildProcessLibraryFlowDefinitions(input: {
   accessMode: ProcessLibraryAccessMode;
   authoringMode?: ProcessLibraryAuthoringMode;
   connectorBaseUrl?: string | null;
+  platformConfig?: Record<string, any>;
   processName?: string;
   processCode?: string;
 }) {
@@ -72,23 +104,14 @@ export function buildProcessLibraryFlowDefinitions(input: {
       throw new BadRequestException('当前选择的是 RPA 办理方式，请不要提交链接直达（URL）定义');
     }
 
-    const bundle = input.accessMode === 'url'
-      ? applyGuideAccessMode(
-          {
-            flows: parsedDefinitions.map((definition) => JSON.parse(JSON.stringify(definition))),
-          },
-          {
-            accessMode: 'url',
-            connectorBaseUrl: input.connectorBaseUrl,
-          },
-        )
-      : {
-          flows: parsedDefinitions.map((definition) => JSON.parse(JSON.stringify(definition))),
-        };
-
-    validateGeneratedFlowBundle(bundle, {
+    const bundle = buildPageAutomationFlowBundle({
+      content,
       accessMode: input.accessMode,
+      authoringMode: input.authoringMode,
       connectorBaseUrl: input.connectorBaseUrl,
+      platformConfig: input.platformConfig,
+      processName: input.processName,
+      processCode: input.processCode,
     });
 
     return {
@@ -118,21 +141,14 @@ export function buildProcessLibraryFlowDefinitions(input: {
     throw new BadRequestException('流程定义内容无法解析，请检查 JSON 格式');
   }
 
-  const generatedBundle = buildTextGuideFlowBundleFromDescription(content, {
+  const finalizedBundle = buildPageAutomationFlowBundle({
+    content,
+    accessMode: input.accessMode,
+    authoringMode: input.authoringMode,
     connectorBaseUrl: input.connectorBaseUrl,
+    platformConfig: input.platformConfig,
     processName: input.processName,
     processCode: input.processCode,
-  });
-  const finalizedBundle = input.accessMode === 'url'
-    ? applyGuideAccessMode(generatedBundle, {
-        accessMode: input.accessMode,
-        connectorBaseUrl: input.connectorBaseUrl,
-      })
-    : generatedBundle;
-
-  validateGeneratedFlowBundle(finalizedBundle, {
-    accessMode: input.accessMode,
-    connectorBaseUrl: input.connectorBaseUrl,
   });
 
   return {
@@ -142,35 +158,149 @@ export function buildProcessLibraryFlowDefinitions(input: {
   };
 }
 
+export function buildPageAutomationFlowBundle(input: {
+  content: string;
+  accessMode: PageAutomationAccessMode;
+  authoringMode?: ProcessLibraryAuthoringMode;
+  connectorBaseUrl?: string | null;
+  platformConfig?: Record<string, any>;
+  processName?: string;
+  processCode?: string;
+}) {
+  const content = String(input.content || '').trim();
+  if (!content) {
+    throw new BadRequestException('流程定义不能为空');
+  }
+
+  const parsedDefinitions = parseRpaFlowDefinitions(content);
+  if (parsedDefinitions.length > 0) {
+    if (isTextGuideAccessMode(input.accessMode) && parsedDefinitions.some((definition) => isDirectLinkDefinition(definition))) {
+      throw new BadRequestException('当前选择的是 RPA 办理方式，请不要提交链接直达（URL）定义');
+    }
+
+    const bundle = isDirectLinkAccessMode(input.accessMode)
+      ? applyGuideAccessMode(
+          {
+            flows: parsedDefinitions.map((definition) => JSON.parse(JSON.stringify(definition))),
+          },
+          {
+            accessMode: 'url',
+            connectorBaseUrl: input.connectorBaseUrl,
+            platformConfig: input.platformConfig,
+          },
+        )
+      : {
+          flows: parsedDefinitions.map((definition) => JSON.parse(JSON.stringify(definition))),
+        };
+
+    validateGeneratedFlowBundle(bundle, {
+      accessMode: input.accessMode,
+      connectorBaseUrl: input.connectorBaseUrl,
+      platformConfig: input.platformConfig,
+    });
+
+    return normalizePageAutomationBundle(bundle, input.accessMode);
+  }
+
+  if (input.authoringMode === 'json' || /^[{\[]/.test(content)) {
+    throw new BadRequestException('流程定义内容无法解析，请检查 JSON 格式');
+  }
+
+  const generatedBundle = buildTextGuideFlowBundleFromDescription(content, {
+    connectorBaseUrl: input.connectorBaseUrl,
+    platformConfig: input.platformConfig,
+    processName: input.processName,
+    processCode: input.processCode,
+  });
+  const finalizedBundle = isDirectLinkAccessMode(input.accessMode)
+    ? applyGuideAccessMode(generatedBundle, {
+        accessMode: 'url',
+        connectorBaseUrl: input.connectorBaseUrl,
+        platformConfig: input.platformConfig,
+      })
+    : generatedBundle;
+
+  validateGeneratedFlowBundle(finalizedBundle, {
+    accessMode: input.accessMode,
+    connectorBaseUrl: input.connectorBaseUrl,
+    platformConfig: input.platformConfig,
+  });
+
+  return normalizePageAutomationBundle(finalizedBundle, input.accessMode);
+}
+
+export function buildPageAutomationFlowBundleFromStructuredGuideDocument(input: {
+  parsedDocument: StructuredGuideDocument;
+  accessMode: PageAutomationAccessMode;
+  connectorBaseUrl?: string | null;
+  platformConfig?: Record<string, any>;
+  processName?: string;
+  processCode?: string;
+}) {
+  const generatedBundle = buildTextGuideFlowBundleFromStructuredGuideDocument(input.parsedDocument, {
+    connectorBaseUrl: input.connectorBaseUrl,
+    platformConfig: input.platformConfig,
+    processName: input.processName,
+    processCode: input.processCode,
+  });
+  const finalizedBundle = isDirectLinkAccessMode(input.accessMode)
+    ? applyGuideAccessMode(generatedBundle, {
+        accessMode: 'url',
+        connectorBaseUrl: input.connectorBaseUrl,
+        platformConfig: input.platformConfig,
+      })
+    : generatedBundle;
+
+  validateGeneratedFlowBundle(finalizedBundle, {
+    accessMode: input.accessMode,
+    connectorBaseUrl: input.connectorBaseUrl,
+    platformConfig: input.platformConfig,
+  });
+
+  return normalizePageAutomationBundle(finalizedBundle, input.accessMode);
+}
+
 function buildTextGuideFlowBundleFromDescription(
   guideText: string,
   input: {
     connectorBaseUrl?: string | null;
+    platformConfig?: Record<string, any>;
     processName?: string;
     processCode?: string;
   },
 ) {
   const parsedDocument = parseStructuredTextGuideDocument(guideText);
   if (!parsedDocument) {
-    return {
-      flows: [buildTextGuideFlowFromStepLines({
-        processName: (input.processName || '流程').trim() || '流程',
-        processCode: normalizeProcessCode(input.processCode),
-        stepSource: guideText,
-        connectorBaseUrl: input.connectorBaseUrl,
-      })],
-    };
+    throw new BadRequestException('未识别出统一文字模板结构，请按模板填写');
+  }
+
+  return buildTextGuideFlowBundleFromStructuredGuideDocument(parsedDocument, input);
+}
+
+function buildTextGuideFlowBundleFromStructuredGuideDocument(
+  parsedDocument: StructuredGuideDocument,
+  input: {
+    connectorBaseUrl?: string | null;
+    platformConfig?: Record<string, any>;
+    processName?: string;
+    processCode?: string;
+  },
+) {
+  const flows = Array.isArray(parsedDocument?.flows) ? parsedDocument.flows : [];
+  if (flows.length === 0) {
+    throw new BadRequestException('未从文字模板中识别出可执行流程');
   }
 
   const defaultProcessName = (input.processName || '流程').trim() || '流程';
   const basePlatformConfig = {
     businessBaseUrl: input.connectorBaseUrl,
     targetBaseUrl: input.connectorBaseUrl,
+    ...(input.platformConfig || {}),
     ...(parsedDocument.platformConfig || {}),
   };
 
   return {
-    flows: parsedDocument.flows.map((flow, index) => buildTextGuideFlowFromStepLines({
+    flows: flows.map((flow, index) => buildTextGuideFlowFromStepLines({
       processName: flow.processName || `${defaultProcessName}_${index + 1}`,
       processCode: normalizeProcessCode(flow.processCode) || normalizeProcessCode(input.processCode),
       description: flow.description,
@@ -599,8 +729,9 @@ function buildManualApiTestInput(
 function validateGeneratedFlowBundle(
   bundle: { flows?: Array<Record<string, any>> },
   input?: {
-    accessMode?: ProcessLibraryAccessMode;
+    accessMode?: PageAutomationValidationAccessMode;
     connectorBaseUrl?: string | null;
+    platformConfig?: Record<string, any>;
   },
 ) {
   const definitions = parseRpaFlowDefinitions(bundle);
@@ -611,7 +742,7 @@ function validateGeneratedFlowBundle(
   for (const flow of bundle.flows) {
     const submitSteps = flow?.actions?.submit?.steps;
     const preflightSteps = flow?.runtime?.preflight?.steps;
-    const hasUrlRuntime = input?.accessMode === 'url'
+    const hasUrlRuntime = isDirectLinkAccessMode(input?.accessMode)
       && Array.isArray(preflightSteps)
       && preflightSteps.length > 0
       && typeof flow?.runtime?.networkSubmit?.url === 'string'
@@ -619,7 +750,7 @@ function validateGeneratedFlowBundle(
 
     if ((!Array.isArray(submitSteps) || submitSteps.length === 0) && !hasUrlRuntime) {
       throw new BadRequestException(
-        input?.accessMode === 'url'
+        isDirectLinkAccessMode(input?.accessMode)
           ? '链接直达流程定义必须包含网络提交定义'
           : '流程定义必须包含可执行的提交步骤',
       );
@@ -635,7 +766,10 @@ function validateGeneratedFlowBundle(
       throw new BadRequestException('流程中包含当前不支持的步骤类型');
     }
 
-    if (input?.accessMode === 'url' && !hasDirectLinkNavigationContext(flow, input.connectorBaseUrl)) {
+    if (
+      isDirectLinkAccessMode(input?.accessMode)
+      && !hasDirectLinkNavigationContext(flow, input.connectorBaseUrl, input.platformConfig)
+    ) {
       throw new BadRequestException('链接直达（URL）模板必须至少包含一个可访问链接（如系统网址、流程页面或步骤中的 URL）');
     }
   }
@@ -644,6 +778,7 @@ function validateGeneratedFlowBundle(
 function hasDirectLinkNavigationContext(
   flow: Record<string, any>,
   connectorBaseUrl?: string | null,
+  platformConfig?: Record<string, any>,
 ) {
   const platform = flow?.platform && typeof flow.platform === 'object'
     ? flow.platform as Record<string, any>
@@ -658,6 +793,10 @@ function hasDirectLinkNavigationContext(
     platform.businessBaseUrl,
     platform.targetBaseUrl,
     portalSsoBridge.portalUrl,
+    platformConfig?.entryUrl,
+    platformConfig?.jumpUrlTemplate,
+    platformConfig?.businessBaseUrl,
+    platformConfig?.targetBaseUrl,
     connectorBaseUrl,
   ].some((value) => /^https?:\/\//i.test(String(value || '').trim()));
   if (hasPlatformUrl) {
@@ -771,15 +910,10 @@ function buildTextGuideFlowFromStepLines(input: {
             fields,
             fieldKeyByLabel,
             inputMatch.label,
-            inferFieldType(inputMatch.label, inputMatch.value),
+            normalizeGuideFieldTypeValue(inputMatch.type) || 'text',
           );
       const field = fieldKey ? fields.find((item) => item.key === fieldKey) : null;
-      if (field && inputMatch.description && !field.description) {
-        field.description = inputMatch.description;
-      }
-      if (field && inputMatch.example && !field.example) {
-        field.example = inputMatch.example;
-      }
+      mergeGuideFieldInstructionMetadata(field || undefined, inputMatch);
       steps.push({
         type: 'input',
         fieldKey,
@@ -794,29 +928,20 @@ function buildTextGuideFlowFromStepLines(input: {
       continue;
     }
 
-    const selectMatch = parseGuideInstruction(line, ['选择', '选中']);
+    const selectMatch = parseGuideInstruction(line, ['选择', '选中', '勾选', '勾上', '打勾', '打钩']);
     if (selectMatch) {
-      if (!selectMatch.value) {
-        steps.push({
-          type: 'click',
-          target: {
-            kind: 'text',
-            value: selectMatch.label,
-            label: selectMatch.label,
-          },
-          description: line,
-        });
-        continue;
-      }
-
-      const fieldKey = ensureGuideField(fields, fieldKeyByLabel, selectMatch.label, 'select');
+      const selectFieldType = normalizeGuideFieldTypeValue(selectMatch.type)
+        || resolveGuideImplicitFieldType({
+          options: selectMatch.options,
+          multiple: selectMatch.multiple,
+        })
+        || 'select';
+      const fieldKey = ensureGuideField(fields, fieldKeyByLabel, selectMatch.label, selectFieldType);
       const field = fields.find((item) => item.key === fieldKey);
-      if (field && selectMatch.description && !field.description) {
-        field.description = selectMatch.description;
-      }
-      if (field && selectMatch.example && !field.example) {
-        field.example = selectMatch.example;
-      }
+      mergeGuideFieldInstructionMetadata(field || undefined, {
+        ...selectMatch,
+        type: selectFieldType,
+      });
       steps.push({
         type: 'select',
         fieldKey,
@@ -833,14 +958,17 @@ function buildTextGuideFlowFromStepLines(input: {
 
     const uploadMatch = parseGuideInstruction(line, ['上传', '附加', '添加附件']);
     if (uploadMatch) {
-      const fieldKey = ensureGuideField(fields, fieldKeyByLabel, uploadMatch.label, 'file');
+      const fieldKey = ensureGuideField(
+        fields,
+        fieldKeyByLabel,
+        uploadMatch.label,
+        normalizeGuideFieldTypeValue(uploadMatch.type) || 'file',
+      );
       const field = fields.find((item) => item.key === fieldKey);
-      if (field && uploadMatch.description && !field.description) {
-        field.description = uploadMatch.description;
-      }
-      if (field && uploadMatch.example && !field.example) {
-        field.example = uploadMatch.example;
-      }
+      mergeGuideFieldInstructionMetadata(field || undefined, {
+        ...uploadMatch,
+        type: 'file',
+      });
       steps.push({
         type: 'upload',
         fieldKey,
@@ -939,6 +1067,7 @@ function applyGuideAccessMode(
   input: {
     accessMode: ProcessLibraryAccessMode;
     connectorBaseUrl?: string | null;
+    platformConfig?: Record<string, any>;
   },
 ) {
   if (!Array.isArray(bundle.flows) || bundle.flows.length === 0 || input.accessMode !== 'url') {
@@ -954,12 +1083,18 @@ function applyGuideAccessMode(
       const platform = flow?.platform && typeof flow.platform === 'object'
         ? { ...(flow.platform as Record<string, any>) }
         : {};
+      const configuredBusinessBaseUrl = String(
+        input.platformConfig?.businessBaseUrl
+        || input.platformConfig?.targetBaseUrl
+        || input.connectorBaseUrl
+        || '',
+      ).trim();
 
-      if (!platform.businessBaseUrl && input.connectorBaseUrl) {
-        platform.businessBaseUrl = input.connectorBaseUrl;
+      if (!platform.businessBaseUrl && configuredBusinessBaseUrl) {
+        platform.businessBaseUrl = configuredBusinessBaseUrl;
       }
-      if (!platform.targetBaseUrl && input.connectorBaseUrl) {
-        platform.targetBaseUrl = input.connectorBaseUrl;
+      if (!platform.targetBaseUrl && configuredBusinessBaseUrl) {
+        platform.targetBaseUrl = configuredBusinessBaseUrl;
       }
 
       return {
@@ -1060,8 +1195,73 @@ function buildDirectLinkPreflightSteps(
   const preparationSteps = (triggerIndex >= 0 ? submitSteps.slice(0, triggerIndex) : submitSteps)
     .filter((step) => !['input', 'select'].includes(String(step?.type || '').trim().toLowerCase()))
     .map((step) => ({ ...step }));
+
+  const canonicalJumpUrl = normalizeDirectLinkStepUrl(flow?.platform?.jumpUrlTemplate);
+  if (!canonicalJumpUrl) {
+    return [
+      ...preparationSteps,
+      buildDirectLinkCaptureStep(flow, submitSteps[triggerIndex]),
+    ];
+  }
+
+  const entryUrl = normalizeDirectLinkStepUrl(flow?.platform?.entryUrl);
+  const businessOrigin = tryGetUrlOrigin(
+    flow?.platform?.businessBaseUrl,
+    flow?.platform?.targetBaseUrl,
+    canonicalJumpUrl,
+  );
+  const normalizedPreparationSteps: Array<Record<string, any>> = [];
+  let insertedCanonicalJump = false;
+
+  const insertCanonicalJump = () => {
+    if (insertedCanonicalJump) {
+      return;
+    }
+    normalizedPreparationSteps.push({
+      type: 'goto',
+      value: canonicalJumpUrl,
+      description: `访问 ${canonicalJumpUrl}`,
+    });
+    insertedCanonicalJump = true;
+  };
+
+  for (const step of preparationSteps) {
+    const stepType = String(step?.type || '').trim().toLowerCase();
+    if (stepType === 'goto') {
+      const stepUrl = normalizeDirectLinkStepUrl(step?.value);
+      if (!stepUrl) {
+        normalizedPreparationSteps.push(step);
+        continue;
+      }
+
+      if (stepUrl === canonicalJumpUrl) {
+        insertCanonicalJump();
+        continue;
+      }
+
+      const isStructuredEntryUrl = Boolean(entryUrl && stepUrl === entryUrl);
+      const isBusinessNavigationStep = Boolean(
+        businessOrigin
+        && safeSameOrigin(stepUrl, businessOrigin)
+        && !isStructuredEntryUrl,
+      );
+
+      if (isBusinessNavigationStep) {
+        insertCanonicalJump();
+        continue;
+      }
+
+      normalizedPreparationSteps.push(step);
+      continue;
+    }
+
+    insertCanonicalJump();
+    normalizedPreparationSteps.push(step);
+  }
+
+  insertCanonicalJump();
   return [
-    ...preparationSteps,
+    ...normalizedPreparationSteps,
     buildDirectLinkCaptureStep(flow, submitSteps[triggerIndex]),
   ];
 }
@@ -1115,9 +1315,6 @@ function buildDirectLinkCaptureStep(
               : {}),
             ...(typeof field?.id === 'string' && field.id.trim()
               ? { id: field.id.trim() }
-              : {}),
-            ...(typeof field?.type === 'string' && field.type.trim().toLowerCase() === 'file' && typeof field?.id === 'string' && field.id.trim()
-              ? { selector: `#${field.id.trim()} .cap4-attach__picker, #${field.id.trim()} .cap4-attach__cnt, #${field.id.trim()}` }
               : {}),
             ...(typeof field?.name === 'string' && field.name.trim()
               ? { name: field.name.trim() }
@@ -1286,7 +1483,16 @@ function parseStructuredTextGuideDocument(guideText: string) {
     .filter(Boolean);
 
   const hasFlowHeader = rawLines.some((line) => Boolean(parseGuideFlowHeader(line)));
-  if (!hasFlowHeader) {
+  const hasStructuredSectionAnchor = rawLines.some((line) =>
+    isGuideGlobalSectionHeader(line)
+    || isGuideSharedStepsSectionHeader(line)
+    || isGuideStepSectionHeader(line)
+    || isGuideFieldSectionHeader(line)
+    || isGuideFillFieldSectionHeader(line)
+    || isGuideUploadFieldSectionHeader(line)
+    || isGuideTestDataSectionHeader(line),
+  );
+  if (!hasFlowHeader || !hasStructuredSectionAnchor) {
     return null;
   }
 
@@ -1314,6 +1520,7 @@ function parseStructuredTextGuideDocument(guideText: string) {
     | 'preamble'
     | 'global'
     | 'shared'
+    | 'flow_meta'
     | 'flow_steps'
     | 'flow_fields'
     | 'flow_fill_fields'
@@ -1361,7 +1568,7 @@ function parseStructuredTextGuideDocument(guideText: string) {
     const flowHeader = parseGuideFlowHeader(line);
     if (flowHeader) {
       flushCurrentFlow();
-      currentSection = 'flow_steps';
+      currentSection = 'flow_meta';
       currentFlow = {
         processName: flowHeader.processName,
         steps: [],
@@ -1372,7 +1579,7 @@ function parseStructuredTextGuideDocument(guideText: string) {
       continue;
     }
 
-    if (/^(?:步骤|步骤列表|办理步骤)\s*[:：]?$/u.test(line)) {
+    if (isGuideStepSectionHeader(line)) {
       if (currentFlow) {
         currentSection = 'flow_steps';
       }
@@ -1408,7 +1615,8 @@ function parseStructuredTextGuideDocument(guideText: string) {
     }
 
     if (
-      (currentSection === 'flow_steps'
+      (currentSection === 'flow_meta'
+        || currentSection === 'flow_steps'
         || currentSection === 'flow_fields'
         || currentSection === 'flow_fill_fields'
         || currentSection === 'flow_upload_fields'
@@ -1438,9 +1646,7 @@ function parseStructuredTextGuideDocument(guideText: string) {
       ) {
         const fieldDefinition = parseGuideFieldDefinitionLine(
           line,
-          currentSection === 'flow_fill_fields'
-            ? 'text'
-            : (currentSection === 'flow_upload_fields' ? 'file' : undefined),
+          currentSection === 'flow_upload_fields' ? 'file' : undefined,
         );
         if (fieldDefinition) {
           currentFlow.fields.push(fieldDefinition);
@@ -1456,7 +1662,15 @@ function parseStructuredTextGuideDocument(guideText: string) {
         continue;
       }
 
-      currentFlow.steps.push(line);
+      if (currentSection === 'flow_steps') {
+        currentFlow.steps.push(line);
+        continue;
+      }
+
+      if (looksLikeGuideStepLine(line)) {
+        currentSection = 'flow_steps';
+        currentFlow.steps.push(line);
+      }
       continue;
     }
 
@@ -1464,7 +1678,9 @@ function parseStructuredTextGuideDocument(guideText: string) {
       continue;
     }
 
-    sharedSteps.push(line);
+    if (looksLikeGuideStepLine(line)) {
+      sharedSteps.push(line);
+    }
   }
 
   flushCurrentFlow();
@@ -1484,8 +1700,12 @@ function isGuideFieldSectionHeader(line: string) {
   return /^(?:#{1,6}\s*)?(?:参数|字段)(?:定义)?\s*[:：]?$/u.test(line);
 }
 
+function isGuideStepSectionHeader(line: string) {
+  return /^(?:#{1,6}\s*)?(?:步骤|步骤列表|办理步骤)\s*[:：]?$/u.test(line);
+}
+
 function isGuideFillFieldSectionHeader(line: string) {
-  return /^(?:#{1,6}\s*)?(?:需要填写的信息|待填写信息|填写信息|需要补充的信息)\s*[:：]?$/u.test(line);
+  return /^(?:#{1,6}\s*)?(?:用户办理时需要补充的信息|需要填写的信息|待填写信息|填写信息|待补充信息|需要补充的信息)\s*[:：]?$/u.test(line);
 }
 
 function isGuideUploadFieldSectionHeader(line: string) {
@@ -1648,13 +1868,29 @@ function parseGuideFieldDefinitionLine(line: string, forcedType?: string) {
     const required = parseGuideRequiredFlag(pipeSegments);
     const description = extractGuideFieldDescription(pipeSegments.slice(1));
     const example = extractGuideFieldExample(pipeSegments.slice(1));
+    const options = extractGuideFieldOptions(pipeSegments.slice(1));
+    const uploadRequirements = extractGuideFieldUploadRequirements(pipeSegments.slice(1));
+    const multiple = parseGuideMultipleFlag(pipeSegments.slice(1), uploadRequirements);
+    const normalizedDescription = [description, uploadRequirements ? `上传要求：${uploadRequirements}` : undefined]
+      .filter(Boolean)
+      .join('；');
+    const resolvedType = type || resolveGuideImplicitFieldType({
+      label,
+      description,
+      example,
+      options,
+      multiple,
+      uploadRequirements,
+    });
 
     return {
       label,
-      ...(type ? { type } : {}),
+      ...(resolvedType ? { type: resolvedType } : {}),
       ...(required !== undefined ? { required } : {}),
-      ...(description ? { description } : {}),
+      ...(normalizedDescription ? { description: normalizedDescription } : {}),
       ...(example ? { example } : {}),
+      ...(multiple !== undefined ? { multiple } : {}),
+      ...(options.length > 0 ? { options } : {}),
     };
   }
 
@@ -1675,13 +1911,29 @@ function parseGuideFieldDefinitionLine(line: string, forcedType?: string) {
     const required = parseGuideRequiredFlag(tokens);
     const description = extractGuideFieldDescription(tokens);
     const example = extractGuideFieldExample(tokens);
+    const options = extractGuideFieldOptions(tokens);
+    const uploadRequirements = extractGuideFieldUploadRequirements(tokens);
+    const multiple = parseGuideMultipleFlag(tokens, uploadRequirements);
+    const normalizedDescription = [description, uploadRequirements ? `上传要求：${uploadRequirements}` : undefined]
+      .filter(Boolean)
+      .join('；');
+    const resolvedType = type || resolveGuideImplicitFieldType({
+      label,
+      description,
+      example,
+      options,
+      multiple,
+      uploadRequirements,
+    });
 
     return {
       label,
-      ...(type ? { type } : {}),
+      ...(resolvedType ? { type: resolvedType } : {}),
       ...(required !== undefined ? { required } : {}),
-      ...(description ? { description } : {}),
+      ...(normalizedDescription ? { description: normalizedDescription } : {}),
       ...(example ? { example } : {}),
+      ...(multiple !== undefined ? { multiple } : {}),
+      ...(options.length > 0 ? { options } : {}),
     };
   }
 
@@ -1761,7 +2013,15 @@ function parseGuideRequiredFlag(tokens: string[]) {
     return true;
   }
 
+  if (normalizedTokens.some((token) => /^(?:是否必填|required)\s*[:：=]\s*(?:是|必填|true|yes|1)$/iu.test(token))) {
+    return true;
+  }
+
   if (normalizedTokens.some((token) => token === '选填' || token === 'optional' || token === '可选')) {
+    return false;
+  }
+
+  if (normalizedTokens.some((token) => /^(?:是否必填|required)\s*[:：=]\s*(?:否|选填|可选|false|no|0)$/iu.test(token))) {
     return false;
   }
 
@@ -1777,10 +2037,281 @@ function normalizeGuideFieldTypeValue(value?: string) {
   if (['text', '文本', '字符串', '单行文本'].includes(normalized)) return 'text';
   if (['textarea', '多行文本', '备注', '说明'].includes(normalized)) return 'textarea';
   if (['date', '日期', '时间', 'datetime'].includes(normalized)) return 'date';
+  if (['checkbox', '多选', '多选框', '勾选'].includes(normalized)) return 'checkbox';
+  if (['radio', '单选'].includes(normalized)) return 'radio';
   if (['select', '下拉', '枚举', '选项'].includes(normalized)) return 'select';
   if (['file', '附件', 'upload'].includes(normalized)) return 'file';
   if (['number', '数字', '金额', '整数', '小数'].includes(normalized)) return 'number';
   return undefined;
+}
+
+function resolveGuideImplicitFieldType(input: {
+  label?: string;
+  description?: string;
+  example?: string;
+  options?: string[];
+  multiple?: boolean;
+  uploadRequirements?: string;
+}) {
+  if (Array.isArray(input.options) && input.options.length > 0) {
+    return input.multiple === true ? 'checkbox' : 'select';
+  }
+  if (input.uploadRequirements) {
+    return 'file';
+  }
+  if (looksLikeGuideFileField(input)) {
+    return 'file';
+  }
+  if (looksLikeGuideDateField(input)) {
+    return 'date';
+  }
+  if (looksLikeGuideTextareaField(input)) {
+    return 'textarea';
+  }
+  return undefined;
+}
+
+function looksLikeGuideDateField(input: {
+  label?: string;
+  description?: string;
+  example?: string;
+}) {
+  const haystack = [
+    input.label,
+    input.description,
+    input.example,
+  ]
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .join(' ');
+
+  if (!haystack) {
+    return false;
+  }
+
+  if (!/(日期|时间|起始|开始|结束|截止|到期|返校|返程|销假|生效|失效|date|time)/iu.test(haystack)) {
+    return false;
+  }
+
+  return /(\d{4}[-/年]\d{1,2}[-/月]\d{1,2}(?:日|号)?|\d{1,2}[/-]\d{1,2}|今天|明天|后天|下周|本周|周[一二三四五六日天])/u.test(haystack);
+}
+
+function looksLikeGuideFileField(input: {
+  label?: string;
+  description?: string;
+  example?: string;
+}) {
+  const haystack = [
+    input.label,
+    input.description,
+    input.example,
+  ]
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .join(' ');
+
+  if (!haystack) {
+    return false;
+  }
+
+  if (/(不是上传|非上传|无需上传|不需要上传|仅填写|只是填写|仅需填写|不是附件入口|不是上传入口)/iu.test(haystack)) {
+    return false;
+  }
+
+  const example = String(input.example || '').trim();
+  const hasUploadVerb = /(上传|upload)/iu.test(haystack);
+  const hasAttachmentNoun = /(附件|附加|attachment)/iu.test(haystack);
+  const hasFileExtensionExample = /\.(pdf|doc|docx|xls|xlsx|ppt|pptx|zip|rar|jpg|jpeg|png|txt)$/iu.test(example);
+  const hasFileEvidence = hasFileExtensionExample
+    || /(文件|材料|文档|图片|压缩包|扫描件|合同|证明)/iu.test([
+      input.description,
+      input.example,
+    ]
+      .map((item) => String(item || '').trim())
+      .filter(Boolean)
+      .join(' '));
+
+  if (hasUploadVerb) {
+    return true;
+  }
+
+  return hasAttachmentNoun && hasFileEvidence;
+}
+
+function looksLikeGuideTextareaField(input: {
+  label?: string;
+  description?: string;
+  example?: string;
+}) {
+  const haystack = [
+    input.label,
+    input.description,
+    input.example,
+  ]
+    .map((item) => String(item || '').trim())
+    .filter(Boolean)
+    .join(' ');
+
+  if (!haystack) {
+    return false;
+  }
+
+  if (/(事由|原因|详情|说明|内容|备注|经过|描述|情况|理由|summary|detail|description|remark)/iu.test(haystack)) {
+    return true;
+  }
+
+  const example = String(input.example || '').trim();
+  return example.length >= 20 && /[，。；：:]/u.test(example);
+}
+
+function extractGuideFieldOptions(tokens: string[]) {
+  for (const token of tokens) {
+    const match = String(token || '').trim().match(/^(?:可选值|选项|候选值|options?)\s*[:：=]\s*(.+)$/iu);
+    const value = match?.[1]?.trim();
+    if (!value) {
+      continue;
+    }
+
+    return Array.from(
+      new Set(
+        value
+          .split(/[、,，;；/]/)
+          .map((item) => item.trim())
+          .filter(Boolean),
+      ),
+    );
+  }
+
+  return [] as string[];
+}
+
+function extractGuideFieldUploadRequirements(tokens: string[]) {
+  for (const token of tokens) {
+    const match = String(token || '').trim().match(/^(?:上传要求|附件要求|upload)\s*[:：=]\s*(.+)$/iu);
+    const value = match?.[1]?.trim();
+    if (value) {
+      return value;
+    }
+  }
+
+  return undefined;
+}
+
+function parseGuideMultipleFlag(tokens: string[], uploadRequirements?: string) {
+  const normalizedTokens = tokens.map((token) => token.trim().toLowerCase());
+
+  if (normalizedTokens.some((token) =>
+    token === '可多选'
+    || token === '多选'
+    || token === '多选框'
+    || token === 'checkbox'
+    || token === '支持多份'
+    || /^(?:是否可多选|multiple)\s*[:：=]\s*(?:是|可多选|支持|true|yes|1)$/iu.test(token)
+    || /^(?:是否支持多份|支持多份|允许多份)\s*[:：=]?\s*(?:是|支持|true|yes|1)?$/iu.test(token)
+  )) {
+    return true;
+  }
+
+  if (normalizedTokens.some((token) =>
+    token === '只能选一个'
+    || token === '单选'
+    || token === '单份'
+    || /^(?:是否可多选|multiple)\s*[:：=]\s*(?:否|只能选一个|false|no|0)$/iu.test(token)
+    || /^(?:是否支持多份|支持多份|允许多份)\s*[:：=]\s*(?:否|不支持|false|no|0)$/iu.test(token)
+  )) {
+    return false;
+  }
+
+  const normalizedUploadRequirements = String(uploadRequirements || '').trim();
+  if (normalizedUploadRequirements) {
+    if (/(多份|多个|多文件)/u.test(normalizedUploadRequirements)) {
+      return true;
+    }
+    if (/(单份|一份|单个文件)/u.test(normalizedUploadRequirements)) {
+      return false;
+    }
+  }
+
+  return undefined;
+}
+
+function normalizeGuideFieldOptions(
+  options?: Array<{ label?: string; value?: string } | string>,
+): Array<{ label: string; value: string }> | undefined {
+  if (!Array.isArray(options) || options.length === 0) {
+    return undefined;
+  }
+
+  const normalized = options
+    .map((option) => {
+      if (typeof option === 'string') {
+        const value = option.trim();
+        return value ? { label: value, value } : null;
+      }
+      const label = String(option?.label || option?.value || '').trim();
+      const value = String(option?.value || option?.label || '').trim();
+      return label && value ? { label, value } : null;
+    })
+    .filter((option): option is { label: string; value: string } => Boolean(option));
+
+  return normalized.length > 0 ? normalized : undefined;
+}
+
+function mergeGuideFieldInstructionMetadata(
+  field: Record<string, any> | undefined,
+  metadata?: {
+    type?: string;
+    required?: boolean;
+    description?: string;
+    example?: string;
+    multiple?: boolean;
+    options?: Array<{ label?: string; value?: string } | string>;
+  },
+) {
+  if (!field || !metadata) {
+    return;
+  }
+
+  const normalizedType = normalizeGuideFieldTypeValue(metadata.type);
+  const currentType = normalizeGuideFieldTypeValue(field.type) || 'text';
+  if (
+    normalizedType
+    && (
+      !field.type
+      || currentType === 'text'
+      || (currentType === 'textarea' && normalizedType !== 'textarea')
+      || (currentType === 'select' && (normalizedType === 'checkbox' || normalizedType === 'radio'))
+    )
+  ) {
+    field.type = normalizedType;
+  }
+
+  if (metadata.required !== undefined) {
+    field.required = Boolean(metadata.required);
+  }
+  if (metadata.description && !field.description) {
+    field.description = String(metadata.description).trim();
+  }
+  if (metadata.example && !field.example) {
+    field.example = String(metadata.example).trim();
+  }
+  if (metadata.multiple !== undefined) {
+    field.multiple = Boolean(metadata.multiple);
+  }
+
+  const normalizedOptions = normalizeGuideFieldOptions(metadata.options);
+  if (normalizedOptions && normalizedOptions.length > 0) {
+    field.options = normalizedOptions;
+    if (!field.type || normalizeGuideFieldTypeValue(field.type) === 'text') {
+      field.type = field.multiple ? 'checkbox' : 'select';
+    }
+    if (
+      field.multiple === true
+      && normalizeGuideFieldTypeValue(field.type) === 'select'
+    ) {
+      field.type = 'checkbox';
+    }
+  }
 }
 
 function hydrateGuideFieldDefinitions(input: {
@@ -1819,21 +2350,37 @@ function hydrateGuideFieldDefinitions(input: {
     }
 
     const sampleValue = rawTestData[label] === undefined ? undefined : String(rawTestData[label]);
+    const description = typeof definition.description === 'string'
+      ? String(definition.description).trim()
+      : undefined;
+    const example = typeof definition.example === 'string'
+      ? String(definition.example).trim()
+      : undefined;
+    const normalizedOptions = normalizeGuideFieldOptions(definition.options);
+    const inferredType = normalizeGuideFieldTypeValue(definition.type)
+      || resolveGuideImplicitFieldType({
+        label,
+        description,
+        example,
+        multiple: typeof definition.multiple === 'boolean' ? definition.multiple : undefined,
+        options: normalizedOptions?.map((option) => option.value) || [],
+      })
+      || 'text';
     const fieldKey = ensureGuideField(
       input.fields,
       input.fieldKeyByLabel,
       label,
-      normalizeGuideFieldTypeValue(definition.type) || inferFieldType(label, sampleValue),
+      inferredType,
     );
     const field = input.fields.find((item) => item.key === fieldKey);
     if (field && definition.required !== undefined) {
       field.required = definition.required;
     }
-    if (field && definition.description) {
-      field.description = String(definition.description).trim();
+    if (field && description) {
+      field.description = description;
     }
-    if (field && definition.example) {
-      field.example = String(definition.example).trim();
+    if (field && example) {
+      field.example = example;
     }
     if (field && definition.multiple !== undefined) {
       field.multiple = Boolean(definition.multiple);
@@ -1858,28 +2405,17 @@ function hydrateGuideFieldDefinitions(input: {
         .filter((item) => item && typeof item === 'object' && !Array.isArray(item))
         .map((item) => ({ ...item }));
     }
-    if (field && Array.isArray(definition.options) && definition.options.length > 0) {
-      field.options = definition.options
-        .map((option) => {
-          if (typeof option === 'string') {
-            const normalized = option.trim();
-            return normalized
-              ? {
-                  label: normalized,
-                  value: normalized,
-                }
-              : null;
-          }
-          const labelValue = String(option?.label || option?.value || '').trim();
-          const optionValue = String(option?.value || option?.label || '').trim();
-          return labelValue && optionValue
-            ? {
-                label: labelValue,
-                value: optionValue,
-              }
-            : null;
-        })
-        .filter((option): option is { label: string; value: string } => Boolean(option));
+    if (field && normalizedOptions && normalizedOptions.length > 0) {
+      field.options = normalizedOptions;
+      if (!field.type || normalizeGuideFieldTypeValue(field.type) === 'text') {
+        field.type = field.multiple ? 'checkbox' : 'select';
+      }
+      if (
+        field.multiple === true
+        && normalizeGuideFieldTypeValue(field.type) === 'select'
+      ) {
+        field.type = 'checkbox';
+      }
     }
     if (field && definition.uiHints && typeof definition.uiHints === 'object' && !Array.isArray(definition.uiHints)) {
       field.uiHints = {
@@ -1903,7 +2439,7 @@ function hydrateGuideFieldDefinitions(input: {
       input.fields,
       input.fieldKeyByLabel,
       label,
-      inferFieldType(label, value),
+      'text',
     );
     const field = input.fields.find((item) => item.key === fieldKey);
     if (field && !field.example) {
@@ -1916,7 +2452,7 @@ function hydrateGuideFieldDefinitions(input: {
 }
 
 function tryAssignGuidePlatformConfig(target: Record<string, any>, line: string) {
-  const match = line.match(/^(入口链接|入口地址|入口URL|入口Url|入口url|打开地址|OA地址|OA 地址|认证入口|登录入口|门户地址|门户首页|系统网址|系统地址|业务系统网址|业务系统地址|流程页面|页面链接|流程链接|目标页面|跳转页面|执行方式|目标系统|跳转链接模板|票据服务地址)\s*[:：]\s*(.+)$/u);
+  const match = line.match(/^(系统名称|业务系统名称|目标系统名称|入口链接|入口地址|入口URL|入口Url|入口url|打开地址|OA地址|OA 地址|认证入口|登录入口|门户地址|门户首页|系统网址|系统地址|业务系统网址|业务系统地址|流程页面|页面链接|流程链接|目标页面|跳转页面|执行方式|目标系统|跳转链接模板|票据服务地址)\s*[:：]\s*(.+)$/u);
   if (!match) {
     return false;
   }
@@ -1924,6 +2460,11 @@ function tryAssignGuidePlatformConfig(target: Record<string, any>, line: string)
   const rawKey = match[1].replace(/\s+/g, '');
   const value = match[2]?.trim();
   if (!value) {
+    return true;
+  }
+
+  if (['系统名称', '业务系统名称', '目标系统名称', '目标系统'].includes(rawKey)) {
+    target.targetSystem = value;
     return true;
   }
 
@@ -2008,6 +2549,43 @@ function normalizeGuideStepLines(stepSource: string | string[]) {
     .filter(Boolean);
 }
 
+function looksLikeGuideStepLine(line: string) {
+  const normalized = stripGuideLeadWords(normalizeGuideStructuredLine(line));
+  if (!normalized) {
+    return false;
+  }
+
+  if (/https?:\/\/\S+/iu.test(normalized)) {
+    return true;
+  }
+
+  if (/^(?:等待|停留)\s*\d+/u.test(normalized)) {
+    return true;
+  }
+
+  if (/^(?:看到|出现|显示)\s+/u.test(normalized)) {
+    return true;
+  }
+
+  if (parseGuideInstruction(normalized, ['输入', '填写', '填入', '录入'])) {
+    return true;
+  }
+
+  if (parseGuideInstruction(normalized, ['选择', '选中', '勾选', '勾上', '打勾', '打钩'])) {
+    return true;
+  }
+
+  if (parseGuideInstruction(normalized, ['上传', '附加', '添加附件'])) {
+    return true;
+  }
+
+  if (parseGuideClickInstruction(normalized)) {
+    return true;
+  }
+
+  return false;
+}
+
 function resolveGuideEntryUrl(input: {
   platformConfig?: Record<string, any>;
   connectorBaseUrl?: string | null;
@@ -2048,14 +2626,42 @@ function parseGuideInstruction(line: string, commands: string[]) {
   const assignmentMatch = primarySegment.match(/^(.+?)(?:\s*(?:为|填为|输入为|写为|[:：=])\s*)(.+)$/u);
   const label = normalizeGuideLabel(assignmentMatch ? assignmentMatch[1] : primarySegment);
   const value = assignmentMatch?.[2]?.trim() || undefined;
-  const description = extractGuideFieldDescription(pipeSegments.slice(1));
-  const example = extractGuideFieldExample(pipeSegments.slice(1));
+  const metadataSegments = pipeSegments.slice(1);
+  const description = extractGuideFieldDescription(metadataSegments);
+  const example = extractGuideFieldExample(metadataSegments);
+  const options = extractGuideFieldOptions(metadataSegments);
+  const uploadRequirements = extractGuideFieldUploadRequirements(metadataSegments);
+  const multiple = parseGuideMultipleFlag(metadataSegments, uploadRequirements);
+  const required = parseGuideRequiredFlag(metadataSegments);
+  const type = metadataSegments
+    .map((segment) => normalizeGuideFieldTypeValue(segment))
+    .find(Boolean)
+    || resolveGuideImplicitFieldType({
+      label,
+      description,
+      example,
+      options,
+      multiple,
+      uploadRequirements,
+    });
+  const normalizedDescription = [description, uploadRequirements ? `上传要求：${uploadRequirements}` : undefined]
+    .filter(Boolean)
+    .join('；');
 
   if (!label) {
     return null;
   }
 
-  return { label, value, description, example };
+  return {
+    label,
+    value,
+    ...(type ? { type } : {}),
+    ...(required !== undefined ? { required } : {}),
+    ...(normalizedDescription ? { description: normalizedDescription } : {}),
+    ...(example ? { example } : {}),
+    ...(multiple !== undefined ? { multiple } : {}),
+    ...(options.length > 0 ? { options } : {}),
+  };
 }
 
 function parseGuideClickInstruction(line: string) {
@@ -2076,33 +2682,6 @@ function normalizeGuideLabel(value?: string | null) {
     .replace(/^(?:请先|请)\s+/u, '')
     .replace(/(按钮|菜单|链接|页面|页签|输入框|字段)$/u, '')
     .trim();
-}
-
-function inferFieldType(label: string, sampleValue?: string) {
-  const text = `${label} ${sampleValue || ''}`.toLowerCase();
-  if (text.includes('日期') || text.includes('时间') || /\d{4}-\d{1,2}-\d{1,2}/.test(text)) return 'date';
-  if (looksLikeAttachmentField(text)) return 'file';
-  if (looksLikeNumericField(text)) return 'number';
-  if (text.includes('原因') || text.includes('说明') || text.includes('备注') || text.includes('内容') || text.includes('事由')) return 'textarea';
-  return 'text';
-}
-
-function looksLikeAttachmentField(text: string) {
-  const normalized = String(text || '').toLowerCase();
-  if (!normalized) {
-    return false;
-  }
-
-  return /(附件|证明|材料|文件|扫描件|图片|照片|pdf|doc|docx|zip|rar|upload|file)/.test(normalized);
-}
-
-function looksLikeNumericField(text: string) {
-  const normalized = String(text || '').toLowerCase();
-  if (!normalized) {
-    return false;
-  }
-
-  return /(金额|数量|份数|次数|天数|学分|price|amount|count|number|qty)/.test(normalized);
 }
 
 function toFieldKey(label: string, index: number) {
@@ -2145,6 +2724,51 @@ function normalizeExecutorModeValue(value?: unknown) {
     return normalized;
   }
   return undefined;
+}
+
+function isTextGuideAccessMode(accessMode?: PageAutomationAccessMode) {
+  return accessMode === 'rpa' || accessMode === 'text_guide';
+}
+
+function isDirectLinkAccessMode(accessMode?: PageAutomationValidationAccessMode) {
+  return accessMode === 'url' || accessMode === 'direct_link';
+}
+
+function normalizePageAutomationBundle(
+  bundle: { flows?: Array<Record<string, any>> },
+  accessMode?: PageAutomationAccessMode,
+) {
+  if (!Array.isArray(bundle.flows) || bundle.flows.length === 0 || accessMode !== 'text_guide') {
+    return bundle;
+  }
+
+  return {
+    ...bundle,
+    flows: bundle.flows.map((flow) => {
+      const metadata = flow?.metadata && typeof flow.metadata === 'object'
+        ? { ...(flow.metadata as Record<string, any>) }
+        : {};
+      const textTemplate = metadata.textTemplate
+        && typeof metadata.textTemplate === 'object'
+        && !Array.isArray(metadata.textTemplate)
+        ? metadata.textTemplate
+        : undefined;
+
+      return {
+        ...flow,
+        accessMode: 'text_guide',
+        sourceType: 'text_guide',
+        metadata: {
+          ...metadata,
+          accessMode: 'text_guide',
+          sourceType: 'text_guide',
+          ...(textTemplate && !metadata.textGuide
+            ? { textGuide: textTemplate }
+            : {}),
+        },
+      };
+    }),
+  };
 }
 
 function isDirectLinkDefinition(definition: Record<string, any> | null | undefined) {

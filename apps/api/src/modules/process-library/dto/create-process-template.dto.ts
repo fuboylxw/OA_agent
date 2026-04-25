@@ -6,15 +6,15 @@ export class CreateProcessTemplateDto {
   @IsUUID()
   connectorId: string;
 
-  @ApiProperty({ description: '流程编码' })
+  @ApiPropertyOptional({ description: '流程编码；不传时系统会根据模板正文自动提取或生成' })
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  processCode: string;
+  processCode?: string;
 
-  @ApiProperty({ description: '流程名称' })
+  @ApiPropertyOptional({ description: '流程名称；优先从模板正文提取' })
+  @IsOptional()
   @IsString()
-  @IsNotEmpty()
-  processName: string;
+  processName?: string;
 
   @ApiProperty({ required: false, description: '流程分类' })
   @IsOptional()
@@ -68,20 +68,20 @@ export class CreateProcessTemplateDto {
     description: '单个流程定义，支持流程库简易文字模板或高级 JSON',
     example: JSON.stringify({
       flows: [{
-        processCode: 'leave_request',
-        processName: '请假申请',
+        processCode: 'process_alpha',
+        processName: '流程A',
         fields: [
-          { key: 'start_date', label: '开始日期', type: 'date', required: true },
-          { key: 'end_date', label: '结束日期', type: 'date', required: true },
-          { key: 'reason', label: '请假原因', type: 'textarea', required: true },
+          { key: 'field_one', label: '字段一', type: 'text', required: true },
+          { key: 'field_two', label: '字段二', type: 'date', required: true },
+          { key: 'field_three', label: '字段三', type: 'textarea', required: true },
         ],
         actions: {
           submit: {
             steps: [
-              { type: 'goto', value: 'https://oa.example.com/leave' },
-              { type: 'input', fieldKey: 'start_date', target: { kind: 'text', value: '开始日期' } },
-              { type: 'input', fieldKey: 'end_date', target: { kind: 'text', value: '结束日期' } },
-              { type: 'input', fieldKey: 'reason', target: { kind: 'text', value: '请假原因' } },
+              { type: 'goto', value: 'https://oa.example.com/process-alpha' },
+              { type: 'input', fieldKey: 'field_one', target: { kind: 'text', value: '字段一' } },
+              { type: 'input', fieldKey: 'field_two', target: { kind: 'text', value: '字段二' } },
+              { type: 'input', fieldKey: 'field_three', target: { kind: 'text', value: '字段三' } },
               { type: 'click', target: { kind: 'text', value: '提交' } },
             ],
           },

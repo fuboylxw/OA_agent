@@ -1,6 +1,6 @@
 'use client';
 
-import { useCallback, useEffect, useState, type ChangeEvent } from 'react';
+import { useCallback, useEffect, useRef, useState, type ChangeEvent } from 'react';
 import { useRouter } from 'next/navigation';
 import { FileText, CheckCircle, AlertCircle, Search, Plus, Trash2 } from 'lucide-react';
 import AuthGuard from '../components/AuthGuard';
@@ -103,6 +103,10 @@ function ProcessLibraryContent() {
   const [editorMode, setEditorMode] = useState<ProcessEditorMode>('create');
   const [editingProcessId, setEditingProcessId] = useState<string | null>(null);
   const [deletingProcessId, setDeletingProcessId] = useState<string | null>(null);
+  const [templatePreviewLoading, setTemplatePreviewLoading] = useState(false);
+  const [templatePreviewError, setTemplatePreviewError] = useState('');
+  const metadataTouchedRef = useRef({ processName: false, description: false });
+  const lastAutoMetadataRef = useRef({ processCode: '', processName: '', description: '' });
 
   const canManage = (() => {
     const roles = getClientUserInfo().roles || [];
@@ -163,6 +167,22 @@ function ProcessLibraryContent() {
       void fetchConnectors();
     }
   }, [fetchProcesses, fetchConnectors, router]);
+
+  useEffect(() => {
+    const hasRunningValidation = processes.some((process) =>
+      process.uiHints?.validationResult?.status === 'running',
+    );
+
+    if (!hasRunningValidation) {
+      return undefined;
+    }
+
+    const timer = window.setTimeout(() => {
+      void fetchProcesses();
+    }, 2500);
+
+    return () => window.clearTimeout(timer);
+  }, [fetchProcesses, processes]);
 
   const filteredProcesses = processes.filter((process) => {
     const matchesSearch =
@@ -234,7 +254,130 @@ function ProcessLibraryContent() {
     };
   };
 
+  const getValidationUi = (validationResult: any) => {
+    const status = String(validationResult?.status || '').trim();
+    const checkedMode = String(validationResult?.checkedMode || '').trim();
+    const bootstrapChecked = checkedMode === 'bootstrap_validation';
+    switch (status) {
+      case 'passed':
+        return {
+          icon: <CheckCircle className="w-4 h-4 text-green-500" />,
+          label: bootstrapChecked ? '初始化校验通过' : '系统自动实测通过',
+          textClassName: 'text-green-600',
+          reasonLabel: '说明',
+        };
+      case 'running':
+        return {
+          icon: <AlertCircle className="w-4 h-4 text-blue-500" />,
+          label: bootstrapChecked ? '初始化校验中' : '系统正在自动实测',
+          textClassName: 'text-blue-600',
+          reasonLabel: '说明',
+        };
+      case 'blocked':
+        return {
+          icon: <AlertCircle className="w-4 h-4 text-amber-500" />,
+          label: bootstrapChecked ? '初始化校验部分通过' : '暂时无法自动实测',
+          textClassName: 'text-amber-600',
+          reasonLabel: '说明',
+        };
+      case 'pending':
+        return {
+          icon: <AlertCircle className="w-4 h-4 text-amber-500" />,
+          label: bootstrapChecked ? '等待初始化校验' : '等待系统自动实测',
+          textClassName: 'text-amber-600',
+          reasonLabel: '说明',
+        };
+      default:
+        return {
+          icon: <AlertCircle className="w-4 h-4 text-red-500" />,
+          label: bootstrapChecked ? '初始化校验未通过' : '系统自动实测未通过',
+          textClassName: 'text-red-600',
+          reasonLabel: '原因',
+        };
+    }
+  };
+
   const activeFlowContent = createForm.textTemplateContent.trim();
+
+  useEffect(() => {
+    if (!showCreateModal || !activeFlowContent) {
+      setTemplatePreviewLoading(false);
+      setTemplatePreviewError('');
+      return undefined;
+    }
+
+    let cancelled = false;
+    const timer = window.setTimeout(async () => {
+      setTemplatePreviewLoading(true);
+      setTemplatePreviewError('');
+      try {
+        const response = await apiClient.post('/process-library/preview', {
+          connectorId: createForm.connectorId || undefined,
+          processName: createForm.processName.trim() || undefined,
+          description: createForm.description.trim() || undefined,
+          accessMode: createForm.accessMode,
+          authoringMode: 'text',
+          rpaFlowContent: createForm.textTemplateContent,
+        });
+
+        if (cancelled) {
+          return;
+        }
+
+        const preview = response.data || {};
+        setCreateForm((prev) => {
+          const next = { ...prev };
+          const previousAuto = lastAutoMetadataRef.current;
+
+          if (
+            !metadataTouchedRef.current.processName
+            || prev.processName.trim() === previousAuto.processName
+          ) {
+            next.processName = String(preview.processName || prev.processName || '').trim();
+          }
+
+          if (
+            !metadataTouchedRef.current.description
+            || prev.description.trim() === previousAuto.description
+          ) {
+            next.description = String(preview.description || '').trim();
+          }
+
+          next.processCode = String(preview.processCode || '').trim();
+          return next;
+        });
+
+        lastAutoMetadataRef.current = {
+          processCode: String(preview.processCode || '').trim(),
+          processName: String(preview.processName || '').trim(),
+          description: String(preview.description || '').trim(),
+        };
+      } catch (err: any) {
+        if (cancelled) {
+          return;
+        }
+        const message = err.response?.data?.message || err.message || '模板预解析失败';
+        setTemplatePreviewError(typeof message === 'string' ? message : JSON.stringify(message));
+      } finally {
+        if (!cancelled) {
+          setTemplatePreviewLoading(false);
+        }
+      }
+    }, 500);
+
+    return () => {
+      cancelled = true;
+      window.clearTimeout(timer);
+    };
+  }, [
+    activeFlowContent,
+    createForm.accessMode,
+    createForm.connectorId,
+    createForm.description,
+    createForm.processName,
+    createForm.textTemplateContent,
+    showCreateModal,
+  ]);
 
   const handleFileUpload = (event: ChangeEvent<HTMLInputElement>) => {
     const file = event.target.files?.[0];
@@ -259,8 +402,8 @@ function ProcessLibraryContent() {
     try {
       const payload = {
         connectorId: createForm.connectorId,
-        processCode: createForm.processCode.trim(),
-        processName: createForm.processName.trim(),
+        processCode: createForm.processCode.trim() || undefined,
+        processName: createForm.processName.trim() || undefined,
         processCategory: createForm.processCategory.trim() || undefined,
         description: createForm.description.trim() || undefined,
         falLevel: createForm.falLevel,
@@ -287,9 +430,13 @@ function ProcessLibraryContent() {
   const closeEditor = () => {
     setShowCreateModal(false);
     setCreateError('');
+    setTemplatePreviewError('');
+    setTemplatePreviewLoading(false);
     setCreateForm(createEmptyFormState());
     setEditorMode('create');
     setEditingProcessId(null);
+    metadataTouchedRef.current = { processName: false, description: false };
+    lastAutoMetadataRef.current = { processCode: '', processName: '', description: '' };
   };
 
   const openCreateEditor = () => {
@@ -297,6 +444,10 @@ function ProcessLibraryContent() {
     setEditingProcessId(null);
     setCreateForm(createEmptyFormState());
     setCreateError('');
+    setTemplatePreviewError('');
+    setTemplatePreviewLoading(false);
+    metadataTouchedRef.current = { processName: false, description: false };
+    lastAutoMetadataRef.current = { processCode: '', processName: '', description: '' };
     setShowCreateModal(true);
   };
 
@@ -331,6 +482,14 @@ function ProcessLibraryContent() {
       }),
       uploadedFileName: '',
     });
+    setTemplatePreviewError('');
+    setTemplatePreviewLoading(false);
+    metadataTouchedRef.current = { processName: false, description: false };
+    lastAutoMetadataRef.current = {
+      processCode: process.processCode,
+      processName: process.processName,
+      description: process.description || '',
+    };
     setShowCreateModal(true);
   };
 
@@ -549,22 +708,30 @@ function ProcessLibraryContent() {
                   )}
                   {process.uiHints.validationResult && (
                     <div className="mt-2 space-y-1 text-sm">
-                      <div className="flex items-center gap-2">
-                        {process.uiHints.validationResult.status === 'passed' ? (
+                      {(() => {
+                        const validationUi = getValidationUi(process.uiHints.validationResult);
+                        return (
                           <>
-                            <CheckCircle className="w-4 h-4 text-green-500" />
-                            <span className="text-green-600">接口验证通过</span>
+                            <div className="flex items-center gap-2">
+                              {validationUi.icon}
+                              <span className={validationUi.textClassName}>{validationUi.label}</span>
+                            </div>
+                            {process.uiHints.validationResult.reason && (
+                              <div className="text-gray-600">
+                                {validationUi.reasonLabel}: {process.uiHints.validationResult.reason}
+                              </div>
+                            )}
                           </>
-                        ) : (
-                          <>
-                            <AlertCircle className="w-4 h-4 text-red-500" />
-                            <span className="text-red-600">接口验证未通过</span>
-                          </>
-                        )}
-                      </div>
-                      {process.uiHints.validationResult.reason && (
+                        );
+                      })()}
+                      {process.uiHints.validationResult.checkedAt && (
                         <div className="text-gray-600">
-                          原因: {process.uiHints.validationResult.reason}
+                          校验时间: {new Date(process.uiHints.validationResult.checkedAt).toLocaleString('zh-CN')}
+                        </div>
+                      )}
+                      {typeof process.uiHints.validationResult.latencyMs === 'number' && (
+                        <div className="text-gray-600">
+                          检查耗时: {process.uiHints.validationResult.latencyMs} ms
                         </div>
                       )}
                       {typeof process.uiHints.validationResult.endpointCheckedCount === 'number' && (
@@ -650,12 +817,17 @@ function ProcessLibraryContent() {
                   )}
                 </div>
                 <div>
-                  <label className="mb-1 block text-sm font-medium text-gray-700">流程编码</label>
-                  <input className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" value={createForm.processCode} onChange={(e) => setCreateForm((prev) => ({ ...prev, processCode: e.target.value }))} placeholder="leave_request" />
-                </div>
-                <div>
                   <label className="mb-1 block text-sm font-medium text-gray-700">流程名称</label>
-                  <input className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" value={createForm.processName} onChange={(e) => setCreateForm((prev) => ({ ...prev, processName: e.target.value }))} placeholder="请假申请" />
+                  <input
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    value={createForm.processName}
+                    onChange={(e) => {
+                      metadataTouchedRef.current.processName = true;
+                      setCreateForm((prev) => ({ ...prev, processName: e.target.value }));
+                    }}
+                    placeholder="模板加载后自动带出，可直接修改"
+                  />
+                  <p className="mt-1 text-xs text-gray-500">系统会先按模板正文自动回填，你可以直接改成最终想发布的名称。</p>
                 </div>
                 <div>
                   <label className="mb-1 block text-sm font-medium text-gray-700">流程分类</label>
@@ -674,7 +846,22 @@ function ProcessLibraryContent() {
                 </div>
                 <div className="sm:col-span-2">
                   <label className="mb-1 block text-sm font-medium text-gray-700">流程描述</label>
-                  <input className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500" value={createForm.description} onChange={(e) => setCreateForm((prev) => ({ ...prev, description: e.target.value }))} placeholder="用于员工请假申请" />
+                  <textarea
+                    rows={3}
+                    className="w-full rounded-lg border border-gray-300 px-3 py-2.5 text-sm focus:border-transparent focus:outline-none focus:ring-2 focus:ring-blue-500"
+                    value={createForm.description}
+                    onChange={(e) => {
+                      metadataTouchedRef.current.description = true;
+                      setCreateForm((prev) => ({ ...prev, description: e.target.value }));
+                    }}
+                    placeholder="模板加载后自动带出，可直接修改"
+                  />
+                </div>
+                <div className="sm:col-span-2 rounded-xl border border-blue-100 bg-blue-50/70 px-4 py-3 text-xs leading-5 text-blue-800">
+                  流程名称、流程描述会在模板加载后自动解析并回填，你可以继续修改；流程编码不需要单独填写，系统会优先沿用模板里的编码，未写时自动生成稳定编码。
+                  {createForm.processCode.trim() && (
+                    <span className="ml-1">当前内部流程编码：<span className="font-semibold">{createForm.processCode}</span></span>
+                  )}
                 </div>
               </section>
 
@@ -746,6 +933,18 @@ function ProcessLibraryContent() {
                     模板里写了几个“需要填写的信息”或“需要上传的材料”，系统就按几个字段解析，不会默认多加字段。
                   </div>
 
+                  {(templatePreviewLoading || templatePreviewError) && (
+                    <div className={`rounded-xl border px-4 py-3 text-xs leading-5 ${
+                      templatePreviewError
+                        ? 'border-amber-200 bg-amber-50 text-amber-700'
+                        : 'border-blue-100 bg-blue-50 text-blue-700'
+                    }`}>
+                      {templatePreviewError
+                        ? `模板预解析提示：${templatePreviewError}`
+                        : '系统正在根据模板自动回填流程名称和流程描述…'}
+                    </div>
+                  )}
+
                   {createForm.inputMethod === 'file' && (
                     <div className="rounded-xl border border-dashed border-gray-300 bg-gray-50 p-4">
                       <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
@@ -793,10 +992,10 @@ function ProcessLibraryContent() {
                   <div className="rounded-xl border border-gray-200 bg-white p-4">
                     <div className="text-sm font-medium text-gray-900">当前建议你这样写</div>
                     <ul className="mt-3 space-y-2 text-xs leading-5 text-gray-600">
-                      <li>• 先写清楚流程名称、流程编码、流程描述。</li>
+                      <li>• 先在模板正文里写清楚流程名称和流程描述，系统会自动回填到上面的可编辑字段。</li>
                       <li>• 再写“需要填写的信息”和“需要上传的材料”。</li>
                       <li>• URL / RPA 模式补充步骤；API 模式补充提交接口和查询接口。</li>
-                      <li>• 附件字段是否必传，直接在模板里写说明和示例即可。</li>
+                      <li>• 流程编码不需要单独填；模板里写了就沿用，没写系统会自动生成。</li>
                     </ul>
                   </div>
 
@@ -812,12 +1011,16 @@ function ProcessLibraryContent() {
                         <dd className="text-right font-medium text-gray-900">{PROCESS_INPUT_MODE_META[createForm.inputMethod].label}</dd>
                       </div>
                       <div className="flex items-start justify-between gap-4">
-                        <dt className="text-gray-500">流程编码</dt>
-                        <dd className="text-right font-medium text-gray-900">{createForm.processCode.trim() || '未填写'}</dd>
+                        <dt className="text-gray-500">流程名称</dt>
+                        <dd className="text-right font-medium text-gray-900">{createForm.processName.trim() || '待模板回填'}</dd>
                       </div>
                       <div className="flex items-start justify-between gap-4">
-                        <dt className="text-gray-500">流程名称</dt>
-                        <dd className="text-right font-medium text-gray-900">{createForm.processName.trim() || '未填写'}</dd>
+                        <dt className="text-gray-500">流程描述</dt>
+                        <dd className="text-right font-medium text-gray-900">{createForm.description.trim() || '待模板回填'}</dd>
+                      </div>
+                      <div className="flex items-start justify-between gap-4">
+                        <dt className="text-gray-500">内部流程编码</dt>
+                        <dd className="text-right font-medium text-gray-900">{createForm.processCode.trim() || '自动生成中'}</dd>
                       </div>
                       <div className="flex items-start justify-between gap-4">
                         <dt className="text-gray-500">所属连接器</dt>
@@ -848,7 +1051,7 @@ function ProcessLibraryContent() {
               </div>
               <button
                 onClick={handleCreate}
-                disabled={creating || !createForm.connectorId || !createForm.processCode.trim() || !createForm.processName.trim() || !activeFlowContent}
+                disabled={creating || !createForm.connectorId || !activeFlowContent}
                 className="rounded-lg bg-blue-600 px-6 py-2.5 text-sm font-medium text-white hover:bg-blue-700 disabled:cursor-not-allowed disabled:opacity-50"
               >
                 {creating ? (editorMode === 'edit' ? '保存中...' : '创建中...') : (editorMode === 'edit' ? '保存修改' : '创建流程')}

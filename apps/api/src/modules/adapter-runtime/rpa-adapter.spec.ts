@@ -413,7 +413,7 @@ describe('CapabilityRoutedAdapter', () => {
     const adapter = new CapabilityRoutedAdapter(
       apiAdapter,
       rpaAdapter,
-      [buildLoadedFlow({ executionModes: { submit: ['api', 'rpa'], queryStatus: ['rpa'] } })],
+      [buildLoadedFlow({ executionModes: { submit: ['api', 'vision'], queryStatus: ['vision'] } })],
     );
 
     await adapter.submit({
@@ -432,7 +432,7 @@ describe('CapabilityRoutedAdapter', () => {
     const adapter = new CapabilityRoutedAdapter(
       apiAdapter,
       rpaAdapter,
-      [buildLoadedFlow({ executionModes: { submit: ['rpa'], queryStatus: ['rpa'] } })],
+      [buildLoadedFlow({ executionModes: { submit: ['vision'], queryStatus: ['vision'] } })],
     );
 
     await adapter.submit({
@@ -454,8 +454,8 @@ function buildLoadedFlow(options?: {
     processCode: 'expense_submit',
     processName: 'Expense Submit',
     executionModes: options?.executionModes || {
-      submit: ['rpa'],
-      queryStatus: ['rpa'],
+      submit: ['vision'],
+      queryStatus: ['vision'],
     },
     rpaDefinition: {
       processCode: 'expense_submit',

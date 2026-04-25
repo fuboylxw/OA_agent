@@ -484,6 +484,115 @@ describe('UrlPortalSsoBridgeService', () => {
     });
   });
 
+  it('prefers the queryStatus navigation target when resolving a queryStatus bridge', async () => {
+    jest.doMock('playwright', () => ({
+      chromium: {
+        launch: jest.fn().mockResolvedValue({
+          newContext: jest.fn().mockResolvedValue({
+            addCookies: jest.fn().mockResolvedValue(undefined),
+            newPage: jest.fn().mockImplementation(async () => {
+              const listeners = new Map<string, Function[]>();
+              let currentUrl = 'about:blank';
+              return {
+                on: jest.fn((event: string, handler: Function) => {
+                  listeners.set(event, [...(listeners.get(event) || []), handler]);
+                }),
+                off: jest.fn((event: string, handler: Function) => {
+                  listeners.set(event, (listeners.get(event) || []).filter((item) => item !== handler));
+                }),
+                goto: jest.fn(async (url: string) => {
+                  currentUrl = url.includes('/login/sso')
+                    ? 'https://oa2023.xpu.edu.cn/workflow/record/detail?recordId=991'
+                    : url;
+                  if (url === 'https://sz.xpu.edu.cn/#/home?component=thirdScreen') {
+                    for (const handler of listeners.get('response') || []) {
+                      await handler({
+                        url: () => 'https://sz.xpu.edu.cn/gate/lobby/api/oa/info',
+                        json: async () => ({
+                          status: 'success',
+                          data: {
+                            coordinateUrl: 'https://oa2023.xpu.edu.cn/seeyon/login/sso?from=dddlserver&ticket=ticket-10&tourl=%2Fseeyon%2Fmain.do',
+                          },
+                        }),
+                      });
+                    }
+                  }
+                }),
+                waitForLoadState: jest.fn().mockResolvedValue(undefined),
+                url: jest.fn(() => currentUrl),
+              };
+            }),
+            storageState: jest.fn().mockResolvedValue({
+              cookies: [
+                {
+                  name: 'JSESSIONID',
+                  value: 'oa-session',
+                  domain: 'oa2023.xpu.edu.cn',
+                  path: '/',
+                },
+              ],
+              origins: [],
+            }),
+          }),
+          close: jest.fn().mockResolvedValue(undefined),
+        }),
+      },
+    }), { virtual: true });
+
+    const service = new UrlPortalSsoBridgeService();
+    const result = await service.resolve({
+      connectorId: 'connector-1',
+      processCode: 'seal_request',
+      processName: '西安工程大学用印申请单',
+      action: 'queryStatus',
+      authConfig: {
+        sessionCookie: 'PORTAL=portal-session',
+        platformConfig: {
+          cookieOrigin: 'https://sz.xpu.edu.cn',
+          entryUrl: 'https://sz.xpu.edu.cn/#/home?component=thirdScreen',
+        },
+      },
+      flow: {
+        processCode: 'seal_request',
+        processName: '西安工程大学用印申请单',
+        actions: {
+          submit: {
+            steps: [
+              {
+                type: 'goto',
+                value: 'https://oa2023.xpu.edu.cn/seeyon/collaboration/collaboration.do?method=newColl&templateId=9155715239054624993',
+              },
+            ],
+          },
+          queryStatus: {
+            steps: [
+              {
+                type: 'goto',
+                value: 'https://oa2023.xpu.edu.cn/workflow/record/detail?recordId=991',
+              },
+            ],
+          },
+        },
+        platform: {
+          entryUrl: 'https://sz.xpu.edu.cn/',
+          businessBaseUrl: 'https://oa2023.xpu.edu.cn/',
+          targetBaseUrl: 'https://oa2023.xpu.edu.cn/',
+          portalSsoBridge: {
+            enabled: true,
+            mode: 'oa_info',
+            portalUrl: 'https://sz.xpu.edu.cn/#/home?component=thirdScreen',
+            oaInfoUrl: '/gate/lobby/api/oa/info',
+            sourcePath: 'coordinateUrl',
+            required: true,
+          },
+        },
+      },
+      ticket: {},
+    });
+
+    expect(result.ticket.jumpUrl).toBe('https://oa2023.xpu.edu.cn/workflow/record/detail?recordId=991');
+  });
+
   it('falls back to the original ticket when the bridge is optional and fails', async () => {
     jest.doMock('playwright', () => ({
       chromium: {

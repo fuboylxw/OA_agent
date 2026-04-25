@@ -1,7 +1,6 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { LLMClientFactory, LLMMessage } from '@uniflow/agent-kernel';
 import {
-  AssistantFieldSemanticKind,
   isProbablyRawFieldLabel,
   resolveAssistantFieldPresentation,
 } from '@uniflow/shared-types';
@@ -18,7 +17,6 @@ interface ProcessField {
   multiple?: boolean;
   options?: Array<{ label: string; value: string }>;
   aliases: string[];
-  semanticKind: AssistantFieldSemanticKind;
 }
 
 interface RawProcessField {
@@ -50,6 +48,7 @@ interface FormExtractionResult {
     description?: string;
     example?: string;
     multiple?: boolean;
+    options?: Array<{ label: string; value: string }>;
   }>;
   isComplete: boolean;
 }
@@ -79,8 +78,11 @@ const FORM_EXTRACTION_SYSTEM_PROMPT = `你是一个面向员工的智能表单�
 8. 字段解释(description)和字段示例(example)是理解字段真实含义的重要依据；当字段名称较抽象、较通用、或存在多个相似字段时，优先结合解释和示例判断用户信息属于哪个字段。
 9. 如果流程本身只定义了固定数量的待填字段，就只在这些字段中做匹配，不要把一句用户话术拆成额外字段。
 10. 如果某项信息仍缺失，请为该字段生成一句面向用户的追问。
-11. 追问绝对不能暴露字段代码或原始 API 名称，例如不能出现 leave_type、start_time 这类词。
+11. 追问绝对不能暴露字段代码或原始 API 名称，例如不能出现 field_key、raw_field_name 这类词。
 12. 追问应最小化，优先只问真正缺失且提交前必需的信息，不要重复确认用户已经明确表达过的内容。
+13. 如果同一段用户表达明确同时满足多个字段，请把这段信息分别写入这些字段，不要只填写其中一个。
+14. 严禁根据流程名称、业务名称、系统名称、常见办理场景或领域常识去猜测字段值。只有当用户本轮原话、当前已收集表单内容、或字段说明/示例明确支持时，才能填写该字段。
+15. 如果用户只是说“我要办理XX流程”或只提到了流程名称本身，这不等于给出了任何字段值。
 
 返回 JSON：
 {
@@ -152,7 +154,7 @@ export class FormAgent {
           formData,
         );
       } catch (error: any) {
-        this.logger.warn(`LLM field extraction failed, falling back to rules: ${error.message}`);
+        this.logger.warn(`LLM field extraction failed, returning no inferred field values: ${error.message}`);
       }
     }
 
@@ -163,20 +165,6 @@ export class FormAgent {
     const fieldOrigins: Record<string, 'user' | 'derived'> = Object.fromEntries(
       Object.keys(extractedFields).map((key) => [key, 'user' as const]),
     );
-    const mergedWithLLM = { ...formData, ...extractedFields };
-    const fallbackFields = this.extractDeterministicComplements(
-      nonFileFields.filter((field) => mergedWithLLM[field.key] === undefined),
-      userMessage,
-      mergedWithLLM,
-      Object.keys(extractedFields).length === 0,
-      fieldOrigins,
-    );
-
-    for (const [key, value] of Object.entries(fallbackFields)) {
-      if (extractedFields[key] === undefined) {
-        extractedFields[key] = value;
-      }
-    }
 
     for (const [key, value] of Object.entries(extractedFields)) {
       formData[key] = value;
@@ -190,6 +178,7 @@ export class FormAgent {
       description?: string;
       example?: string;
       multiple?: boolean;
+      options?: Array<{ label: string; value: string }>;
     }> = [];
     for (const field of normalizedFields) {
       if (!field.required || formData[field.key] !== undefined) {
@@ -207,6 +196,7 @@ export class FormAgent {
         description: field.description,
         example: field.example,
         multiple: field.multiple,
+        options: field.options,
       });
     }
 
@@ -235,34 +225,12 @@ export class FormAgent {
         currentFormData,
       );
     } catch (error: any) {
-      this.logger.warn(`LLM modification extraction failed, falling back to rules: ${error.message}`);
+      this.logger.warn(`LLM modification extraction failed, returning no inferred modifications: ${error.message}`);
     }
 
     const modifiedFields = this.normalizeExtractedFields(normalizedFields, llmModifiedFields);
     const fieldOrigins: Record<string, 'user' | 'derived'> = Object.fromEntries(
       Object.keys(modifiedFields).map((key) => [key, 'user' as const]),
-    );
-
-    const fallbackFields = this.extractModifiedFieldsWithRules(
-      normalizedFields,
-      userMessage,
-      currentFormData,
-      fieldOrigins,
-      Object.keys(modifiedFields).length === 0,
-    );
-
-    for (const [key, value] of Object.entries(fallbackFields)) {
-      if (modifiedFields[key] === undefined) {
-        modifiedFields[key] = value;
-      }
-    }
-
-    this.applyDerivedModificationInference(
-      normalizedFields,
-      userMessage,
-      currentFormData,
-      modifiedFields,
-      fieldOrigins,
     );
 
     return {
@@ -311,7 +279,6 @@ export class FormAgent {
           multiple: field.multiple === true,
           options: normalizedOptions,
           aliases: presentation.aliases,
-          semanticKind: presentation.semanticKind,
         };
       })
       .filter((field) => !isAuthCredentialField({
@@ -530,123 +497,6 @@ ${fieldDescriptions.join('\n')}
     });
   }
 
-  private extractWithRules(
-    pendingFields: ProcessField[],
-    userMessage: string,
-    knownFormData: Record<string, any>,
-    fieldOrigins?: Record<string, 'user' | 'derived'>,
-  ): Record<string, any> {
-    const extracted: Record<string, any> = {};
-
-    for (const field of pendingFields) {
-      const value = this.extractFieldWithRules(field, userMessage);
-      if (value !== undefined) {
-        extracted[field.key] = value;
-        if (fieldOrigins) {
-          fieldOrigins[field.key] = 'user';
-        }
-      }
-    }
-
-    this.applyDerivedFieldInference(
-      pendingFields,
-      userMessage,
-      { ...knownFormData, ...extracted },
-      extracted,
-      fieldOrigins,
-    );
-
-    return extracted;
-  }
-
-  private extractDeterministicComplements(
-    pendingFields: ProcessField[],
-    userMessage: string,
-    knownFormData: Record<string, any>,
-    allowGenericFallback: boolean,
-    fieldOrigins: Record<string, 'user' | 'derived'>,
-  ): Record<string, any> {
-    const supplementCandidates = pendingFields.filter((field) =>
-      allowGenericFallback || this.isHighPrecisionRuleField(field),
-    );
-
-    return this.extractWithRules(supplementCandidates, userMessage, knownFormData, fieldOrigins);
-  }
-
-  private extractModifiedFieldsWithRules(
-    fields: ProcessField[],
-    userMessage: string,
-    currentFormData: Record<string, any>,
-    fieldOrigins: Record<string, 'user' | 'derived'>,
-    _allowFallback: boolean,
-  ): Record<string, any> {
-    const extracted: Record<string, any> = {};
-
-    for (const field of fields) {
-      const value = this.extractModifiedFieldWithRules(
-        field,
-        userMessage,
-        currentFormData[field.key],
-      );
-      if (value !== undefined) {
-        extracted[field.key] = value;
-        fieldOrigins[field.key] = 'user';
-      }
-    }
-
-    return extracted;
-  }
-
-  private extractModifiedFieldWithRules(
-    field: ProcessField,
-    userMessage: string,
-    currentValue: any,
-  ): any {
-    if (field.type === 'file') {
-      return undefined;
-    }
-
-    if (this.isFieldMarkedUnchanged(field, userMessage)) {
-      return undefined;
-    }
-
-    const explicitFieldPattern = this.buildExplicitFieldPattern(field);
-    if (!explicitFieldPattern) {
-      return undefined;
-    }
-
-    if (field.semanticKind === 'start_time' || field.semanticKind === 'end_time' || field.type === 'date') {
-      return this.extractModifiedDateField(userMessage, currentValue, explicitFieldPattern);
-    }
-
-    if (field.semanticKind === 'amount' || field.type === 'number') {
-      return this.extractModifiedNumberField(userMessage, explicitFieldPattern);
-    }
-
-    if (field.semanticKind === 'leave_type' || this.isOptionLikeField(field)) {
-      return this.extractModifiedOptionField(field, userMessage, explicitFieldPattern);
-    }
-
-    if (field.semanticKind === 'reason') {
-      return this.extractModifiedTextField(userMessage, explicitFieldPattern);
-    }
-
-    return undefined;
-  }
-
-  private isHighPrecisionRuleField(field: ProcessField): boolean {
-    return (
-      field.semanticKind === 'leave_type'
-      || field.semanticKind === 'reason'
-      || field.semanticKind === 'start_time'
-      || field.semanticKind === 'end_time'
-      || field.semanticKind === 'amount'
-      || field.type === 'date'
-      || field.type === 'number'
-      || this.isOptionLikeField(field)
-    );
-  }
-
   private normalizeExtractedFields(
     fields: ProcessField[],
     rawValues: Record<string, any>,
@@ -674,15 +524,15 @@ ${fieldDescriptions.join('\n')}
       return undefined;
     }
 
-    if (field.semanticKind === 'start_time' || field.semanticKind === 'end_time' || field.type === 'date') {
+    if (field.type === 'date') {
       return this.normalizeDateValue(rawValue);
     }
 
-    if (field.semanticKind === 'leave_type' || this.isOptionLikeField(field)) {
+    if (this.isOptionLikeField(field)) {
       return this.normalizeOptionValue(field, rawValue);
     }
 
-    if (field.semanticKind === 'amount' || field.type === 'number') {
+    if (field.type === 'number') {
       return this.normalizeNumberValue(rawValue);
     }
 
@@ -736,7 +586,7 @@ ${fieldDescriptions.join('\n')}
           if (!field.options || field.options.length === 0) {
             return value;
           }
-          return this.mapValueToOption(value, field.options) || value;
+          return this.mapValueToOption(value, field.options);
         })
         .filter((value, index, list) => Boolean(value) && list.indexOf(value) === index);
 
@@ -776,422 +626,6 @@ ${fieldDescriptions.join('\n')}
     const explicitMatch = trimmed.match(/(\d+(?:\.\d+)?)\s*(万|千|k|K)?/);
     if (explicitMatch) {
       return this.parseNumericValue(explicitMatch[1], explicitMatch[2]);
-    }
-
-    return undefined;
-  }
-
-  private extractFieldWithRules(field: ProcessField, userMessage: string): any {
-    if (field.type === 'file') {
-      return undefined;
-    }
-
-    if (field.semanticKind === 'leave_type') {
-      return this.extractLeaveTypeField(field, userMessage);
-    }
-
-    if (field.semanticKind === 'reason') {
-      return this.extractReasonField(field, userMessage);
-    }
-
-    if (field.semanticKind === 'start_time' || field.semanticKind === 'end_time' || field.type === 'date') {
-      return this.extractDateField(field, userMessage);
-    }
-
-    if (field.semanticKind === 'amount' || field.type === 'number') {
-      return this.extractNumberField(field, userMessage);
-    }
-
-    if (this.isOptionLikeField(field)) {
-      return this.extractOptionField(field, userMessage);
-    }
-
-    return this.extractTextField(field, userMessage);
-  }
-
-  private extractLeaveTypeField(field: ProcessField, userMessage: string): string | string[] | undefined {
-    const optionValue = this.extractOptionField(field, userMessage);
-    if (optionValue !== undefined) {
-      return optionValue;
-    }
-
-    const candidates = [
-      { value: '年假', keywords: ['年假', '年休假', 'annual leave', 'annual'] },
-      { value: '事假', keywords: ['事假', 'personal leave', 'personal'] },
-      { value: '病假', keywords: ['病假', 'sick leave', 'sick'] },
-      { value: '调休', keywords: ['调休', '补休', 'compensatory'] },
-      { value: '婚假', keywords: ['婚假'] },
-      { value: '产假', keywords: ['产假', '产检假'] },
-      { value: '陪产假', keywords: ['陪产假', '陪护假'] },
-      { value: '丧假', keywords: ['丧假'] },
-    ];
-
-    const normalizedMessage = userMessage.toLowerCase();
-    for (const candidate of candidates) {
-      if (candidate.keywords.some((keyword) => normalizedMessage.includes(keyword))) {
-        return this.mapValueToOption(candidate.value, field.options) || candidate.value;
-      }
-    }
-
-    return undefined;
-  }
-
-  private extractNumberField(field: ProcessField, userMessage: string): number | undefined {
-    const fieldPatterns = this.buildFieldPatterns(field);
-    for (const pattern of fieldPatterns) {
-      const regex = new RegExp(`${pattern}\\s*(?:是|为|[:：])?\\s*(\\d+(?:\\.\\d+)?)\\s*(万|千|k|K)?`);
-      const match = userMessage.match(regex);
-      if (match) {
-        return this.parseNumericValue(match[1], match[2]);
-      }
-    }
-
-    const generalMatch = userMessage.match(/(\d+(?:\.\d+)?)\s*(万|千|k|K)/);
-    if (generalMatch) {
-      return this.parseNumericValue(generalMatch[1], generalMatch[2]);
-    }
-
-    return undefined;
-  }
-
-  private extractDateField(field: ProcessField, userMessage: string): string | undefined {
-    const taggedExpression = this.extractTaggedDateExpression(field, userMessage);
-    if (taggedExpression) {
-      return this.parseDateExpression(taggedExpression);
-    }
-
-    const expressions = this.extractDateExpressions(userMessage);
-    if (expressions.length === 0) {
-      return undefined;
-    }
-
-    if (field.semanticKind === 'start_time') {
-      return this.parseDateExpression(expressions[0]);
-    }
-    if (field.semanticKind === 'end_time') {
-      if (expressions.length > 1) {
-        return this.parseDateExpression(expressions[expressions.length - 1]);
-      }
-      return undefined;
-    }
-    if (expressions.length === 1) {
-      return this.parseDateExpression(expressions[0]);
-    }
-
-    return undefined;
-  }
-
-  private extractModifiedDateField(
-    userMessage: string,
-    currentValue: any,
-    explicitFieldPattern: string,
-  ): string | undefined {
-    const directExpression = this.extractExplicitDateReplacement(userMessage, explicitFieldPattern);
-    if (directExpression) {
-      return this.parseDateExpression(directExpression);
-    }
-
-    const shifted = this.extractShiftedDateValue(userMessage, explicitFieldPattern, currentValue);
-    if (shifted) {
-      return shifted;
-    }
-
-    return undefined;
-  }
-
-  private extractModifiedNumberField(
-    userMessage: string,
-    explicitFieldPattern: string,
-  ): number | undefined {
-    const match = userMessage.match(
-      new RegExp(`(?:把|将)?${explicitFieldPattern}(?:[^，。；;\\n]{0,12})?(?:改成|改为|调整为|换成|设为|设成|写成)?\\s*(\\d+(?:\\.\\d+)?)\\s*(万|千|k|K)?`, 'i'),
-    );
-    if (!match) {
-      return undefined;
-    }
-
-    return this.parseNumericValue(match[1], match[2]);
-  }
-
-  private extractModifiedOptionField(
-    field: ProcessField,
-    userMessage: string,
-    explicitFieldPattern: string,
-  ): string | string[] | undefined {
-    const explicitRegex = new RegExp(`(?:把|将)?${explicitFieldPattern}(?:[^，。；;\\n]{0,12})?(?:改成|改为|调整为|换成|设为|设成|写成)?`, 'i');
-    if (!explicitRegex.test(userMessage)) {
-      return undefined;
-    }
-
-    const optionValue = this.extractOptionField(field, userMessage);
-    if (optionValue !== undefined) {
-      return optionValue;
-    }
-
-    return undefined;
-  }
-
-  private extractModifiedTextField(
-    userMessage: string,
-    explicitFieldPattern: string,
-  ): string | undefined {
-    const match = userMessage.match(
-      new RegExp(`(?:把|将)?${explicitFieldPattern}(?:[^，。；;\\n]{0,12})?(?:改成|改为|调整为|换成|设为|设成|写成|更新为)?\\s*([^,，。；;\\n]+)`, 'i'),
-    );
-    if (match?.[1]) {
-      return match[1].trim();
-    }
-
-    return undefined;
-  }
-
-  private extractOptionField(field: ProcessField, userMessage: string): string | string[] | undefined {
-    const normalizedMessage = userMessage.toLowerCase();
-    if (field.type === 'checkbox' || field.multiple === true) {
-      const matches = (field.options || [])
-        .filter((option) =>
-          normalizedMessage.includes(String(option.label).toLowerCase())
-          || normalizedMessage.includes(String(option.value).toLowerCase()))
-        .map((option) => option.value)
-        .filter((value, index, list) => list.indexOf(value) === index);
-      return matches.length > 0 ? matches : undefined;
-    }
-
-    for (const option of field.options || []) {
-      if (
-        normalizedMessage.includes(String(option.label).toLowerCase())
-        || normalizedMessage.includes(String(option.value).toLowerCase())
-      ) {
-        return option.value;
-      }
-    }
-
-    return undefined;
-  }
-
-  private extractReasonField(field: ProcessField, userMessage: string): string | undefined {
-    const match = userMessage.match(
-      /(?:原因|事由|理由|说明)\s*(?:是|为|[:：])?\s*([^,，。；;]+)/,
-    );
-    if (match?.[1]) {
-      return match[1].trim();
-    }
-
-    const explicitText = this.extractTextField(field, userMessage);
-    if (explicitText) {
-      return explicitText;
-    }
-
-    return this.extractFreeTextReasonCandidate(userMessage);
-  }
-
-  private extractTextField(field: ProcessField, userMessage: string): string | undefined {
-    const fieldPatterns = this.buildFieldPatterns(field);
-    for (const pattern of fieldPatterns) {
-      const regex = new RegExp(`${pattern}\\s*(?:是|为|[:：])\\s*([^,，。；;]+)`, 'i');
-      const match = userMessage.match(regex);
-      if (match?.[1]) {
-        return match[1].trim();
-      }
-    }
-
-    return undefined;
-  }
-
-  private extractFreeTextReasonCandidate(userMessage: string): string | undefined {
-    const segments = userMessage
-      .split(/[，,。；;、\n]/)
-      .map((segment) => segment.trim())
-      .filter(Boolean);
-
-    if (segments.length <= 1) {
-      return undefined;
-    }
-
-    const candidates = segments
-      .map((segment) => this.normalizeReasonCandidateSegment(segment))
-      .filter((segment): segment is string => Boolean(segment));
-
-    if (candidates.length === 0) {
-      return undefined;
-    }
-
-    candidates.sort((left, right) => right.length - left.length);
-    return candidates[0];
-  }
-
-  private normalizeReasonCandidateSegment(segment: string): string | undefined {
-    const trimmed = segment.trim();
-    if (!trimmed) {
-      return undefined;
-    }
-
-    if (this.isLikelyContactSegment(trimmed)) {
-      return undefined;
-    }
-
-    if (this.isLikelyDateOrScheduleSegment(trimmed)) {
-      return undefined;
-    }
-
-    if (this.isLikelyGenericRequestSegment(trimmed)) {
-      return undefined;
-    }
-
-    if (trimmed.length < 2) {
-      return undefined;
-    }
-
-    return trimmed;
-  }
-
-  private isLikelyContactSegment(segment: string): boolean {
-    return (
-      /(联系(?:电话|方式)?|电话|手机号|手机|微信|邮箱|email|mail)/i.test(segment)
-      || /\d{7,}/.test(segment)
-    );
-  }
-
-  private isLikelyDateOrScheduleSegment(segment: string): boolean {
-    if (/(半天|全天|上午|下午|晚上|几点|点到点|请假时间)/.test(segment)) {
-      return true;
-    }
-
-    if (/([零一二两三四五六七八九十百\d.]+)\s*(?:个)?(?:工作)?天/.test(segment)) {
-      return true;
-    }
-
-    const dateMatches = this.extractDateExpressions(segment);
-    if (dateMatches.length === 0) {
-      return false;
-    }
-
-    const stripped = segment
-      .replace(new RegExp(this.getDateExpressionPattern(), 'g'), '')
-      .replace(/(?:开始|结束|起始|截止|从|到|至|请假|日期|时间)/g, '')
-      .replace(/\s+/g, '')
-      .trim();
-
-    return stripped.length === 0;
-  }
-
-  private isLikelyGenericRequestSegment(segment: string): boolean {
-    const stripped = segment
-      .replace(/^(我要|我想|想要|需要|帮我|请帮我|麻烦|请)\s*/, '')
-      .replace(/^(申请|发起|办理|提交)\s*/, '')
-      .replace(/\s+/g, '')
-      .trim();
-
-    if (!stripped) {
-      return true;
-    }
-
-    return stripped.length <= 2;
-  }
-
-  private applyDerivedFieldInference(
-    fields: ProcessField[],
-    userMessage: string,
-    mergedFormData: Record<string, any>,
-    extracted: Record<string, any>,
-    fieldOrigins?: Record<string, 'user' | 'derived'>,
-  ) {
-    const startField = fields.find((field) => field.semanticKind === 'start_time');
-    const endField = fields.find((field) => field.semanticKind === 'end_time');
-
-    if (!startField || !endField || mergedFormData[endField.key] !== undefined) {
-      return;
-    }
-
-    const durationDays = this.extractDurationDays(userMessage);
-    const startValue = mergedFormData[startField.key];
-
-    if (durationDays === undefined || typeof startValue !== 'string') {
-      return;
-    }
-
-    const endValue = this.deriveEndDateFromDuration(startValue, durationDays);
-    if (endValue) {
-      extracted[endField.key] = endValue;
-      if (fieldOrigins) {
-        fieldOrigins[endField.key] = 'derived';
-      }
-    }
-  }
-
-  private applyDerivedModificationInference(
-    fields: ProcessField[],
-    userMessage: string,
-    currentFormData: Record<string, any>,
-    modifiedFields: Record<string, any>,
-    fieldOrigins?: Record<string, 'user' | 'derived'>,
-  ) {
-    const startField = fields.find((field) => field.semanticKind === 'start_time');
-    const endField = fields.find((field) => field.semanticKind === 'end_time');
-    if (!startField || !endField || modifiedFields[endField.key] !== undefined) {
-      return;
-    }
-
-    const durationDays = this.extractDurationDays(userMessage);
-    if (durationDays === undefined) {
-      return;
-    }
-
-    const startValue = modifiedFields[startField.key] ?? currentFormData[startField.key];
-    if (typeof startValue !== 'string') {
-      return;
-    }
-
-    const endValue = this.deriveEndDateFromDuration(startValue, durationDays);
-    if (endValue) {
-      modifiedFields[endField.key] = endValue;
-      if (fieldOrigins) {
-        fieldOrigins[endField.key] = 'derived';
-      }
-    }
-  }
-
-  private extractDurationDays(userMessage: string): number | undefined {
-    if (/半天/.test(userMessage)) {
-      return 0.5;
-    }
-
-    const matches = Array.from(userMessage.matchAll(/([零一二两三四五六七八九十百\d.]+)\s*(?:个)?(?:工作)?天/g));
-    const match = matches.length > 0 ? matches[matches.length - 1] : null;
-    if (!match?.[1]) {
-      return undefined;
-    }
-
-    return this.parseChineseNumber(match[1]);
-  }
-
-  private deriveEndDateFromDuration(startValue: string, durationDays: number): string | undefined {
-    const startDate = this.parseDateString(startValue);
-    if (!startDate) {
-      return undefined;
-    }
-
-    const inclusiveOffset = Math.max(Math.ceil(durationDays) - 1, 0);
-    return this.formatDate(this.addDays(startDate, inclusiveOffset));
-  }
-
-  private extractTaggedDateExpression(field: ProcessField, userMessage: string): string | undefined {
-    const expression = this.getDateExpressionPattern();
-    const patterns = field.semanticKind === 'end_time'
-      ? [
-        new RegExp(`(?:到|至|结束(?:时间|日期)?|截止(?:时间|日期)?)\\s*(${expression})`),
-        new RegExp(`(${expression})\\s*(?:结束|截止)`),
-      ]
-      : [
-        new RegExp(`(${expression})\\s*(?:开始|起)`),
-        new RegExp(`(?:从|自|开始(?:时间|日期)?|起始(?:时间|日期)?)\\s*(${expression})`),
-      ];
-
-    for (const pattern of patterns) {
-      const match = userMessage.match(pattern);
-      if (match?.[1]) {
-        return match[1];
-      }
     }
 
     return undefined;
@@ -1304,74 +738,6 @@ ${fieldDescriptions.join('\n')}
     return `${year}-${month}-${day}`;
   }
 
-  private buildFieldPatterns(field: ProcessField): string[] {
-    return Array.from(new Set(field.aliases))
-      .filter((alias) => alias && !isProbablyRawFieldLabel(alias))
-      .sort((left, right) => right.length - left.length)
-      .map((alias) => this.escapeRegex(alias));
-  }
-
-  private buildExplicitFieldPattern(field: ProcessField): string {
-    const patterns = this.buildFieldPatterns(field);
-    return patterns.length > 0 ? `(?:${patterns.join('|')})` : '';
-  }
-
-  private isFieldMarkedUnchanged(field: ProcessField, userMessage: string): boolean {
-    const explicitFieldPattern = this.buildExplicitFieldPattern(field);
-    if (!explicitFieldPattern) {
-      return false;
-    }
-
-    return new RegExp(`${explicitFieldPattern}(?:[^，。；;\\n]{0,8})?(?:不变|保持不变|不用改|无需修改)`, 'i').test(userMessage);
-  }
-
-  private extractExplicitDateReplacement(userMessage: string, explicitFieldPattern: string): string | undefined {
-    const expression = this.getDateExpressionPattern();
-    const patterns = [
-      new RegExp(`(?:把|将)?${explicitFieldPattern}(?:[^，。；;\\n]{0,12})?(?:改成|改为|调整为|换成|设为|设成|改到|换到)\\s*(${expression})`, 'i'),
-      new RegExp(`(?:把|将)?${explicitFieldPattern}(?:[^，。；;\\n]{0,4})?(?:定在|放在)\\s*(${expression})`, 'i'),
-    ];
-
-    for (const pattern of patterns) {
-      const match = userMessage.match(pattern);
-      if (match?.[1]) {
-        return match[1];
-      }
-    }
-
-    return undefined;
-  }
-
-  private extractShiftedDateValue(
-    userMessage: string,
-    explicitFieldPattern: string,
-    currentValue: any,
-  ): string | undefined {
-    if (typeof currentValue !== 'string') {
-      return undefined;
-    }
-
-    const currentDate = this.parseDateString(currentValue);
-    if (!currentDate) {
-      return undefined;
-    }
-
-    const match = userMessage.match(
-      new RegExp(`(?:把|将)?${explicitFieldPattern}(?:[^，。；;\\n]{0,8})?(提前|往前|延后|往后|推迟|顺延)\\s*([零一二两三四五六七八九十百\\d.]+)\\s*天`, 'i'),
-    );
-    if (!match?.[1] || !match[2]) {
-      return undefined;
-    }
-
-    const days = this.parseChineseNumber(match[2]);
-    if (days === undefined) {
-      return undefined;
-    }
-
-    const direction = /提前|往前/.test(match[1]) ? -1 : 1;
-    return this.formatDate(this.addDays(currentDate, direction * days));
-  }
-
   private mapValueToOption(value: string, options?: Array<{ label: string; value: string }>): string | undefined {
     if (!options || options.length === 0) {
       return undefined;
@@ -1382,8 +748,13 @@ ${fieldDescriptions.join('\n')}
       return exact.value;
     }
 
-    const fuzzy = options.find((option) => value.includes(option.label) || option.label.includes(value));
-    return fuzzy?.value;
+    const compactValue = value.toLowerCase().replace(/[\s_\-./\\,，。;；:：'"“”‘’()（）【】\[\]]+/g, '');
+    const normalized = options.find((option) => {
+      const compactLabel = option.label.toLowerCase().replace(/[\s_\-./\\,，。;；:：'"“”‘’()（）【】\[\]]+/g, '');
+      const compactOptionValue = option.value.toLowerCase().replace(/[\s_\-./\\,，。;；:：'"“”‘’()（）【】\[\]]+/g, '');
+      return compactLabel === compactValue || compactOptionValue === compactValue;
+    });
+    return normalized?.value;
   }
 
   private isOptionLikeField(field: ProcessField) {
@@ -1479,37 +850,22 @@ ${fieldDescriptions.join('\n')}
       sanitized += '。';
     }
 
-    return this.appendFieldHelp(sanitized, field);
+    if (this.isOptionLikeField(field)) {
+      return this.appendOptionChoices(sanitized, field);
+    }
+
+    return sanitized;
   }
 
   private generateQuestion(field: ProcessField): string {
-    if (field.type === 'file' || field.semanticKind === 'attachment') {
+    if (field.type === 'file') {
       const uploadHint = field.multiple ? '支持上传多份文件。' : '';
-      return this.appendFieldHelp(`还需要上传${field.label}。${uploadHint}`, field);
-    }
-
-    if (field.semanticKind === 'leave_type') {
-      return `请告诉我${field.label}，例如年假、事假或病假。`;
-    }
-
-    if (field.semanticKind === 'start_time') {
-      return `请告诉我${field.label}，比如明天、下周一或 3月28日。`;
-    }
-
-    if (field.semanticKind === 'end_time') {
-      return `请告诉我${field.label}，比如 3月28日。`;
-    }
-
-    if (field.semanticKind === 'reason') {
-      return this.appendFieldHelp(`请告诉我${field.label}。`, field);
+      return `还需要上传${field.label}。${uploadHint}`;
     }
 
     if (this.isOptionLikeField(field)) {
-      const options = (field.options || []).map((option) => option.label).join('、');
       const multipleHint = field.multiple ? '可多选。' : '';
-      return options
-        ? `请告诉我${field.label}。${multipleHint}可选项有：${options}。`
-        : `请告诉我${field.label}。${multipleHint}`;
+      return this.appendOptionChoices(`请告诉我${field.label}。${multipleHint}`, field);
     }
 
     if (field.type === 'date') {
@@ -1524,22 +880,27 @@ ${fieldDescriptions.join('\n')}
       return '还需要补充一项信息，请再具体说明。';
     }
 
-    return this.appendFieldHelp(`请告诉我${field.label}。`, field);
+    return `请告诉我${field.label}。`;
   }
 
-  private appendFieldHelp(question: string, field: ProcessField): string {
-    const extras: string[] = [];
-    if (field.description) {
-      extras.push(`说明：${field.description}`);
-    }
-    if (field.example) {
-      extras.push(`示例：${field.example}`);
-    }
-
-    if (extras.length === 0) {
+  private appendOptionChoices(question: string, field: ProcessField): string {
+    if (!this.isOptionLikeField(field) || !Array.isArray(field.options) || field.options.length === 0) {
       return question;
     }
 
-    return `${question} ${extras.join(' ')}`.trim();
+    if (question.includes('可选项有：')) {
+      return question;
+    }
+
+    const optionsText = field.options.map((option) => option.label).join('、');
+    if (!optionsText) {
+      return question;
+    }
+
+    const suffix = `可选项有：${optionsText}。`;
+    const normalizedQuestion = question.trim();
+    return /[。？！!?]$/.test(normalizedQuestion)
+      ? `${normalizedQuestion}${suffix}`
+      : `${normalizedQuestion}。${suffix}`;
   }
 }

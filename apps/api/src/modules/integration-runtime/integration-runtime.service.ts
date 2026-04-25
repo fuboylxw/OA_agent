@@ -17,6 +17,8 @@ interface ConnectorLike {
   } | null;
   capability?: Record<string, any> | null;
   bootstrapMode?: string | null;
+  runtimeManifest?: Record<string, any> | null;
+  uiHints?: Record<string, any> | null;
 }
 
 @Injectable()

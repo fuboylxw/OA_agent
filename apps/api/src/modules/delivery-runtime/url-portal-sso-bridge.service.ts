@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { NavigationTargetInferenceEngine } from '@uniflow/compat-engine';
 import type { RpaFlowDefinition, RpaPortalSsoBridgeDefinition } from '@uniflow/shared-types';
 import type { PlatformTicketResult } from '../adapter-runtime/platform-ticket-broker';
 
@@ -40,6 +41,8 @@ const OA_INFO_SOFT_TIMEOUT = Symbol('oa_info_soft_timeout');
 
 @Injectable()
 export class UrlPortalSsoBridgeService {
+  private readonly navigationTargetInference = new NavigationTargetInferenceEngine();
+
   async resolve(input: UrlPortalSsoBridgeInput): Promise<UrlPortalSsoBridgeResult> {
     const bridge = input.flow?.platform?.portalSsoBridge;
     if (!bridge?.enabled) {
@@ -133,7 +136,7 @@ export class UrlPortalSsoBridgeService {
         throw new Error('Portal OA info did not contain a usable SSO source URL');
       }
 
-      const targetBusinessUrl = this.resolveTargetBusinessUrl(input, bridge, sourceUrl);
+      const targetBusinessUrl = await this.resolveTargetBusinessUrl(input, bridge, sourceUrl);
       const resolvedSsoUrl = this.buildResolvedSsoUrl(sourceUrl, targetBusinessUrl);
       await page.goto(resolvedSsoUrl, {
         waitUntil: 'domcontentloaded',
@@ -571,7 +574,7 @@ export class UrlPortalSsoBridgeService {
     return undefined;
   }
 
-  private resolveTargetBusinessUrl(
+  private async resolveTargetBusinessUrl(
     input: UrlPortalSsoBridgeInput,
     bridge: RpaPortalSsoBridgeDefinition,
     sourceUrl: string,
@@ -586,7 +589,7 @@ export class UrlPortalSsoBridgeService {
     const target = String(
       bridge.targetPathTemplate
       || input.ticket.jumpUrl
-      || this.inferTargetPathTemplateFromFlow(input)
+      || await this.inferTargetPathTemplateFromFlow(input)
       || '',
     ).replace(/\{([^}]+)\}/g, (_match, key: string) => String(values[key as keyof typeof values] ?? ''));
 
@@ -601,15 +604,14 @@ export class UrlPortalSsoBridgeService {
     }
   }
 
-  private inferTargetPathTemplateFromFlow(input: UrlPortalSsoBridgeInput) {
+  private async inferTargetPathTemplateFromFlow(input: UrlPortalSsoBridgeInput) {
     const platform = this.asRecord(input.flow?.platform);
-    const runtime = this.asRecord(input.flow?.runtime);
     const portalUrl = String(
       platform.portalSsoBridge && typeof platform.portalSsoBridge === 'object'
         ? this.asRecord(platform.portalSsoBridge).portalUrl
         : platform.entryUrl,
     ).trim();
-    const preferredOrigin = this.tryGetOrigin(
+    const preferredOrigins = [
       platform.businessBaseUrl,
       platform.targetBaseUrl,
       platform.targetSystem,
@@ -619,34 +621,36 @@ export class UrlPortalSsoBridgeService {
       input.authConfig?.platformConfig && typeof input.authConfig.platformConfig === 'object'
         ? this.asRecord(input.authConfig.platformConfig).businessBaseUrl
         : undefined,
-    );
-    const candidates = this.collectFlowNavigationUrls([
-      ...this.normalizeSteps(runtime.preflight?.steps),
-      ...this.normalizeSteps(this.asRecord(input.flow?.actions).submit?.steps),
-      ...this.normalizeSteps(this.asRecord(input.flow?.actions).queryStatus?.steps),
-    ]);
-
+    ]
+      .map((value) => this.tryGetOrigin(value))
+      .filter((value, index, list): value is string => Boolean(value) && list.indexOf(value) === index);
+    const candidates = this.collectFlowNavigationCandidates(input.flow);
     if (candidates.length === 0) {
       return undefined;
     }
 
-    if (preferredOrigin) {
-      const preferredCandidate = [...candidates]
-        .reverse()
-        .find((value) => this.sameOrigin(value, preferredOrigin));
-      if (preferredCandidate) {
-        return preferredCandidate;
-      }
+    const judgement = await this.navigationTargetInference.infer({
+      action: input.action,
+      connectorId: input.connectorId,
+      processCode: input.processCode,
+      processName: input.processName,
+      portalUrl: portalUrl || undefined,
+      preferredOrigins,
+      candidates,
+      trace: {
+        scope: 'delivery.url.portal_navigation_target',
+        metadata: {
+          action: input.action,
+          processCode: input.processCode,
+        },
+      },
+    });
+
+    if (!judgement.canResolve || !judgement.matchedCandidateId) {
+      return undefined;
     }
 
-    const nonPortalCandidate = [...candidates]
-      .reverse()
-      .find((value) => !portalUrl || !this.sameOrigin(value, portalUrl));
-    if (nonPortalCandidate) {
-      return nonPortalCandidate;
-    }
-
-    return candidates[candidates.length - 1];
+    return candidates.find((candidate) => candidate.candidateId === judgement.matchedCandidateId)?.url;
   }
 
   private normalizeSteps(value: unknown) {
@@ -655,11 +659,47 @@ export class UrlPortalSsoBridgeService {
       : [];
   }
 
-  private collectFlowNavigationUrls(steps: Array<Record<string, any>>) {
-    return steps
-      .filter((step) => String(step?.type || '').trim().toLowerCase() === 'goto')
-      .map((step) => this.normalizeAbsoluteUrl(step?.value))
-      .filter((value): value is string => Boolean(value));
+  private collectFlowNavigationCandidates(flow?: RpaFlowDefinition) {
+    const runtime = this.asRecord(flow?.runtime);
+    const actions = this.asRecord(flow?.actions);
+    const phases: Array<{ phase: 'preflight' | 'submit' | 'queryStatus'; steps: Array<Record<string, any>> }> = [
+      {
+        phase: 'preflight',
+        steps: this.normalizeSteps(runtime.preflight?.steps),
+      },
+      {
+        phase: 'submit',
+        steps: this.normalizeSteps(actions.submit?.steps),
+      },
+      {
+        phase: 'queryStatus',
+        steps: this.normalizeSteps(actions.queryStatus?.steps),
+      },
+    ];
+
+    return phases.flatMap(({ phase, steps }) =>
+      steps
+        .map((step, stepIndex) => ({ step, stepIndex }))
+        .filter(({ step }) => String(step?.type || '').trim().toLowerCase() === 'goto')
+        .map(({ step, stepIndex }) => {
+          const url = this.normalizeAbsoluteUrl(step?.value);
+          if (!url) {
+            return undefined;
+          }
+          return {
+            candidateId: `${phase}:${stepIndex}`,
+            url,
+            sourcePhase: phase,
+            stepIndex,
+          };
+        })
+        .filter((candidate): candidate is {
+          candidateId: string;
+          url: string;
+          sourcePhase: 'preflight' | 'submit' | 'queryStatus';
+          stepIndex: number;
+        } => Boolean(candidate))
+    );
   }
 
   private normalizeAbsoluteUrl(value: unknown) {
@@ -682,14 +722,6 @@ export class UrlPortalSsoBridgeService {
       }
     }
     return undefined;
-  }
-
-  private sameOrigin(left: string, right: string) {
-    try {
-      return new URL(left).origin === new URL(right).origin;
-    } catch {
-      return left === right;
-    }
   }
 
   private buildResolvedSsoUrl(sourceUrl: string, targetBusinessUrl: string) {

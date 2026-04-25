@@ -130,6 +130,81 @@ describe('BootstrapProcessor RPA publishing', () => {
     };
   }
 
+  function createDirectLinkChoiceDefinition() {
+    return {
+      processCode: 'seal_apply',
+      processName: '用印申请',
+      accessMode: 'direct_link',
+      sourceType: 'direct_link',
+      metadata: {
+        accessMode: 'direct_link',
+        sourceType: 'direct_link',
+      },
+      platform: {
+        entryUrl: 'https://auth.example.com/',
+        businessBaseUrl: 'https://oa.example.com',
+        jumpUrlTemplate: 'https://oa.example.com/workflow/new?templateId=seal_apply',
+      },
+      fields: [
+        {
+          key: 'fileSummary',
+          label: '文件类型、名称及份数',
+          type: 'textarea',
+          required: true,
+        },
+        {
+          key: 'sealType',
+          label: '用印类型',
+          type: 'checkbox',
+          required: true,
+          multiple: true,
+          options: [
+            { label: '党委公章', value: '党委公章' },
+            { label: '学校公章', value: '学校公章' },
+          ],
+        },
+      ],
+      runtime: {
+        executorMode: 'http',
+        preflight: {
+          steps: [
+            { type: 'goto', value: 'https://auth.example.com/' },
+            {
+              type: 'evaluate',
+              builtin: 'capture_form_submit',
+              options: {
+                fieldMappings: [
+                  {
+                    fieldKey: 'fileSummary',
+                    fieldType: 'textarea',
+                    target: { label: '文件类型、名称及份数' },
+                  },
+                  {
+                    fieldKey: 'sealType',
+                    fieldType: 'checkbox',
+                    options: [
+                      { label: '党委公章', value: '党委公章' },
+                      { label: '学校公章', value: '学校公章' },
+                    ],
+                    target: { label: '用印类型' },
+                  },
+                ],
+              },
+            },
+          ],
+        },
+        networkSubmit: {
+          url: '{{preflight.submitCapture.action}}',
+          method: '{{preflight.submitCapture.method}}',
+          bodyMode: '{{preflight.submitBodyMode}}',
+          body: {
+            source: 'preflight.submitFields',
+          },
+        },
+      },
+    };
+  }
+
   it('extracts and merges RPA definitions from bootstrap sources', () => {
     const { prisma } = createTxMocks();
     const processor = new BootstrapProcessor(prisma as any);
@@ -375,6 +450,109 @@ describe('BootstrapProcessor RPA publishing', () => {
     expect(baseUrl).toBe('https://oa2023.xpu.edu.cn');
   });
 
+
+  it('uses shared system inference to rank auth probing before fallback guesses', async () => {
+    const prisma = {
+      bootstrapJob: {
+        update: jest.fn().mockResolvedValue({}),
+      },
+    };
+    const processor = new BootstrapProcessor(prisma as any);
+
+    (processor as any).systemInferenceEngine = {
+      infer: jest.fn().mockResolvedValue({
+        preferredAuthType: 'apikey',
+        oaType: 'openapi',
+        authCandidates: [
+          {
+            type: 'apikey',
+            confidence: 0.91,
+            reason: 'security scheme suggests Authorization header token',
+            headerName: 'Authorization',
+            headerPrefix: 'Bearer ',
+          },
+        ],
+        authHint: {
+          type: 'apikey',
+          headerName: 'Authorization',
+          headerPrefix: 'Bearer ',
+        },
+        loginEndpoints: [
+          {
+            method: 'POST',
+            path: '/gateway/session/create',
+            confidence: 0.84,
+            reason: 'observed in api doc',
+          },
+        ],
+        noAuthProbeTargets: ['https://oa.example.edu.cn/api/process/list'],
+        systemShape: {
+          oaType: 'openapi',
+          interactionModel: 'api',
+          portalBridgeSuspected: false,
+          confidence: 0.8,
+          reason: 'structured api evidence present',
+        },
+        signals: ['structured API evidence'],
+        source: 'mixed',
+        llmSucceeded: true,
+      }),
+    };
+
+    const probeNoAuth = jest.spyOn(processor as any, 'probeNoAuth').mockResolvedValue(null);
+    const buildNoAuthProbeTargets = jest.spyOn(processor as any, 'buildNoAuthProbeTargets');
+    const probeTokenHeaders = jest.spyOn(processor as any, 'probeTokenHeaders').mockResolvedValue({
+      authType: 'apikey',
+      headerName: 'Authorization',
+      headerPrefix: 'Bearer ',
+    });
+    const probeLogin = jest.spyOn(processor as any, 'probeLogin').mockResolvedValue(null);
+    const updateAuthConfig = jest.spyOn(processor as any, 'updateAuthConfig').mockResolvedValue(undefined);
+
+    await (processor as any).runAuthProbing(
+      {
+        id: 'job-auth-1',
+        tenantId: 'tenant-1',
+        oaUrl: 'https://oa.example.edu.cn',
+        openApiUrl: 'https://oa.example.edu.cn/openapi.json',
+        authConfig: {
+          token: 'masked-token',
+        },
+      },
+      [],
+      JSON.stringify({
+        openapi: '3.0.0',
+        paths: {
+          '/gateway/session/create': { post: { summary: 'Create session' } },
+        },
+      }),
+    );
+
+    expect((processor as any).systemInferenceEngine.infer).toHaveBeenCalled();
+    expect(probeNoAuth).toHaveBeenCalledWith(['https://oa.example.edu.cn/api/process/list']);
+    expect(buildNoAuthProbeTargets).not.toHaveBeenCalled();
+    expect(probeTokenHeaders).toHaveBeenCalledWith(
+      'https://oa.example.edu.cn',
+      'masked-token',
+      expect.arrayContaining([
+        expect.objectContaining({
+          type: 'apikey',
+          headerName: 'Authorization',
+          headerPrefix: 'Bearer ',
+        }),
+      ]),
+    );
+    expect(probeLogin).not.toHaveBeenCalled();
+    expect(updateAuthConfig).toHaveBeenCalledWith(
+      'job-auth-1',
+      expect.objectContaining({
+        authType: 'apikey',
+        headerName: 'Authorization',
+      }),
+      expect.any(Array),
+    );
+  });
+
   it('publishes form-page connectors and rpa execution modes for RPA-only jobs', async () => {
     const { prisma, connectorUpsert, processTemplateCreate, tx } = createTxMocks();
     const processor = new BootstrapProcessor(prisma as any);
@@ -425,6 +603,14 @@ describe('BootstrapProcessor RPA publishing', () => {
           ],
         },
       ],
+      [
+        {
+          processCode: 'expense_submit',
+          overall: 'passed',
+          reason: 'Validation passed',
+          endpointChecks: [],
+        },
+      ],
       'PUBLISHED',
       [],
     );
@@ -438,11 +624,23 @@ describe('BootstrapProcessor RPA publishing', () => {
     expect(processTemplateCreate).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         uiHints: expect.objectContaining({
+          runtimeManifest: expect.objectContaining({
+            version: 1,
+            capabilities: {
+              submit: ['vision'],
+              queryStatus: ['vision'],
+            },
+            definition: expect.objectContaining({ processCode: 'expense_submit' }),
+          }),
           executionModes: {
             submit: ['rpa'],
             queryStatus: ['rpa'],
           },
           rpaDefinition: expect.objectContaining({ processCode: 'expense_submit' }),
+          validationResult: expect.objectContaining({
+            status: 'passed',
+            checkedMode: 'bootstrap_validation',
+          }),
         }),
       }),
     }));
@@ -502,6 +700,14 @@ describe('BootstrapProcessor RPA publishing', () => {
           ],
         },
       ],
+      [
+        {
+          processCode: 'expense_submit',
+          overall: 'passed',
+          reason: 'Validation passed',
+          endpointChecks: [],
+        },
+      ],
       'PUBLISHED',
       [],
     );
@@ -515,6 +721,12 @@ describe('BootstrapProcessor RPA publishing', () => {
     expect(processTemplateCreate).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         uiHints: expect.objectContaining({
+          runtimeManifest: expect.objectContaining({
+            capabilities: {
+              submit: ['api', 'vision'],
+              queryStatus: ['api', 'vision'],
+            },
+          }),
           executionModes: {
             submit: ['api', 'rpa'],
             queryStatus: ['api', 'rpa'],
@@ -572,6 +784,14 @@ describe('BootstrapProcessor RPA publishing', () => {
           ],
         },
       ],
+      [
+        {
+          processCode: 'leave_request',
+          overall: 'passed',
+          reason: 'Direct-link flow validated with submit-only capability',
+          endpointChecks: [],
+        },
+      ],
       'PUBLISHED',
       [],
     );
@@ -579,16 +799,329 @@ describe('BootstrapProcessor RPA publishing', () => {
     expect(processTemplateCreate).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         uiHints: expect.objectContaining({
+          runtimeManifest: expect.objectContaining({
+            capabilities: {
+              submit: ['url'],
+              queryStatus: [],
+            },
+          }),
           executionModes: {
             submit: ['url'],
             queryStatus: [],
           },
+          validationResult: expect.objectContaining({
+            status: 'passed',
+            checkedMode: 'bootstrap_validation',
+          }),
           rpaDefinition: expect.objectContaining({
             processCode: 'leave_request',
             runtime: expect.objectContaining({
               networkSubmit: expect.objectContaining({
                 url: '{{preflight.submitCapture.action}}',
               }),
+            }),
+          }),
+        }),
+      }),
+    }));
+  });
+
+  it('preserves direct-link source field type and options when publishing schema fields', async () => {
+    const { prisma, processTemplateCreate } = createTxMocks();
+    const processor = new BootstrapProcessor(prisma as any);
+
+    await (processor as any).runCompiling(
+      {
+        id: 'job-4b',
+        tenantId: 'tenant-1',
+        name: 'Seal OA',
+        oaUrl: 'https://oa.example.com',
+        openApiUrl: null,
+        authConfig: { accessMode: 'direct_link', bootstrapMode: 'rpa_only' },
+        sources: [
+          {
+            sourceType: 'manual_rpa',
+            sourceContent: JSON.stringify({ flows: [createDirectLinkChoiceDefinition()] }),
+            metadata: {},
+          },
+        ],
+      },
+      [
+        {
+          processCode: 'seal_apply',
+          processName: '用印申请',
+          category: 'rpa',
+          description: 'Seal submit',
+          endpoints: [
+            {
+              name: '用印申请 submit',
+              method: 'RPA',
+              path: 'url://seal_apply/submit',
+              description: 'Submit through URL runtime',
+              category: 'submit',
+              parameters: [
+                {
+                  name: 'fileSummary',
+                  type: 'string',
+                  required: true,
+                  description: '文件类型、名称及份数',
+                  in: 'body',
+                },
+                {
+                  name: 'sealType',
+                  type: 'checkbox',
+                  required: true,
+                  description: '用印类型 | 说明: 选择本次需要办理的印章类型',
+                  in: 'body',
+                },
+              ],
+              responseMapping: { success: 'success', data: 'data' },
+              bodyTemplate: { kind: 'url_submit' },
+            },
+          ],
+        },
+      ],
+      [
+        {
+          processCode: 'seal_apply',
+          overall: 'passed',
+          reason: 'Direct-link flow validated with submit-only capability',
+          endpointChecks: [],
+        },
+      ],
+      'PUBLISHED',
+      [],
+    );
+
+    expect(processTemplateCreate).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        schema: {
+          fields: expect.arrayContaining([
+            expect.objectContaining({
+              key: 'sealType',
+              label: '用印类型',
+              type: 'checkbox',
+              required: true,
+              multiple: true,
+              options: [
+                { label: '党委公章', value: '党委公章' },
+                { label: '学校公章', value: '学校公章' },
+              ],
+            }),
+          ]),
+        },
+      }),
+    }));
+  });
+
+  it('infers shared oauth backend login and portal discovery metadata for cross-origin direct-link connectors', async () => {
+    const { prisma, connectorUpsert, tx } = createTxMocks();
+    const processor = new BootstrapProcessor(prisma as any);
+    const originalClientId = process.env.AUTH_OAUTH2_CLIENT_ID;
+    const originalPrivateKey = process.env.AUTH_OAUTH2_PRIVATE_KEY;
+    const originalBaseUrl = process.env.AUTH_OAUTH2_BASE_URL;
+    const originalLoginUrl = process.env.AUTH_OAUTH2_LOGIN_URL;
+    const originalAccountField = process.env.AUTH_OAUTH2_ACCOUNT_FIELD;
+
+    process.env.AUTH_OAUTH2_CLIENT_ID = 'shared-client-id';
+    process.env.AUTH_OAUTH2_PRIVATE_KEY = 'shared-private-key';
+    process.env.AUTH_OAUTH2_BASE_URL = 'https://sz.xpu.edu.cn';
+    delete process.env.AUTH_OAUTH2_LOGIN_URL;
+    delete process.env.AUTH_OAUTH2_ACCOUNT_FIELD;
+
+    try {
+      await (processor as any).runCompiling(
+        {
+          id: 'job-5',
+          tenantId: 'tenant-1',
+          name: 'XPU OA',
+          oaUrl: 'https://oa2023.xpu.edu.cn',
+          openApiUrl: null,
+          authConfig: { accessMode: 'direct_link', bootstrapMode: 'rpa_only' },
+          sources: [
+            {
+              sourceType: 'manual_rpa',
+              sourceContent: JSON.stringify({ flows: [createDirectLinkDefinition()] }),
+              metadata: {},
+            },
+          ],
+        },
+        [
+          {
+            processCode: 'leave_request',
+            processName: '请假申请',
+            category: 'rpa',
+            description: 'XPU leave request',
+            endpoints: [
+              {
+                name: '请假申请 submit',
+                method: 'RPA',
+                path: 'url://leave_request/submit',
+                description: 'Submit through URL runtime',
+                category: 'submit',
+                parameters: [
+                  {
+                    name: 'reason',
+                    type: 'string',
+                    required: true,
+                    description: '请假事由',
+                    in: 'body',
+                  },
+                ],
+                responseMapping: { success: 'success', data: 'data' },
+                bodyTemplate: { kind: 'url_submit' },
+              },
+            ],
+          },
+        ],
+        [
+          {
+            processCode: 'leave_request',
+            overall: 'passed',
+            reason: 'Validation passed',
+            endpointChecks: [],
+          },
+        ],
+        'PUBLISHED',
+        [],
+      );
+    } finally {
+      if (originalClientId === undefined) delete process.env.AUTH_OAUTH2_CLIENT_ID;
+      else process.env.AUTH_OAUTH2_CLIENT_ID = originalClientId;
+      if (originalPrivateKey === undefined) delete process.env.AUTH_OAUTH2_PRIVATE_KEY;
+      else process.env.AUTH_OAUTH2_PRIVATE_KEY = originalPrivateKey;
+      if (originalBaseUrl === undefined) delete process.env.AUTH_OAUTH2_BASE_URL;
+      else process.env.AUTH_OAUTH2_BASE_URL = originalBaseUrl;
+      if (originalLoginUrl === undefined) delete process.env.AUTH_OAUTH2_LOGIN_URL;
+      else process.env.AUTH_OAUTH2_LOGIN_URL = originalLoginUrl;
+      if (originalAccountField === undefined) delete process.env.AUTH_OAUTH2_ACCOUNT_FIELD;
+      else process.env.AUTH_OAUTH2_ACCOUNT_FIELD = originalAccountField;
+    }
+
+    expect(connectorUpsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        authConfig: expect.objectContaining({
+          accessMode: 'direct_link',
+          bootstrapMode: 'rpa_only',
+          authType: 'cookie',
+          platformConfig: expect.objectContaining({
+            entryUrl: 'https://sz.xpu.edu.cn/',
+            businessBaseUrl: 'https://oa2023.xpu.edu.cn',
+            targetBaseUrl: 'https://oa2023.xpu.edu.cn',
+            oaBackendLogin: expect.objectContaining({
+              enabled: true,
+              loginUrl: 'https://sz.xpu.edu.cn/auth2/api/v1/login',
+              clientIdEnv: 'AUTH_OAUTH2_CLIENT_ID',
+              privateKeyEnv: 'AUTH_OAUTH2_PRIVATE_KEY',
+              accountField: 'username',
+            }),
+            authDiscovery: expect.objectContaining({
+              mode: 'portal_token_bridge',
+              portalUrl: 'https://sz.xpu.edu.cn/',
+              businessBaseUrl: 'https://oa2023.xpu.edu.cn',
+            }),
+          }),
+        }),
+      }),
+    }));
+    expect(tx.bootstrapJob.update).toHaveBeenCalledWith(expect.objectContaining({
+      data: expect.objectContaining({
+        authConfig: expect.objectContaining({
+          platformConfig: expect.objectContaining({
+            oaBackendLogin: expect.objectContaining({
+              loginUrl: 'https://sz.xpu.edu.cn/auth2/api/v1/login',
+            }),
+          }),
+        }),
+      }),
+    }));
+  });
+
+  it('keeps explicit backend login settings when direct-link connector auth has already been configured', async () => {
+    const { prisma, connectorUpsert } = createTxMocks();
+    const processor = new BootstrapProcessor(prisma as any);
+    const originalClientId = process.env.AUTH_OAUTH2_CLIENT_ID;
+    const originalPrivateKey = process.env.AUTH_OAUTH2_PRIVATE_KEY;
+    const originalBaseUrl = process.env.AUTH_OAUTH2_BASE_URL;
+
+    process.env.AUTH_OAUTH2_CLIENT_ID = 'shared-client-id';
+    process.env.AUTH_OAUTH2_PRIVATE_KEY = 'shared-private-key';
+    process.env.AUTH_OAUTH2_BASE_URL = 'https://sz.xpu.edu.cn';
+
+    try {
+      await (processor as any).runCompiling(
+        {
+          id: 'job-6',
+          tenantId: 'tenant-1',
+          name: 'XPU OA',
+          oaUrl: 'https://oa2023.xpu.edu.cn',
+          openApiUrl: null,
+          authConfig: {
+            accessMode: 'direct_link',
+            bootstrapMode: 'rpa_only',
+            platformConfig: {
+              oaBackendLogin: {
+                enabled: true,
+                loginUrl: 'https://custom.example.com/whitelist/login',
+                accountField: 'email',
+              },
+            },
+          },
+          sources: [
+            {
+              sourceType: 'manual_rpa',
+              sourceContent: JSON.stringify({ flows: [createDirectLinkDefinition()] }),
+              metadata: {},
+            },
+          ],
+        },
+        [
+          {
+            processCode: 'leave_request',
+            processName: '请假申请',
+            category: 'rpa',
+            description: 'XPU leave request',
+            endpoints: [
+              {
+                name: '请假申请 submit',
+                method: 'RPA',
+                path: 'url://leave_request/submit',
+                description: 'Submit through URL runtime',
+                category: 'submit',
+                parameters: [],
+                responseMapping: { success: 'success', data: 'data' },
+                bodyTemplate: { kind: 'url_submit' },
+              },
+            ],
+          },
+        ],
+        [
+          {
+            processCode: 'leave_request',
+            overall: 'passed',
+            reason: 'Validation passed',
+            endpointChecks: [],
+          },
+        ],
+        'PUBLISHED',
+        [],
+      );
+    } finally {
+      if (originalClientId === undefined) delete process.env.AUTH_OAUTH2_CLIENT_ID;
+      else process.env.AUTH_OAUTH2_CLIENT_ID = originalClientId;
+      if (originalPrivateKey === undefined) delete process.env.AUTH_OAUTH2_PRIVATE_KEY;
+      else process.env.AUTH_OAUTH2_PRIVATE_KEY = originalPrivateKey;
+      if (originalBaseUrl === undefined) delete process.env.AUTH_OAUTH2_BASE_URL;
+      else process.env.AUTH_OAUTH2_BASE_URL = originalBaseUrl;
+    }
+
+    expect(connectorUpsert).toHaveBeenCalledWith(expect.objectContaining({
+      create: expect.objectContaining({
+        authConfig: expect.objectContaining({
+          platformConfig: expect.objectContaining({
+            oaBackendLogin: expect.objectContaining({
+              loginUrl: 'https://custom.example.com/whitelist/login',
+              accountField: 'email',
             }),
           }),
         }),
@@ -652,6 +1185,14 @@ describe('BootstrapProcessor RPA publishing', () => {
               bodyTemplate: { kind: 'rpa_submit' },
             },
           ],
+        },
+      ],
+      [
+        {
+          processCode: 'expense_submit',
+          overall: 'passed',
+          reason: 'Validation passed',
+          endpointChecks: [],
         },
       ],
       'PUBLISHED',

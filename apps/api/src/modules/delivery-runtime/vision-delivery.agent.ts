@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import {
+  getProcessRuntimeDefinition,
+  getProcessRuntimePaths,
   type DeliveryPath,
   URL_DELIVERY_PATH,
   VISION_DELIVERY_PATH,
@@ -140,20 +142,19 @@ export class VisionDeliveryAgent implements DeliveryAgent {
     uiHints: Record<string, any>,
     action: 'submit' | 'queryStatus',
   ) {
-    const executionModes = (uiHints.executionModes as Record<string, any> | undefined) || {};
-    const explicitRpa = Array.isArray(executionModes[action])
-      && executionModes[action].some((item) => String(item || '').trim().toLowerCase() === 'rpa');
+    const runtimeDefinition = (getProcessRuntimeDefinition(uiHints) as Record<string, any> | undefined) || definition;
+    const explicitRpa = getProcessRuntimePaths(uiHints, action).includes('vision');
     if (explicitRpa) {
       return true;
     }
 
-    if (this.isDirectLinkDefinition(definition)) {
+    if (this.isDirectLinkDefinition(runtimeDefinition)) {
       return false;
     }
 
     const actionDefinition = action === 'submit'
-      ? definition?.actions?.submit
-      : definition?.actions?.queryStatus;
+      ? runtimeDefinition?.actions?.submit
+      : runtimeDefinition?.actions?.queryStatus;
     return Array.isArray(actionDefinition?.steps) && actionDefinition.steps.length > 0;
   }
 

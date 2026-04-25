@@ -7,6 +7,25 @@ const readPath = (input, path) => String(path || '')
   .filter(Boolean)
   .reduce((current, key) => current?.[key], input);
 const normalizeText = (value) => String(value ?? '').replace(/\s+/g, ' ').trim();
+const normalizeComparableLabel = (value) => normalizeText(String(value ?? '')
+  .replace(/[：:]\s*$/u, '')
+  .replace(/[（(][^）)]*[）)]/gu, ' '))
+  .toLowerCase();
+const labelsRoughlyMatch = (left, right) => {
+  const normalizedLeft = normalizeComparableLabel(left);
+  const normalizedRight = normalizeComparableLabel(right);
+  if (!normalizedLeft || !normalizedRight) {
+    return false;
+  }
+  if (normalizedLeft === normalizedRight) {
+    return true;
+  }
+  const compactLeft = normalizedLeft.replace(/\s+/g, '');
+  const compactRight = normalizedRight.replace(/\s+/g, '');
+  return compactLeft === compactRight
+    || compactLeft.startsWith(compactRight)
+    || compactRight.startsWith(compactLeft);
+};
 const normalizeValue = (value) => {
   if (value === undefined || value === null) {
     return '';
@@ -84,27 +103,109 @@ const resolveDocuments = (frameOptions) => {
   }
   return matched;
 };
-const extractElementLabel = (element) => {
-  if (!element) {
+const extractTableCellLabel = (element) => {
+  const cell = element?.closest?.('td, th');
+  const row = cell?.parentElement;
+  if (!cell || !row) {
     return '';
   }
-  const capTitle = element.closest?.('.cap-field, .cap4-checkbox, .cap4-attach, .cap4-textarea, .cap4-input');
-  const capFieldTitle = capTitle?.querySelector?.('.field-title, .cap4-attach__left, .cap4-checkbox__left, .cap4-textarea__left, .cap4-input__left');
-  const labelNode = element.closest('label')
-    || (element.id ? element.ownerDocument.querySelector('label[for="' + element.id + '"]') : null)
-    || element.parentElement?.querySelector?.('label')
-    || null;
-  return normalizeText(
-    capFieldTitle?.textContent
-    || capTitle?.getAttribute?.('title')
-    || labelNode?.textContent
-    || element.getAttribute?.('aria-label')
-    || element.getAttribute?.('title')
-    || element.getAttribute?.('placeholder')
-    || element.getAttribute?.('name')
-    || element.getAttribute?.('id')
-    || ''
-  );
+  const cellContainsFieldValue = (candidateCell) => {
+    if (!candidateCell?.querySelectorAll) {
+      return false;
+    }
+    if (candidateCell.querySelector('input:not([type="hidden"]), textarea, select, button, [role="textbox"], [role="checkbox"], [role="radio"], [role="combobox"]')) {
+      return true;
+    }
+    return Array.from(candidateCell.querySelectorAll('div, span, section, label')).some((node) =>
+      node !== candidateCell
+      && (isChoiceLikeElement(node) || isAttachmentLikeElement(node) || isFieldContainerLikeElement(node)));
+  };
+  const cells = Array.from(row.children || []).filter((node) => node?.matches?.('td, th'));
+  const index = cells.indexOf(cell);
+  if (index < 0) {
+    return '';
+  }
+  for (let cursor = index - 1; cursor >= 0; cursor -= 1) {
+    if (cellContainsFieldValue(cells[cursor])) {
+      continue;
+    }
+    const text = normalizeText(cells[cursor]?.textContent || '').replace(/[：:]\s*$/u, '');
+    if (text) {
+      return text;
+    }
+  }
+  return '';
+};
+const getRowEditableElements = (element) => {
+  const row = element?.closest?.('tr');
+  if (!row?.querySelectorAll) {
+    return [];
+  }
+  return Array.from(row.querySelectorAll('input, textarea, select'))
+    .filter((node) => {
+      if (!node || node === element) {
+        return false;
+      }
+      const type = normalizeText(node.getAttribute?.('type') || node.type || '').toLowerCase();
+      return type !== 'hidden' && !isFileInputElement(node);
+    });
+};
+const looksLikeDateBoundaryLabel = (value) => {
+  const normalized = normalizeText(value).toLowerCase();
+  if (!normalized) {
+    return '';
+  }
+  if (/(开始|起始|起|from|start)/iu.test(normalized)) {
+    return 'start';
+  }
+  if (/(结束|截止|止|to|end)/iu.test(normalized)) {
+    return 'end';
+  }
+  return '';
+};
+const resolveRangeFieldAlternativeTarget = (documents, requestedTarget) => {
+  const expectedLabel = normalizeText(requestedTarget?.label || requestedTarget?.text || '');
+  const boundary = looksLikeDateBoundaryLabel(expectedLabel);
+  if (!expectedLabel || !boundary) {
+    return null;
+  }
+
+  for (const entry of documents) {
+    const doc = entry.document;
+    const editableFields = Array.from(doc.querySelectorAll('input:not([type="hidden"]), textarea, select'));
+    for (const field of editableFields) {
+      const rowLabel = extractTableCellLabel(field);
+      if (!/(时间|日期|time|date)/iu.test(rowLabel || '')) {
+        continue;
+      }
+      const siblings = [field, ...getRowEditableElements(field)];
+      if (siblings.length < 2) {
+        continue;
+      }
+      const target = boundary === 'start'
+        ? siblings[0]
+        : siblings[siblings.length - 1];
+      if (target) {
+        return { element: target, document: doc, window: entry.window };
+      }
+    }
+  }
+
+  return null;
+};
+const checkedKeywords = ['checked', 'selected', 'active', 'enabled', 'on'];
+const uncheckedKeywords = ['unchecked', 'unselected', 'inactive', 'disabled', 'off', 'default'];
+const closestMatchingAncestor = (element, predicate, maxDepth = 8) => {
+  let current = element;
+  let depth = 0;
+  while (current && depth <= maxDepth) {
+    if (predicate(current)) {
+      return current;
+    }
+    current = current.parentElement;
+    depth += 1;
+  }
+  return null;
 };
 const isFileInputElement = (element) => {
   if (!element) {
@@ -114,10 +215,137 @@ const isFileInputElement = (element) => {
   const typeProp = normalizeText(element.type || '');
   return typeAttr.toLowerCase() === 'file' || typeProp.toLowerCase() === 'file';
 };
-const isCapAttachmentElement = (element) => Boolean(
-  element?.matches?.('.cap4-attach, .cap4-attach__cnt, .cap4-attach__picker, [class*="cap4-attach"]')
-  || element?.closest?.('.cap4-attach, [class*="cap4-attach"]'),
+const isAttachmentLikeElement = (element) => Boolean(
+  isFileInputElement(element)
+  || element?.querySelector?.('input[type="file"]')
 );
+const isChoiceLikeElement = (element) => Boolean(
+  element?.matches?.('input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="radio"]')
+  || /(?:^|[\s_-])(checkbox|radio|choice|option)(?:$|[\s_-])/i.test(normalizeText([
+    element?.getAttribute?.('class'),
+    element?.getAttribute?.('role'),
+    element?.tagName,
+  ].filter(Boolean).join(' ')))
+  || element?.querySelector?.('input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="radio"]')
+  || element?.querySelector?.('[class*="checkbox"], [class*="radio"], [class*="choice"], [class*="option"]')
+);
+const isFieldContainerLikeElement = (element) => Boolean(
+  element?.matches?.('input, textarea, select, [role="textbox"], [role="combobox"], [role="group"]')
+  || element?.querySelector?.('input:not([type="hidden"]), textarea, select, [role="textbox"], [role="combobox"]')
+);
+const scoreSemanticFieldRootCandidate = (candidate) => {
+  if (!candidate) {
+    return -1;
+  }
+  let score = 0;
+  const tagName = normalizeText(candidate?.tagName || '').toLowerCase();
+  const className = normalizeText(candidate?.getAttribute?.('class') || '').toLowerCase();
+  const identity = normalizeText(
+    candidate?.id
+    || candidate?.getAttribute?.('name')
+    || candidate?.dataset?.fieldName
+    || candidate?.dataset?.name
+    || '',
+  );
+  if (identity) {
+    score += 14;
+  }
+  if (candidate?.matches?.('input, textarea, select, [role="textbox"], [role="combobox"]')) {
+    score += 12;
+  }
+  if (candidate?.matches?.('[role="checkbox"], [role="radio"]')) {
+    score += 10;
+  }
+  if (candidate?.querySelector?.('input[type="checkbox"], input[type="radio"], [role="checkbox"], [role="radio"]')) {
+    score += 8;
+  }
+  if (candidate?.querySelector?.('input:not([type="hidden"]), textarea, select, [role="textbox"], [role="combobox"]')) {
+    score += 6;
+  }
+  if (findSemanticTitleNode(candidate)) {
+    score += 6;
+  }
+  const descendantCount = Number(candidate?.querySelectorAll?.('*')?.length || 0);
+  score -= Math.min(descendantCount, 80) / 10;
+  const textLength = normalizeText(candidate?.textContent || '').length;
+  score -= Math.min(textLength, 240) / 60;
+  if (/(icon|prefix|suffix|caption|content|wrapper|left|right)/i.test(className)) {
+    score -= 6;
+  }
+  if (/^(i|svg|img)$/i.test(tagName) || /icon/i.test(className)) {
+    score -= 8;
+  }
+  return score;
+};
+const findSemanticFieldRoot = (element) => {
+  let current = element;
+  let depth = 0;
+  let bestMatch = null;
+  let bestScore = -1;
+  while (current && depth <= 8) {
+    if (isAttachmentLikeElement(current) || isChoiceLikeElement(current) || isFieldContainerLikeElement(current)) {
+      const score = scoreSemanticFieldRootCandidate(current);
+      if (score >= bestScore) {
+        bestScore = score;
+        bestMatch = current;
+      }
+    }
+    current = current.parentElement;
+    depth += 1;
+  }
+  return bestMatch;
+};
+const findSemanticTitleNode = (container) => {
+  if (!container?.querySelectorAll) {
+    return null;
+  }
+  return Array.from(container.querySelectorAll(
+    'label, legend, th, td, h1, h2, h3, h4, [role="heading"], [class*="title"], [class*="label"], [class*="name"], [class*="caption"], [class*="header"], [class*="left"]',
+  )).find((node) => normalizeText(node?.textContent || '').length > 0) || null;
+};
+const collectSemanticFieldCandidates = (doc, expectedKind) => {
+  if (!doc?.querySelectorAll) {
+    return [];
+  }
+  const selector = expectedKind === 'attachment'
+    ? 'input[type="file"], button, a, div, span, label, section'
+    : 'input, textarea, select, button, a, div, span, label, section, [role="textbox"], [role="checkbox"], [role="radio"], [role="combobox"], [role="group"]';
+  const seen = new Set();
+  return Array.from(doc.querySelectorAll(selector))
+    .map((node) => expectedKind === 'attachment'
+      ? closestMatchingAncestor(node, isAttachmentLikeElement, 8)
+      : findSemanticFieldRoot(node))
+    .filter((node) => {
+      if (!node || seen.has(node)) {
+        return false;
+      }
+      seen.add(node);
+      return expectedKind === 'attachment' ? isAttachmentLikeElement(node) : true;
+    });
+};
+const extractElementLabel = (element) => {
+  if (!element) {
+    return '';
+  }
+  const fieldRoot = findSemanticFieldRoot(element);
+  const titleNode = findSemanticTitleNode(fieldRoot);
+  const labelNode = element.closest('label')
+    || (element.id ? element.ownerDocument.querySelector('label[for="' + element.id + '"]') : null)
+    || element.parentElement?.querySelector?.('label')
+    || null;
+  return normalizeText(
+    titleNode?.textContent
+    || fieldRoot?.getAttribute?.('title')
+    || labelNode?.textContent
+    || extractTableCellLabel(element)
+    || element.getAttribute?.('aria-label')
+    || element.getAttribute?.('title')
+    || element.getAttribute?.('placeholder')
+    || element.getAttribute?.('name')
+    || element.getAttribute?.('id')
+    || ''
+  );
+};
 const normalizeHeaders = (headersLike) => {
   if (!headersLike) {
     return {};
@@ -259,9 +487,45 @@ const createSubmitRecord = (input) => {
     })(),
   };
 };
+const isLikelyTerminalSubmitRecord = (record) => {
+  if (!record || typeof record !== 'object') {
+    return false;
+  }
+  const type = normalizeText(record.type || '').toLowerCase();
+  const action = normalizeText(record.action || record.url || '').toLowerCase();
+  const method = normalizeText(record.method || '').toLowerCase();
+  const rawBody = normalizeText(record.rawBody || '').toLowerCase();
+  const fields = record.fields && typeof record.fields === 'object' ? record.fields : {};
+  const fieldCount = Object.keys(fields).length;
+  const hasStructuredPayload = Boolean(
+    fields._json_params
+    || fields.CSRFTOKEN
+    || (fields.content && typeof fields.content === 'object')
+    || rawBody.includes('_json_params')
+    || rawBody.includes('csrftoken'),
+  );
+  const isValidationLike = /check|validate|verify|canuse|preview|precheck/i.test(action)
+    || /checktemplatecanuse|validate|verify|preview/i.test(rawBody);
+  if (isValidationLike) {
+    return false;
+  }
+  if (type === 'form.submit' || type === 'form.requestsubmit') {
+    return true;
+  }
+  if (/(savedraft|submit|send|approve|apply|startworkflow|startprocess)/i.test(action)) {
+    return true;
+  }
+  if (/(savedraft|submit|send|approve|apply|startworkflow|startprocess)/i.test(rawBody)) {
+    return true;
+  }
+  if (/saveorupdate/i.test(action)) {
+    return false;
+  }
+  return ['post', 'put', 'patch'].includes(method) && hasStructuredPayload && fieldCount >= 3;
+};
 const shouldMatchCaptureRecord = (record, pattern) => {
   if (!pattern) {
-    return true;
+    return isLikelyTerminalSubmitRecord(record);
   }
   return pattern.test(String(record?.action || record?.url || ''))
     || pattern.test(String(record?.rawBody || ''));
@@ -279,6 +543,170 @@ const createStubResponsePayload = (record) => {
     contentType: 'text/plain',
   };
 };
+const scoreResolvedElementCandidate = (element, expectedLabel, options = {}) => {
+  if (!element) {
+    return -1;
+  }
+  const normalizedExpectedLabel = normalizeText(expectedLabel);
+  if (!normalizedExpectedLabel) {
+    return -1;
+  }
+  const componentRoot = findSemanticFieldRoot(element) || element;
+  const extractedLabel = extractElementLabel(element);
+  const componentLabel = extractElementLabel(componentRoot);
+  const aliases = Array.from(new Set([
+    extractedLabel,
+    componentLabel,
+    normalizeText(componentRoot?.textContent || ''),
+    normalizeText(element?.textContent || ''),
+    normalizeText(element?.getAttribute?.('title') || ''),
+    normalizeText(element?.getAttribute?.('aria-label') || ''),
+  ].filter(Boolean)));
+  if (!aliases.some((alias) => labelsRoughlyMatch(alias, normalizedExpectedLabel))) {
+    return -1;
+  }
+
+  let score = 0;
+  if (aliases.some((alias) => normalizeComparableLabel(alias) === normalizeComparableLabel(normalizedExpectedLabel))) {
+    score += 16;
+  }
+  if (labelsRoughlyMatch(extractedLabel, normalizedExpectedLabel)) {
+    score += 12;
+  }
+  if (labelsRoughlyMatch(componentLabel, normalizedExpectedLabel)) {
+    score += 10;
+  }
+  if (options.expectAttachmentComponent && isAttachmentLikeElement(componentRoot)) {
+    score += 12;
+  }
+  if (!options.expectAttachmentComponent && isChoiceLikeElement(componentRoot)) {
+    score += 10;
+  }
+  if (!options.expectAttachmentComponent && isFieldContainerLikeElement(componentRoot)) {
+    score += 6;
+  }
+
+  const roleHints = normalizeText([
+    componentRoot?.getAttribute?.('role'),
+    componentRoot?.getAttribute?.('class'),
+    componentRoot?.tagName,
+    element?.getAttribute?.('role'),
+    element?.getAttribute?.('class'),
+    element?.tagName,
+  ].filter(Boolean).join(' ')).toLowerCase();
+  if (/(checkbox|radio|choice|option)/i.test(roleHints)) {
+    score += 8;
+  }
+  if (/(upload|attach|file)/i.test(roleHints)) {
+    score += 8;
+  }
+
+  const textLength = normalizeText(componentRoot?.textContent || '').length;
+  if (textLength > 0) {
+    score += Math.max(0, 12 - Math.min(textLength, 120) / 10);
+  }
+
+  const descendantCount = Number(componentRoot?.querySelectorAll?.('*')?.length || 0);
+  score -= Math.min(descendantCount, 80) / 10;
+  if (componentRoot === element) {
+    score += 2;
+  }
+  return score;
+};
+const pickBestResolvedElementCandidate = (documents, target, options = {}) => {
+  const expectedLabel = normalizeText(target?.label || target?.text || target?.placeholder || '');
+  if (!expectedLabel) {
+    return null;
+  }
+
+  let bestMatch = null;
+  let bestScore = -1;
+  for (const entry of documents) {
+    const doc = entry.document;
+    const candidates = collectSemanticFieldCandidates(
+      doc,
+      options.expectAttachmentComponent ? 'attachment' : 'field',
+    );
+    for (const candidate of candidates) {
+      if (!candidate) {
+        continue;
+      }
+      if (options.allowFileInput === false && isFileInputElement(candidate)) {
+        continue;
+      }
+      if (options.expectAttachmentComponent && !isAttachmentLikeElement(candidate)) {
+        continue;
+      }
+      const score = scoreResolvedElementCandidate(candidate, expectedLabel, options);
+      if (score <= bestScore) {
+        continue;
+      }
+      bestScore = score;
+      bestMatch = {
+        element: candidate,
+        document: doc,
+        window: entry.window,
+        score,
+      };
+    }
+  }
+
+  return bestMatch;
+};
+const scoreCapturedRequest = (record, pattern) => {
+  if (!record) {
+    return -1;
+  }
+  let score = 0;
+  const action = normalizeText(record.action || record.url || '').toLowerCase();
+  const method = normalizeText(record.method || '').toLowerCase();
+  const headers = normalizeHeaders(record.headers);
+  const fields = record.fields && typeof record.fields === 'object' ? record.fields : {};
+  const rawBody = normalizeText(record.rawBody || '');
+  if (pattern && shouldMatchCaptureRecord(record, pattern)) {
+    score += 40;
+  }
+  if (/savedraft|submit|send|collaboration/i.test(action)) {
+    score += 18;
+  }
+  if (/checktemplatecanuse|check|validate|verify/i.test(action)) {
+    score -= 28;
+  }
+  if (method === 'post') {
+    score += 6;
+  }
+  if (Object.keys(fields).length > 3) {
+    score += 8;
+  }
+  if (fields._json_params || fields.CSRFTOKEN) {
+    score += 14;
+  }
+  if (/application\/x-www-form-urlencoded|multipart\/form-data|application\/json/i.test(String(headers['content-type'] || ''))) {
+    score += 4;
+  }
+  if (/managerMethod=saveDraft|method=saveDraft|_json_params|CSRFTOKEN/i.test(rawBody)) {
+    score += 14;
+  }
+  if (/managerMethod=checkTemplateCanUse|checkTemplateCanUse/i.test(rawBody)) {
+    score -= 24;
+  }
+  return score;
+};
+const pickBestCapturedRequest = (matches, pattern) => {
+  if (!Array.isArray(matches) || matches.length === 0) {
+    return null;
+  }
+  let bestRecord = matches[matches.length - 1];
+  let bestScore = scoreCapturedRequest(bestRecord, pattern);
+  matches.forEach((record) => {
+    const score = scoreCapturedRequest(record, pattern);
+    if (score >= bestScore) {
+      bestScore = score;
+      bestRecord = record;
+    }
+  });
+  return bestRecord;
+};
 const resolveNamedElement = (documents, target, options = {}) => {
   if (!Array.isArray(documents) || !target || typeof target !== 'object') {
     return null;
@@ -295,7 +723,7 @@ const resolveNamedElement = (documents, target, options = {}) => {
       if (
         selectorMatch
         && (allowFileInput || !isFileInputElement(selectorMatch))
-        && (!expectAttachmentComponent || isCapAttachmentElement(selectorMatch))
+        && (!expectAttachmentComponent || isAttachmentLikeElement(selectorMatch))
       ) {
         return { element: selectorMatch, document: doc, window: entry.window };
       }
@@ -305,7 +733,7 @@ const resolveNamedElement = (documents, target, options = {}) => {
       if (
         idMatch
         && (allowFileInput || !isFileInputElement(idMatch))
-        && (!expectAttachmentComponent || isCapAttachmentElement(idMatch))
+        && (!expectAttachmentComponent || isAttachmentLikeElement(idMatch))
       ) {
         return { element: idMatch, document: doc, window: entry.window };
       }
@@ -315,7 +743,7 @@ const resolveNamedElement = (documents, target, options = {}) => {
       if (
         nameMatch
         && (allowFileInput || !isFileInputElement(nameMatch))
-        && (!expectAttachmentComponent || isCapAttachmentElement(nameMatch))
+        && (!expectAttachmentComponent || isAttachmentLikeElement(nameMatch))
       ) {
         return { element: nameMatch, document: doc, window: entry.window };
       }
@@ -325,22 +753,21 @@ const resolveNamedElement = (documents, target, options = {}) => {
   if (!expectedLabel) {
     return null;
   }
-  for (const entry of documents) {
-    const doc = entry.document;
-    const selector = expectAttachmentComponent
-      ? '.cap4-attach, .cap4-attach__cnt, .cap4-attach__picker, [class*="cap4-attach"]'
-      : 'input, textarea, select, .cap-field, .cap4-checkbox, .cap4-textarea, .cap4-input';
-    const field = Array.from(doc.querySelectorAll(selector)).find((element) => {
-      if (!allowFileInput && isFileInputElement(element)) {
-        return false;
-      }
-      if (expectAttachmentComponent && !isCapAttachmentElement(element)) {
-        return false;
-      }
-      return extractElementLabel(element).includes(expectedLabel);
-    });
-    if (field) {
-      return { element: field, document: doc, window: entry.window };
+  const scoredMatch = pickBestResolvedElementCandidate(documents, target, {
+    allowFileInput,
+    expectAttachmentComponent,
+  });
+  if (scoredMatch?.element) {
+    return {
+      element: scoredMatch.element,
+      document: scoredMatch.document,
+      window: scoredMatch.window,
+    };
+  }
+  if (!expectAttachmentComponent) {
+    const rangeTarget = resolveRangeFieldAlternativeTarget(documents, target);
+    if (rangeTarget) {
+      return rangeTarget;
     }
   }
   if (expectAttachmentComponent) {
@@ -372,21 +799,13 @@ const resolveNamedElement = (documents, target, options = {}) => {
         input.nextElementSibling?.textContent,
       ].filter(Boolean).join(' '));
       let score = 0;
-      if (directMeta.includes(expectedLabel)) {
+      if (labelsRoughlyMatch(directMeta, expectedLabel)) {
         score += 8;
       }
-      if (nearbyText.includes(expectedLabel)) {
+      if (labelsRoughlyMatch(nearbyText, expectedLabel)) {
         score += 6;
       }
-      if (/附件|上传|file|attach|upload/i.test(expectedLabel)) {
-        if (/附件|上传|file|attach|upload/i.test(directMeta)) {
-          score += 4;
-        }
-        if (/附件|上传|file|attach|upload/i.test(nearbyText)) {
-          score += 3;
-        }
-      }
-      if (fileInputs.length === 1) {
+      if (fileInputs.length === 1 && score > 0) {
         score += 2;
       }
       if (score > 0) {
@@ -482,7 +901,7 @@ const collectElementAliases = (element) => {
   if (!element) {
     return [];
   }
-  const componentRoot = element.closest?.('.cap-field, .cap4-checkbox, .cap4-attach, .cap4-input, .cap4-textarea') || element;
+  const componentRoot = findSemanticFieldRoot(element) || element;
   return Array.from(new Set([
     normalizeText(element.value),
     normalizeText(element.getAttribute?.('value')),
@@ -523,7 +942,7 @@ const resolveChoiceGroup = (target, inputType) => {
   return target ? [target] : [];
 };
 const aliasesMatchChoices = (aliases, choices) => choices.some((choice) =>
-  aliases.some((alias) => alias === choice || alias.includes(choice) || choice.includes(alias)));
+  aliases.some((alias) => alias === choice));
 const collectMappedOptionAliases = (optionElement, mappingOptions) => {
   const baseAliases = Array.from(new Set([
     normalizeText(optionElement?.value),
@@ -550,34 +969,170 @@ const resolveEditableTarget = (target) => {
   const nestedEditable = target.querySelector?.('textarea, input:not([type="hidden"]):not([type="file"]), select');
   return nestedEditable || target;
 };
-const collectCapCheckboxClickTargets = (capCheckboxRoot) => {
-  if (!capCheckboxRoot) {
+const isChoiceLikeFieldType = (fieldType) => {
+  const normalizedType = normalizeText(fieldType).toLowerCase();
+  return normalizedType === 'checkbox'
+    || normalizedType === 'radio'
+    || normalizedType === 'select';
+};
+const findBindingContainer = (element) => {
+  if (!element) {
+    return null;
+  }
+  return closestMatchingAncestor(
+    element,
+    (candidate) => Boolean(
+      normalizeText(
+        candidate?.id
+        || candidate?.getAttribute?.('name')
+        || candidate?.dataset?.fieldName
+        || candidate?.dataset?.name
+        || '',
+      ),
+    ),
+    8,
+  ) || element;
+};
+const buildResolvedTargetDescriptor = (target, requestedTarget, mapping) => {
+  if (!target) {
+    return null;
+  }
+  const componentRoot = findSemanticFieldRoot(target) || target;
+  const bindingContainer = findBindingContainer(componentRoot);
+  const editableTarget = resolveEditableTarget(bindingContainer);
+  const id = normalizeText(
+    bindingContainer?.id
+    || componentRoot?.id
+    || editableTarget?.id
+    || requestedTarget?.id,
+  );
+  const name = normalizeText(
+    bindingContainer?.getAttribute?.('name')
+    || componentRoot?.getAttribute?.('name')
+    || editableTarget?.getAttribute?.('name')
+    || editableTarget?.name
+    || requestedTarget?.name,
+  );
+  const label = normalizeText(requestedTarget?.label || requestedTarget?.text || extractElementLabel(target) || extractElementLabel(componentRoot));
+  const selector = normalizeText(
+    requestedTarget?.selector
+    || (id ? ('#' + String(id).replace(/["\\]/g, '\\$&')) : ''),
+  );
+  const requestFieldName = normalizeText(
+    bindingContainer?.dataset?.fieldName
+    || bindingContainer?.getAttribute?.('name')
+    || bindingContainer?.id
+    || componentRoot?.dataset?.fieldName
+    || componentRoot?.getAttribute?.('name')
+    || editableTarget?.getAttribute?.('name')
+    || editableTarget?.name
+    || (isAttachmentLikeElement(componentRoot) ? (componentRoot?.id || editableTarget?.id || '') : '')
+    || requestedTarget?.requestFieldName,
+  );
+  const inferredType = normalizeText(
+    mapping?.fieldType
+    || (isAttachmentLikeElement(componentRoot) ? 'file' : '')
+    || (isChoiceLikeElement(componentRoot) ? 'checkbox' : '')
+    || editableTarget?.type
+    || editableTarget?.tagName,
+  ).toLowerCase();
+  const descriptor = {
+    ...(requestedTarget && typeof requestedTarget === 'object' ? requestedTarget : {}),
+    ...(label ? { label } : {}),
+    ...(id ? { id } : {}),
+    ...(name ? { name } : {}),
+    ...(selector ? { selector } : {}),
+    ...(requestFieldName ? { requestFieldName } : {}),
+  };
+  return {
+    descriptor,
+    binding: {
+      key: normalizeText(mapping?.fieldKey),
+      ...(label ? { label } : {}),
+      ...(inferredType ? { type: inferredType } : {}),
+      ...(Array.isArray(mapping?.options) && mapping.options.length > 1 ? { multiple: true } : {}),
+      ...(id ? { id } : {}),
+      ...(name ? { name } : {}),
+      ...(selector ? { selector } : {}),
+      ...(requestFieldName ? { requestFieldName } : {}),
+    },
+  };
+};
+const resolveExecutableMappings = (documents, mapping) => {
+  const originalMatch = resolveNamedElement(documents, mapping?.target, { allowFileInput: false });
+  const originalTarget = originalMatch?.element;
+  const originalComponentRoot = findSemanticFieldRoot(originalTarget) || originalTarget;
+  const originalEditableTarget = resolveEditableTarget(originalComponentRoot);
+  const originalTagName = normalizeText(originalEditableTarget?.tagName || originalTarget?.tagName).toLowerCase();
+  const options = Array.isArray(mapping?.options) ? mapping.options : [];
+  const shouldExpandChoices = isChoiceLikeFieldType(mapping?.fieldType)
+    && options.length > 1
+    && originalTagName !== 'select';
+  if (!shouldExpandChoices) {
+    return [{
+      mapping,
+      targetMatch: originalMatch,
+    }];
+  }
+  const expanded = options.map((option) => {
+    const aliases = collectOptionAliases(option);
+    const optionLabel = aliases[0] || normalizeText(mapping?.target?.label);
+    const optionTarget = {
+      ...(mapping?.target && typeof mapping.target === 'object' ? mapping.target : {}),
+      ...(optionLabel ? { label: optionLabel } : {}),
+    };
+    const optionMatch = resolveNamedElement(documents, optionTarget, { allowFileInput: false });
+    if (!optionMatch?.element) {
+      return null;
+    }
+    return {
+      mapping: {
+        ...mapping,
+        fieldType: 'checkbox',
+        target: optionTarget,
+        options: [option],
+      },
+      targetMatch: optionMatch,
+    };
+  }).filter(Boolean);
+  return expanded.length > 0
+    ? expanded
+    : [{
+        mapping,
+        targetMatch: originalMatch,
+      }];
+};
+const collectChoiceClickTargets = (choiceRoot) => {
+  if (!choiceRoot) {
     return [];
   }
   const selectors = [
-    '.cap4-checkbox__icon',
-    '.cap4-checkbox__icon .icon',
-    '.cap4-checkbox__cnt',
+    '[role="checkbox"]',
+    '[role="radio"]',
+    'input[type="checkbox"]',
+    'input[type="radio"]',
+    'label',
+    'button',
+    '[class*="icon"]',
+    '[class*="check"]',
+    '[class*="radio"]',
+    '[class*="option"]',
+    '[class*="choice"]',
     '.field-content',
     '.field-content-wrapper',
-    '.cap4-checkbox__right',
-    '.cap4-checkbox__left',
-    '.cap4-checkbox',
   ];
   const results = [];
   const seen = new Set();
   selectors.forEach((selector) => {
-    const matched = capCheckboxRoot.querySelector?.(selector);
+    const matched = choiceRoot.querySelector?.(selector);
     if (!matched || seen.has(matched)) {
       return;
     }
     results.push(matched);
     seen.add(matched);
   });
-  const rootCheckbox = capCheckboxRoot.matches?.('.cap4-checkbox')
-    ? capCheckboxRoot
-    : capCheckboxRoot.querySelector?.('.cap4-checkbox');
-  [rootCheckbox, capCheckboxRoot].filter(Boolean).forEach((item) => {
+  const titleNode = findSemanticTitleNode(choiceRoot);
+  [titleNode, choiceRoot].filter(Boolean).forEach((item) => {
     if (seen.has(item)) {
       return;
     }
@@ -586,37 +1141,57 @@ const collectCapCheckboxClickTargets = (capCheckboxRoot) => {
   });
   return results;
 };
-const readCapCheckboxCheckedState = (capCheckboxRoot) => {
-  if (!capCheckboxRoot) {
+const readChoiceCheckedState = (choiceRoot) => {
+  if (!choiceRoot) {
     return false;
   }
-  const checkboxRoot = capCheckboxRoot.matches?.('.cap4-checkbox')
-    ? capCheckboxRoot
-    : capCheckboxRoot.querySelector?.('.cap4-checkbox') || capCheckboxRoot;
-  const icon = checkboxRoot?.querySelector?.('.cap4-checkbox__icon .icon')
-    || checkboxRoot?.querySelector?.('.cap4-checkbox__icon')
-    || null;
-  const ariaChecked = normalizeText(checkboxRoot?.getAttribute?.('aria-checked')).toLowerCase();
+  const checkboxRoot = choiceRoot;
+  const nativeInput = checkboxRoot?.matches?.('input[type="checkbox"], input[type="radio"]')
+    ? checkboxRoot
+    : checkboxRoot?.querySelector?.('input[type="checkbox"], input[type="radio"]');
+  if (nativeInput && typeof nativeInput.checked === 'boolean') {
+    return Boolean(nativeInput.checked);
+  }
+  const ariaChecked = normalizeText(
+    checkboxRoot?.getAttribute?.('aria-checked')
+    || nativeInput?.getAttribute?.('aria-checked'),
+  ).toLowerCase();
   if (ariaChecked === 'true') {
     return true;
   }
   if (ariaChecked === 'false') {
     return false;
   }
-  const iconClass = normalizeText(icon?.getAttribute?.('class')).toLowerCase();
-  if (/fuxuan[-_]?xuanzhong|checked|selected/.test(iconClass)) {
+  const iconCandidates = [
+    checkboxRoot,
+    ...Array.from(checkboxRoot?.querySelectorAll?.('[class*="icon"], [class*="check"], [class*="radio"], [class*="choice"]') || []),
+  ].filter(Boolean);
+  for (const iconCandidate of iconCandidates) {
+    const iconClass = normalizeText(iconCandidate?.getAttribute?.('class')).toLowerCase();
+    if (!iconClass) {
+      continue;
+    }
+    if (checkedKeywords.includes(iconClass) || /(xuanzhong|checked|selected|active|on)\b/i.test(iconClass)) {
+      return true;
+    }
+    if (uncheckedKeywords.includes(iconClass) || /(moren|unchecked|unselected|inactive|off|default)\b/i.test(iconClass)) {
+      return false;
+    }
+  }
+  const checkboxClass = normalizeText([
+    checkboxRoot?.getAttribute?.('class'),
+    checkboxRoot?.getAttribute?.('data-state'),
+    checkboxRoot?.getAttribute?.('aria-pressed'),
+  ].filter(Boolean).join(' ')).toLowerCase();
+  if (checkedKeywords.includes(checkboxClass) || /(checked|selected|active|on)\b/i.test(checkboxClass)) {
     return true;
   }
-  if (/fuxuan[-_]?moren|unchecked|default/.test(iconClass)) {
+  if (uncheckedKeywords.includes(checkboxClass) || /(unchecked|unselected|inactive|off|default)\b/i.test(checkboxClass)) {
     return false;
-  }
-  const checkboxClass = normalizeText(checkboxRoot?.getAttribute?.('class')).toLowerCase();
-  if (/\bis-checked\b|\bchecked\b|\bselected\b/.test(checkboxClass)) {
-    return true;
   }
   return false;
 };
-const triggerCapCheckboxClick = (target) => {
+const triggerChoiceClick = (target) => {
   if (!target) {
     return;
   }
@@ -634,7 +1209,7 @@ const fillMappedField = async (target, resolvedValue, mapping) => {
   if (!target) {
     return false;
   }
-  const componentRoot = target.closest?.('.cap-field, .cap4-checkbox, .cap4-attach, .cap4-textarea, .cap4-input') || target;
+  const componentRoot = findSemanticFieldRoot(target) || target;
   const editableTarget = resolveEditableTarget(target);
   const tagName = normalizeText(editableTarget?.tagName || target.tagName).toLowerCase();
   const inputType = normalizeText(
@@ -675,29 +1250,41 @@ const fillMappedField = async (target, resolvedValue, mapping) => {
     dispatchFieldEvents(editableTarget);
     return matchedCount > 0;
   }
-  if (inputType === 'checkbox' || inputType === 'radio' || mapping?.fieldType === 'checkbox' || mapping?.fieldType === 'radio') {
+  if (
+    inputType === 'checkbox'
+    || inputType === 'radio'
+    || mapping?.fieldType === 'checkbox'
+    || mapping?.fieldType === 'radio'
+    || (
+      isChoiceLikeElement(componentRoot)
+      && (
+        isChoiceLikeFieldType(mapping?.fieldType)
+        || (Array.isArray(mapping?.options) && mapping.options.length > 0)
+      )
+    )
+  ) {
     const normalizedType = inputType === 'radio' || mapping?.fieldType === 'radio' ? 'radio' : 'checkbox';
-    const capCheckboxRoot = componentRoot?.matches?.('.cap-field, .cap4-checkbox') ? componentRoot : null;
-    if (capCheckboxRoot && capCheckboxRoot.querySelector?.('.cap4-checkbox__icon, .cap-icon-fuxuan-moren, .cap-icon-fuxuanxuanzhong')) {
+    const choiceRoot = isChoiceLikeElement(componentRoot) ? componentRoot : null;
+    if (choiceRoot) {
       const choices = splitChoiceValues(resolvedValue);
       const aliases = Array.from(new Set([
-        ...collectElementAliases(capCheckboxRoot),
+        ...collectElementAliases(choiceRoot),
         ...(Array.isArray(mapping?.options) ? mapping.options.flatMap((option) => collectOptionAliases(option)) : []),
       ]));
       const shouldCheck = choices.length === 0
         ? Boolean(resolvedValue)
         : aliasesMatchChoices(aliases, choices);
-      if (readCapCheckboxCheckedState(capCheckboxRoot) === shouldCheck) {
-        dispatchFieldEvents(capCheckboxRoot);
+      if (readChoiceCheckedState(choiceRoot) === shouldCheck) {
+        dispatchFieldEvents(choiceRoot);
         return shouldCheck;
       }
-      const clickTargets = collectCapCheckboxClickTargets(capCheckboxRoot);
+      const clickTargets = collectChoiceClickTargets(choiceRoot);
       for (const clickTarget of clickTargets) {
-        triggerCapCheckboxClick(clickTarget);
-        dispatchFieldEvents(clickTarget || capCheckboxRoot);
-        dispatchFieldEvents(capCheckboxRoot);
+        triggerChoiceClick(clickTarget);
+        dispatchFieldEvents(clickTarget || choiceRoot);
+        dispatchFieldEvents(choiceRoot);
         await wait(50);
-        if (readCapCheckboxCheckedState(capCheckboxRoot) === shouldCheck) {
+        if (readChoiceCheckedState(choiceRoot) === shouldCheck) {
           return shouldCheck;
         }
       }
@@ -725,7 +1312,7 @@ const fillMappedField = async (target, resolvedValue, mapping) => {
     });
     return matchedCount > 0;
   }
-  if (mapping?.fieldType === 'file' && isCapAttachmentElement(componentRoot)) {
+  if (mapping?.fieldType === 'file' && isAttachmentLikeElement(componentRoot)) {
     dispatchFieldEvents(componentRoot);
     return true;
   }
@@ -771,7 +1358,7 @@ const resolveTriggerElement = (trigger, rootDocuments, frameDocuments) => {
         || element.getAttribute('aria-label')
         || ''
       );
-      return exact ? text === expectedText : text.includes(expectedText);
+      return exact ? text === expectedText : false;
     });
     if (nodes[0]) {
       return { element: nodes[0], document: scope, window: entry.window };
@@ -967,37 +1554,88 @@ const originKey = output.originKey || 'submitOrigin';
 const attachmentFieldMapKey = output.attachmentFieldMapKey || 'attachmentFieldMap';
 const headersKey = output.headersKey || 'submitRequestHeaders';
 const rawBodyKey = output.rawBodyKey || 'submitRawBody';
+const resolvedFieldBindingsKey = output.resolvedFieldBindingsKey || 'resolvedFieldBindings';
+const resolvedFieldMappingsKey = output.resolvedFieldMappingsKey || 'resolvedFieldMappings';
 const rootDocuments = getAccessibleDocuments().filter((entry) => entry.document === document);
 const frameDocuments = resolveDocuments(options.frame);
 const allWindows = getAccessibleWindows();
 const captureStore = ensureCaptureStore(allWindows, options.capture?.actionPattern);
 const previousMatchCount = captureStore.matches.length;
+const previousEventCount = captureStore.events.length;
 const fieldMappings = Array.isArray(options.fieldMappings) ? options.fieldMappings : [];
 const fileMappings = Array.isArray(options.fileMappings) ? options.fileMappings : [];
 const filledFields = {};
-  const attachmentFieldMap = {};
+const attachmentFieldMap = {};
+const resolvedFieldBindings = [];
+const resolvedFieldBindingIndex = {};
+const resolvedFieldMappings = [];
+const upsertResolvedFieldBinding = (binding) => {
+  if (!binding || typeof binding !== 'object') {
+    return;
+  }
+  const fieldKey = normalizeText(binding.key || binding.fieldKey);
+  if (!fieldKey) {
+    return;
+  }
+  const existingIndex = resolvedFieldBindingIndex[fieldKey];
+  const nextBinding = Object.fromEntries(Object.entries({
+    ...(fieldKey ? { key: fieldKey } : {}),
+    ...binding,
+  }).filter(([, value]) => value !== undefined && value !== null && value !== ''));
+  if (existingIndex === undefined) {
+    resolvedFieldBindingIndex[fieldKey] = resolvedFieldBindings.length;
+    resolvedFieldBindings.push(nextBinding);
+    return;
+  }
+  resolvedFieldBindings[existingIndex] = {
+    ...resolvedFieldBindings[existingIndex],
+    ...nextBinding,
+  };
+};
 
 for (const mapping of fieldMappings) {
-  const targetMatch = resolveNamedElement(
+  const executableMappings = resolveExecutableMappings(
     frameDocuments.length > 0 ? frameDocuments : rootDocuments,
-    mapping?.target,
-    { allowFileInput: false },
+    mapping,
   );
-  const target = targetMatch?.element;
-  const targetKey = mapping?.target?.id || mapping?.target?.name || mapping?.target?.label || mapping?.target?.selector || mapping?.fieldKey || 'unknown';
-  const fieldKey = normalizeText(mapping?.fieldKey || '');
-  const resolvedValue = resolveSourceValue(mapping);
-  if (fieldKey && filledFields[fieldKey] === undefined) {
-    filledFields[fieldKey] = false;
-  }
-  if (!target || resolvedValue === undefined || resolvedValue === null) {
-    filledFields[targetKey] = false;
-    continue;
-  }
-  const filled = await fillMappedField(target, resolvedValue, mapping);
-  filledFields[targetKey] = filled;
-  if (fieldKey) {
-    filledFields[fieldKey] = Boolean(filledFields[fieldKey]) || filled;
+  for (const executable of executableMappings) {
+    const nextMapping = executable?.mapping || mapping;
+    const targetMatch = executable?.targetMatch || resolveNamedElement(
+      frameDocuments.length > 0 ? frameDocuments : rootDocuments,
+      nextMapping?.target,
+      { allowFileInput: false },
+    );
+    const target = targetMatch?.element;
+    const targetKey = nextMapping?.target?.id
+      || nextMapping?.target?.name
+      || nextMapping?.target?.label
+      || nextMapping?.target?.selector
+      || nextMapping?.fieldKey
+      || 'unknown';
+    const fieldKey = normalizeText(nextMapping?.fieldKey || '');
+    const resolvedValue = resolveSourceValue(nextMapping);
+    if (fieldKey && filledFields[fieldKey] === undefined) {
+      filledFields[fieldKey] = false;
+    }
+    if (!target || resolvedValue === undefined || resolvedValue === null) {
+      filledFields[targetKey] = false;
+      continue;
+    }
+    const resolvedTarget = buildResolvedTargetDescriptor(target, nextMapping?.target, nextMapping);
+    if (resolvedTarget?.descriptor) {
+      resolvedFieldMappings.push({
+        ...nextMapping,
+        target: resolvedTarget.descriptor,
+      });
+    }
+    if (resolvedTarget?.binding) {
+      upsertResolvedFieldBinding(resolvedTarget.binding);
+    }
+    const filled = await fillMappedField(target, resolvedValue, nextMapping);
+    filledFields[targetKey] = filled;
+    if (fieldKey) {
+      filledFields[fieldKey] = Boolean(filledFields[fieldKey]) || filled;
+    }
   }
 }
 
@@ -1011,7 +1649,7 @@ for (const mapping of fileMappings) {
     },
   );
   const target = targetMatch?.element;
-  const componentRoot = target?.closest?.('.cap-field, .cap4-attach') || target;
+  const componentRoot = findSemanticFieldRoot(target) || target;
   const requestFieldName = normalizeText(
     componentRoot?.getAttribute?.('name')
     || componentRoot?.getAttribute?.('id')
@@ -1020,8 +1658,34 @@ for (const mapping of fileMappings) {
     || '',
   );
   const fieldKey = normalizeText(mapping?.fieldKey || mapping?.source || '');
+  const resolvedTarget = target
+    ? buildResolvedTargetDescriptor(target, mapping?.target, {
+        ...mapping,
+        fieldType: mapping?.fieldType || 'file',
+      })
+    : null;
+  if (resolvedTarget?.descriptor) {
+    resolvedFieldMappings.push({
+      ...mapping,
+      target: resolvedTarget.descriptor,
+    });
+  }
+  if (resolvedTarget?.binding) {
+    upsertResolvedFieldBinding({
+      ...resolvedTarget.binding,
+      ...(requestFieldName ? { requestFieldName } : {}),
+      ...(fieldKey ? { key: fieldKey } : {}),
+      type: 'file',
+    });
+  }
   if (fieldKey && requestFieldName) {
     attachmentFieldMap[fieldKey] = requestFieldName;
+  }
+  if (fieldKey) {
+    filledFields[fieldKey] = Boolean(target);
+  }
+  if (mapping?.target?.label) {
+    filledFields[mapping.target.label] = Boolean(target);
   }
 }
 
@@ -1041,12 +1705,23 @@ const timeoutMs = Number(options.capture?.timeoutMs || 10000);
 const startedAt = Date.now();
 while (captureStore.matches.length <= previousMatchCount) {
   if (Date.now() - startedAt > timeoutMs) {
+    if (captureStore.events.length > previousEventCount) {
+      break;
+    }
     throw new Error('Timed out waiting for form submit capture');
   }
   await wait(250);
 }
-
-const matched = captureStore.matches[captureStore.matches.length - 1];
+const settleDelayMs = Math.max(250, Math.min(Number(options.capture?.settleDelayMs || 1200), 4000));
+await wait(settleDelayMs);
+const matched = pickBestCapturedRequest(
+  (
+    captureStore.matches.length > previousMatchCount
+      ? captureStore.matches.slice(previousMatchCount)
+      : captureStore.events.slice(previousEventCount)
+  ),
+  options.capture?.actionPattern ? new RegExp(String(options.capture.actionPattern), 'i') : null,
+) || captureStore.matches[captureStore.matches.length - 1];
 return {
   [csrfKey]: matched?.fields?.CSRFTOKEN ?? '',
   [captureKey]: matched,
@@ -1058,6 +1733,8 @@ return {
   [attachmentFieldMapKey]: attachmentFieldMap,
   [headersKey]: matched?.headers || {},
   [rawBodyKey]: matched?.rawBody || '',
+  [resolvedFieldBindingsKey]: resolvedFieldBindings,
+  [resolvedFieldMappingsKey]: resolvedFieldMappings,
 };
 `.trim();
 

@@ -1,9 +1,11 @@
 import {
+  normalizeIntegrationRouteKinds,
   AuthArtifactType,
   type AuthChoice,
   type ProviderManifest,
   type RouteKind,
 } from './types';
+import { getProcessRuntimePaths } from '@uniflow/shared-types';
 
 const DEFAULT_CAPABILITIES = ['submit', 'queryStatus'] as const;
 
@@ -14,6 +16,8 @@ export class LegacyConnectorManifestMapper {
     authConfig?: Record<string, any> | null;
     capability?: Record<string, any> | null;
     bootstrapMode?: string | null;
+    runtimeManifest?: Record<string, any> | null;
+    uiHints?: Record<string, any> | null;
   }): ProviderManifest {
     const authConfig = this.asRecord(connector.authConfig);
     const delegatedAuth = this.asRecord(authConfig.delegatedAuth);
@@ -28,7 +32,11 @@ export class LegacyConnectorManifestMapper {
     if (capability.supportsReferenceSync || capability.supportsSchemaSync) capabilities.add('sync');
     if (capability.supportsRealtimePerm) capabilities.add('permission.check');
 
-    const routes = this.buildRoutes(connector.bootstrapMode);
+    const routes = this.buildRoutes({
+      bootstrapMode: connector.bootstrapMode,
+      runtimeManifest: connector.runtimeManifest,
+      uiHints: connector.uiHints,
+    });
     const authChoices: AuthChoice[] = [
       {
         id: 'service',
@@ -71,17 +79,34 @@ export class LegacyConnectorManifestMapper {
     };
   }
 
-  private buildRoutes(bootstrapMode?: string | null): Partial<Record<'submit' | 'queryStatus', RouteKind[]>> {
-    if (bootstrapMode === 'rpa_only') {
+  private buildRoutes(input: {
+    bootstrapMode?: string | null;
+    runtimeManifest?: Record<string, any> | null;
+    uiHints?: Record<string, any> | null;
+  }): Partial<Record<'submit' | 'queryStatus', RouteKind[]>> {
+    const runtimeSubmit = normalizeIntegrationRouteKinds(
+      input.runtimeManifest?.capabilities?.submit || getProcessRuntimePaths(input.uiHints || {}, 'submit'),
+    );
+    const runtimeQuery = normalizeIntegrationRouteKinds(
+      input.runtimeManifest?.capabilities?.queryStatus || getProcessRuntimePaths(input.uiHints || {}, 'queryStatus'),
+    );
+    if (runtimeSubmit.length > 0 || runtimeQuery.length > 0) {
       return {
-        submit: ['rpa'],
-        queryStatus: ['rpa'],
+        ...(runtimeSubmit.length > 0 ? { submit: runtimeSubmit } : {}),
+        ...(runtimeQuery.length > 0 ? { queryStatus: runtimeQuery } : {}),
       };
     }
 
-    if (bootstrapMode === 'hybrid') {
+    if (input.bootstrapMode === 'rpa_only') {
       return {
-        submit: ['api', 'rpa'],
+        submit: ['vision'],
+        queryStatus: ['vision'],
+      };
+    }
+
+    if (input.bootstrapMode === 'hybrid') {
+      return {
+        submit: ['api', 'vision'],
         queryStatus: ['api'],
       };
     }

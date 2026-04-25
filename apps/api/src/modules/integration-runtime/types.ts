@@ -8,6 +8,9 @@ export type IntegrationCapability =
   | 'sync'
   | 'permission.check';
 
+export type IntegrationRouteKind = 'api' | 'url' | 'vision';
+export type LegacyIntegrationRouteKind = 'generic_http' | 'rpa';
+
 export type AuthChoiceMode = 'service' | 'user';
 
 export type AuthArtifactType =
@@ -19,7 +22,7 @@ export type AuthArtifactType =
   | 'browser_session'
   | 'unknown';
 
-export type RouteKind = 'api' | 'generic_http' | 'rpa';
+export type RouteKind = IntegrationRouteKind;
 
 export type AuthorizationState =
   | 'ready'
@@ -40,7 +43,7 @@ export interface ProviderManifest {
   targets: string[];
   capabilities: string[];
   authChoices: AuthChoice[];
-  routes: Partial<Record<IntegrationCapability, RouteKind[]>>;
+  routes: Partial<Record<IntegrationCapability, IntegrationRouteKind[]>>;
   uiHints?: Record<string, unknown>;
 }
 
@@ -79,7 +82,7 @@ export interface IntegrationProvider {
   execute(input: {
     manifest: ProviderManifest;
     capability: string;
-    route: RouteKind;
+    route: IntegrationRouteKind;
     authChoice: AuthChoice;
     artifact: AuthArtifact;
     input: unknown;
@@ -117,4 +120,28 @@ export interface ExecutionResult {
   errorCode?: string;
   errorMessage?: string;
   authorization?: AuthorizationResolution;
+}
+
+export function normalizeIntegrationRouteKinds(value: unknown): IntegrationRouteKind[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const ordered = new Set<IntegrationRouteKind>();
+  for (const item of value) {
+    const normalized = String(item || '').trim().toLowerCase();
+    if (normalized === 'api') {
+      ordered.add('api');
+      continue;
+    }
+    if (normalized === 'url' || normalized === 'generic_http') {
+      ordered.add('url');
+      continue;
+    }
+    if (normalized === 'vision' || normalized === 'rpa') {
+      ordered.add('vision');
+    }
+  }
+
+  return [...ordered];
 }

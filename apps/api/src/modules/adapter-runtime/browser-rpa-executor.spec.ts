@@ -112,7 +112,7 @@ describe('BrowserRpaExecutor', () => {
     ]);
   });
 
-  it('falls back to derived values when no result mapping is configured', async () => {
+  it('does not fake submit success when no real submission evidence is available', async () => {
     const runtime = {
       run: jest.fn().mockResolvedValue({
         success: true,
@@ -148,8 +148,9 @@ describe('BrowserRpaExecutor', () => {
       ticket: {},
     });
 
-    expect(result.success).toBe(true);
-    expect(result.submissionId).toBe('RPA-BROWSER-EXPENSE_SUBMIT-browser001');
-    expect(result.status).toBe('submitted');
+    expect(result.success).toBe(false);
+    expect(result.submissionId).toBeUndefined();
+    expect(result.status).toBeUndefined();
+    expect(result.message).toContain('未识别到真实提交成功信号');
   });
 });

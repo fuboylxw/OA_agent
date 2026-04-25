@@ -29,7 +29,11 @@ export class PageSnapshotGenerator {
     const mainRegionId = 'main';
     const statusRegionId = 'status';
     const elements = pageCapture
-      ? pageCapture.interactiveElements.map((element) => ({ ...element, ref: '' }))
+      ? pageCapture.interactiveElements.map((element) => ({
+          ...element,
+          ref: '',
+          regionId: element.regionId || this.inferCapturedElementRegionId(pageCapture, element.selector),
+        }))
       : this.buildInteractiveElements(tab, mainRegionId, statusRegionId);
     const cachedElements = this.refCache.cacheElements(session.sessionId, tab.tabId, elements);
     const forms = pageCapture
@@ -273,6 +277,21 @@ export class PageSnapshotGenerator {
     }));
   }
 
+  private inferCapturedElementRegionId(
+    pageCapture: BrowserPageCapture,
+    selector?: string,
+  ) {
+    const normalizedSelector = String(selector || '').trim();
+    if (!normalizedSelector || !Array.isArray(pageCapture.regions)) {
+      return undefined;
+    }
+
+    return pageCapture.regions.find((region) =>
+      Array.isArray(region.elementSelectors)
+      && region.elementSelectors.includes(normalizedSelector),
+    )?.id;
+  }
+
   private buildImportantTexts(tab: BrowserTabRecord) {
     const texts = [
       `${tab.flow.processName}`,
@@ -382,16 +401,6 @@ export class PageSnapshotGenerator {
   }
 
   private deriveStatus(submissionId: string | undefined) {
-    const value = String(submissionId || '').toLowerCase();
-    if (value.includes('reject') || value.includes('fail')) {
-      return 'rejected';
-    }
-    if (value.includes('approve') || value.includes('done')) {
-      return 'approved';
-    }
-    if (value.includes('process') || value.includes('pending')) {
-      return 'processing';
-    }
     return 'submitted';
   }
 

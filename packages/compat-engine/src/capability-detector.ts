@@ -131,13 +131,14 @@ export function detectCapabilities(input: DetectionInput): DetectionResult {
     for (const page of input.htmlPages) {
       if (page.forms) {
         for (const form of page.forms) {
+          const purpose = readExplicitFormPurpose(form);
           result.detectedForms.push({
             url: form.action,
             fields: form.fields.map(f => ({ ...f })),
-            purpose: guessFormPurpose(form),
-            confidence: 0.6,
+            purpose,
+            confidence: purpose === 'unknown' ? 0.2 : 0.8,
           });
-          if (guessFormPurpose(form) === 'submit') {
+          if (purpose === 'submit') {
             result.canSubmit = true;
           }
         }
@@ -149,44 +150,8 @@ export function detectCapabilities(input: DetectionInput): DetectionResult {
 }
 
 function analyzeEndpoint(path: string, method: string, spec: Record<string, any>): DetectedEndpoint | null {
-  const lowerPath = path.toLowerCase();
-  const tags = (spec.tags || []).map((t: string) => t.toLowerCase());
-  const summary = (spec.summary || '').toLowerCase();
-
-  let purpose = 'unknown';
-  let confidence = 0.5;
-
-  if (lowerPath.includes('/auth') || lowerPath.includes('/login') || lowerPath.includes('/token')) {
-    purpose = 'auth';
-    confidence = 0.9;
-  } else if (lowerPath.includes('/user') && method === 'get') {
-    purpose = 'list_users';
-    confidence = 0.8;
-  } else if (lowerPath.includes('/status') || lowerPath.includes('/progress')) {
-    purpose = 'query_status';
-    confidence = 0.8;
-  } else if ((lowerPath.includes('/flow') || lowerPath.includes('/process')) && method === 'get') {
-    purpose = 'list_flows';
-    confidence = 0.8;
-  } else if (lowerPath.includes('/submit') || (lowerPath.includes('/application') && method === 'post')) {
-    purpose = 'submit';
-    confidence = 0.85;
-  } else if (lowerPath.includes('/cancel') || lowerPath.includes('/revoke')) {
-    purpose = 'cancel';
-    confidence = 0.8;
-  } else if (lowerPath.includes('/urge') || lowerPath.includes('/remind')) {
-    purpose = 'urge';
-    confidence = 0.7;
-  } else if (lowerPath.includes('/delegate') || lowerPath.includes('/transfer')) {
-    purpose = 'delegate';
-    confidence = 0.7;
-  } else if (lowerPath.includes('/supplement') || lowerPath.includes('/attach')) {
-    purpose = 'supplement';
-    confidence = 0.7;
-  } else if (lowerPath.includes('/callback') || lowerPath.includes('/webhook')) {
-    purpose = 'callback';
-    confidence = 0.8;
-  }
+  const purpose = readExplicitEndpointPurpose(spec);
+  const confidence = purpose === 'unknown' ? 0 : 0.9;
 
   if (purpose === 'unknown') return null;
 
@@ -194,8 +159,7 @@ function analyzeEndpoint(path: string, method: string, spec: Record<string, any>
 }
 
 function analyzeHarEntry(entry: HarEntry): DetectedEndpoint | null {
-  const url = new URL(entry.url, 'http://localhost');
-  return analyzeEndpoint(url.pathname, entry.method.toLowerCase(), {});
+  return null;
 }
 
 function applyEndpointCapability(result: DetectionResult, endpoint: DetectedEndpoint): void {
@@ -213,10 +177,25 @@ function applyEndpointCapability(result: DetectionResult, endpoint: DetectedEndp
   }
 }
 
-function guessFormPurpose(form: FormInfo): string {
-  const action = form.action.toLowerCase();
-  if (action.includes('login') || action.includes('auth')) return 'auth';
-  if (action.includes('submit') || action.includes('apply')) return 'submit';
-  if (action.includes('search') || action.includes('query')) return 'query';
-  return 'unknown';
+function readExplicitEndpointPurpose(spec: Record<string, any>): string {
+  const value = spec['x-uniflow-purpose']
+    || spec['x-oa-purpose']
+    || spec['x-purpose']
+    || spec['x-capability']
+    || spec.purpose
+    || spec.category;
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) {
+    return 'unknown';
+  }
+  return normalized;
+}
+
+function readExplicitFormPurpose(form: FormInfo & Record<string, any>): string {
+  const value = form.purpose || form.category || form['x-uniflow-purpose'] || form['x-oa-purpose'];
+  const normalized = String(value || '').trim().toLowerCase();
+  if (!normalized) {
+    return 'unknown';
+  }
+  return normalized;
 }

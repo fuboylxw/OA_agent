@@ -2,12 +2,14 @@ import { Process, Processor } from '@nestjs/bull';
 import { Job } from 'bull';
 import { Injectable, Logger } from '@nestjs/common';
 import { Prisma } from '@prisma/client';
+import { RuntimeJudgementEngine } from '@uniflow/compat-engine';
 import { PrismaService } from '../services/prisma.service';
 
 @Processor('webhook')
 @Injectable()
 export class WebhookProcessor {
   private readonly logger = new Logger(WebhookProcessor.name);
+  private readonly runtimeJudgementEngine = new RuntimeJudgementEngine();
 
   constructor(private readonly prisma: PrismaService) {}
 
@@ -58,7 +60,20 @@ export class WebhookProcessor {
       return this.markInboxFailed(inbox.id, `Submission not found for external id ${externalSubmissionId}`);
     }
 
-    const nextSubmissionStatus = this.mapWebhookStatusToSubmissionStatus(eventStatus, submission.status);
+    const statusInterpretation = await this.runtimeJudgementEngine.interpretExternalStatus({
+      externalStatus: eventStatus,
+      fallbackStatus: submission.status,
+      eventType,
+      payload,
+      source: 'webhook',
+      trace: {
+        scope: 'worker.webhook.runtime_judgement',
+        traceId: `webhook:${inbox.id}`,
+        tenantId: submission.tenantId,
+        userId: submission.userId,
+      },
+    });
+    const nextSubmissionStatus = statusInterpretation.mappedStatus;
     const eventCreated = await this.createSubmissionEvent({
       tenantId: submission.tenantId,
       submissionId: submission.id,
@@ -180,23 +195,6 @@ export class WebhookProcessor {
 
     const date = new Date(raw);
     return Number.isNaN(date.getTime()) ? new Date() : date;
-  }
-
-  private mapWebhookStatusToSubmissionStatus(webhookStatus: string, fallbackStatus: string) {
-    const normalized = (webhookStatus || '').toLowerCase();
-
-    if (!normalized) return fallbackStatus;
-    if (['error', 'failed', 'failure'].includes(normalized)) return 'failed';
-    if (['cancelled', 'canceled', 'revoked'].includes(normalized)) return 'cancelled';
-    if (normalized.includes('reject')) return 'failed';
-    if (normalized.includes('approve') || normalized.includes('finish') || normalized.includes('complete')) {
-      return 'submitted';
-    }
-    if (normalized.includes('pending') || normalized.includes('review') || normalized.includes('process')) {
-      return 'submitted';
-    }
-
-    return fallbackStatus;
   }
 
   private getWebhookConfig(connector: { capability?: { metadata?: any } | null }) {

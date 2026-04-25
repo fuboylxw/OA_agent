@@ -91,4 +91,44 @@ describe('delivery-path-resolver', () => {
 
     expect(paths).toEqual([URL_DELIVERY_PATH]);
   });
+
+  it('prefers runtimeManifest capability paths over legacy executionModes', () => {
+    const paths = resolveAvailablePaths({
+      runtimeManifest: {
+        version: 1,
+        capabilities: {
+          submit: ['url'],
+          queryStatus: [],
+        },
+        definition: {
+          processCode: 'manifest_first_flow',
+          processName: 'Manifest First Flow',
+          accessMode: 'direct_link',
+          sourceType: 'direct_link',
+          platform: {
+            jumpUrlTemplate: 'https://oa.example.com/workflow/manifest_first_flow',
+          },
+          runtime: {
+            networkSubmit: {
+              url: 'https://oa.example.com/api/workflow/submit',
+            },
+          },
+        },
+      },
+      executionModes: {
+        submit: ['rpa'],
+      },
+      rpaDefinition: {
+        processCode: 'manifest_first_flow',
+        processName: 'Legacy Flow',
+        actions: {
+          submit: {
+            steps: [{ type: 'click', selector: '#submit' }],
+          },
+        },
+      },
+    }, 'submit');
+
+    expect(paths).toEqual([URL_DELIVERY_PATH]);
+  });
 });

@@ -6,8 +6,8 @@ import { AdapterRuntimeService } from '../adapter-runtime/adapter-runtime.servic
 import { buildStatusEventRemoteId } from '@uniflow/shared-types';
 import {
   ACTIVE_SUBMISSION_STATUSES,
+  interpretExternalStatusToSubmissionStatus,
   isUnsupportedStatusQueryResult,
-  mapExternalStatusToSubmissionStatus,
 } from '../common/submission-status.util';
 import { mapSubmissionStatusToChatProcessStatus } from '../common/chat-process-state';
 import { buildConversationRestoreState } from '../common/chat-retention.util';
@@ -66,7 +66,19 @@ export class StatusSyncService {
         if (isUnsupportedStatusQueryResult(result)) {
           continue;
         }
-        const mappedStatus = mapExternalStatusToSubmissionStatus(result.status, previousStatus);
+        const statusInterpretation = await interpretExternalStatusToSubmissionStatus({
+          externalStatus: result.status,
+          fallbackStatus: previousStatus,
+          payload: result as Record<string, any>,
+          statusDetail: result.statusDetail as Record<string, any> | undefined,
+          source: 'status_poll',
+          trace: {
+            scope: 'api.status_sync.runtime_judgement',
+            traceId: `status-sync:${submission.id}`,
+            tenantId: syncJob.tenantId,
+          },
+        });
+        const mappedStatus = statusInterpretation.mappedStatus;
         const remoteEventId = buildStatusEventRemoteId(submission.oaSubmissionId, result as Record<string, any>);
 
         const eventCreated = await this.createSubmissionEvent({

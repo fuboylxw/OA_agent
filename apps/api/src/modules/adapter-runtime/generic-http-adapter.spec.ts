@@ -187,7 +187,7 @@ describe('GenericHttpAdapter', () => {
     expect(result.submissionId).toBe('LEAVE-003');
   });
 
-  it('normalizes temporal fields and omits empty attachments for submit payloads', async () => {
+  it('preserves explicit field values and omits empty attachments for submit payloads', async () => {
     endpointLoader.loadEndpoints.mockResolvedValueOnce([{
       toolName: 'leave_post_leave_applications',
       category: 'submit',
@@ -243,8 +243,8 @@ describe('GenericHttpAdapter', () => {
     expect(request).toHaveBeenCalledWith(expect.objectContaining({
       data: expect.objectContaining({
         leave_type: '事假',
-        start_time: '2026-03-25T09:00:00Z',
-        end_time: '2026-03-27T18:00:00Z',
+        start_time: '2026-03-25',
+        end_time: '2026-03-27',
         reason: '出去旅游',
       }),
     }));

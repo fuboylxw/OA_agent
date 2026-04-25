@@ -1,6 +1,6 @@
 import type { RpaActionDefinition, RpaFlowDefinition } from '@uniflow/shared-types';
 import { BrowserTaskRuntime } from '../browser-runtime/browser-task-runtime';
-import { confirmRpaSubmit } from '../delivery-runtime/rpa-submit-confirmation.util';
+import { confirmRpaSubmitIntelligently } from '../delivery-runtime/rpa-submit-confirmation.util';
 import type { RpaExecutionInput, RpaExecutionResult, RpaExecutor } from './rpa-executor';
 
 export class BrowserRpaExecutor implements RpaExecutor {
@@ -47,7 +47,7 @@ export class BrowserRpaExecutor implements RpaExecutor {
     if (input.action === 'submit') {
       const message = this.resolveMessage(actionDefinition, taskResult.extractedValues)
         || `${input.flow.processName} submitted through browser runtime`;
-      const confirmation = confirmRpaSubmit({
+      const confirmation = await confirmRpaSubmitIntelligently({
         actionDefinition,
         extractedValues: taskResult.extractedValues,
         finalSnapshot: taskResult.finalSnapshot,
@@ -190,16 +190,6 @@ export class BrowserRpaExecutor implements RpaExecutor {
   }
 
   private deriveStatus(submissionId: string | undefined) {
-    const value = String(submissionId || '').toLowerCase();
-    if (value.includes('reject') || value.includes('fail')) {
-      return 'rejected';
-    }
-    if (value.includes('approve') || value.includes('done')) {
-      return 'approved';
-    }
-    if (value.includes('process') || value.includes('pending')) {
-      return 'processing';
-    }
     return 'submitted';
   }
 }

@@ -1,3 +1,5 @@
+import { FLOW_TEXT_TEMPLATE_PLACEHOLDERS } from '../lib/flow-text-templates';
+
 export type ProcessAuthoringAccessMode = 'rpa' | 'url' | 'api';
 export type ProcessAuthoringInputMode = 'manual' | 'file';
 
@@ -51,69 +53,7 @@ export const PROCESS_FILE_ACCEPT: Record<ProcessAuthoringAccessMode, string> = {
   api: '.txt,.md,.markdown,.text,.log,.json,.yaml,.yml',
 };
 
-export const PROCESS_TEXT_TEMPLATE_PLACEHOLDERS: Record<ProcessAuthoringAccessMode, string> = {
-  url: [
-    '流程: 请假申请',
-    '流程编码: leave_request',
-    '描述: 教职工请假申请示例',
-    '认证入口: https://auth.example.com/',
-    '系统网址: https://oa.example.com/',
-    '流程页面: https://oa.example.com/workflow/new?templateId=leave_request',
-    '',
-    '需要填写的信息:',
-    '- 请假事由 | 说明: 填写本次请假的具体原因 | 示例: 家中有事，需要请假半天',
-    '- 开始日期 | 示例: 2026-04-20',
-    '- 结束日期 | 示例: 2026-04-20',
-    '',
-    '需要上传的材料:',
-    '- 病假证明 | 说明: 病假时上传相关证明材料 | 示例: 诊断证明.pdf',
-    '',
-    '步骤:',
-    '- 访问 https://auth.example.com/',
-    '- 访问 https://oa.example.com/',
-    '- 访问 https://oa.example.com/workflow/new?templateId=leave_request',
-    '- 点击 保存待发',
-    '- 看到 提交成功 就结束',
-  ].join('\n'),
-  rpa: [
-    '流程: 用印申请',
-    '流程编码: seal_apply',
-    '描述: 公章或合同章申请示例',
-    '入口链接: https://oa.example.com/workflow',
-    '',
-    '需要填写的信息:',
-    '- 文件类型、名称及份数 | 说明: 填写需要盖章文件的类型、名称和份数 | 示例: 劳务合同 2份',
-    '',
-    '需要上传的材料:',
-    '- 用印附件 | 说明: 上传需要盖章的文件 | 示例: 劳务合同.pdf',
-    '',
-    '步骤:',
-    '- 访问 https://oa.example.com/workflow',
-    '- 点击 用印申请',
-    '- 填写 文件类型、名称及份数',
-    '- 上传 用印附件',
-    '- 点击 保存待发',
-    '- 看到 提交成功 就结束',
-  ].join('\n'),
-  api: [
-    '流程: 合同审批',
-    '流程编码: contract_apply',
-    '描述: 通过业务接口提交合同审批示例',
-    '系统网址: https://oa.example.com/',
-    '提交接口: POST /api/workflow/contract/submit',
-    '查询接口: GET /api/workflow/contract/status/{submissionId}',
-    '提交成功字段: success',
-    '状态字段: data.status',
-    '',
-    '需要填写的信息:',
-    '- 合同名称 | 说明: 申请人录入的合同标题 | 示例: 校企合作协议',
-    '- 合同金额 | 示例: 12000',
-    '- 申请事由 | 示例: 需要发起合同评审',
-    '',
-    '需要上传的材料:',
-    '- 合同附件 | 说明: 上传合同扫描件或正文文件 | 示例: 合同正文.pdf | 多份',
-  ].join('\n'),
-};
+export const PROCESS_TEXT_TEMPLATE_PLACEHOLDERS: Record<ProcessAuthoringAccessMode, string> = FLOW_TEXT_TEMPLATE_PLACEHOLDERS;
 
 function isDirectLinkDefinition(definition: Record<string, any> | null | undefined) {
   if (!definition || typeof definition !== 'object') {
@@ -181,20 +121,27 @@ function formatFieldLine(field: Record<string, any>) {
     return null;
   }
 
-  const tokens = [label];
+  const tokens = [label, field?.required === false ? '选填' : '必填'];
   const description = String(field?.description || '').trim();
   const example = String(field?.example || '').trim();
+  const normalizedOptions = Array.isArray(field?.options)
+    ? field.options
+      .map((option: any) => String(option?.label || option?.value || option || '').trim())
+      .filter(Boolean)
+    : [];
   if (description) {
     tokens.push(`说明: ${description}`);
   }
   if (example) {
     tokens.push(`示例: ${example}`);
   }
-  if (field?.required === false) {
-    tokens.push('选填');
+  if (normalizedOptions.length > 0) {
+    tokens.push(`可选值: ${Array.from(new Set(normalizedOptions)).join('、')}`);
   }
   if (field?.multiple) {
-    tokens.push('多份');
+    tokens.push('可多选');
+  } else if (normalizedOptions.length > 0) {
+    tokens.push('只能选一个');
   }
   return `- ${tokens.join(' | ')}`;
 }
@@ -277,7 +224,6 @@ function buildApiTextTemplateFromUiHints(input: {
   const lines: string[] = [];
 
   const processName = String(input.processName || definition.processName || '').trim();
-  const processCode = String(input.processCode || definition.processCode || '').trim();
   const description = String(definition.description || '').trim();
   const platform = definition.platform && typeof definition.platform === 'object'
     ? definition.platform as Record<string, any>
@@ -289,22 +235,33 @@ function buildApiTextTemplateFromUiHints(input: {
   const submitEndpoint = endpoints.find((endpoint) => String(endpoint?.category || '').trim().toLowerCase() === 'submit')
     || (uiHints.apiPath ? { method: uiHints.apiMethod, path: uiHints.apiPath } : null);
   const queryEndpoint = endpoints.find((endpoint) => String(endpoint?.category || '').trim().toLowerCase() === 'query') || null;
+  const successField = String(uiHints.submitSuccessField || '').trim();
+  const statusField = String(uiHints.statusField || '').trim();
 
+  lines.push('# 系统基本信息');
   if (processName) {
-    lines.push(`流程: ${processName}`);
+    lines.push(`系统名称: ${processName}`);
   }
-  if (processCode) {
-    lines.push(`流程编码: ${processCode}`);
-  }
-  if (description) {
-    lines.push(`描述: ${description}`);
-  }
-
   const baseUrl = String(platform.businessBaseUrl || platform.targetBaseUrl || '').trim();
   if (baseUrl) {
     lines.push(`系统网址: ${baseUrl}`);
   }
+  lines.push('适用对象: 由连接器配置决定');
+  lines.push('认证说明: 使用现有接口鉴权，不需要页面点击');
+  if (successField || statusField) {
+    lines.push(`办理完成标志: ${[
+      successField ? `提交返回字段 ${successField}` : '',
+      statusField ? `状态字段 ${statusField}` : '',
+    ].filter(Boolean).join('；')}`);
+  }
+  lines.push('');
 
+  if (processName) {
+    lines.push(`## 流程: ${processName}`);
+  }
+  if (description) {
+    lines.push(`描述: ${description}`);
+  }
   const submitLine = buildApiEndpointLine('提交接口', submitEndpoint);
   if (submitLine) {
     lines.push(submitLine);
@@ -319,20 +276,35 @@ function buildApiTextTemplateFromUiHints(input: {
 
   if (fillFields.length > 0) {
     lines.push('');
-    lines.push('需要填写的信息:');
+    lines.push('用户办理时需要补充的信息:');
     fillFields
       .map(formatFieldLine)
       .filter((line): line is string => Boolean(line))
       .forEach((line) => lines.push(line));
   }
 
-  if (uploadFields.length > 0) {
-    lines.push('');
-    lines.push('需要上传的材料:');
+  if (uploadFields.length > 0 || fillFields.length === 0) {
+    if (fillFields.length === 0) {
+      lines.push('');
+      lines.push('用户办理时需要补充的信息:');
+    }
     uploadFields
       .map(formatFieldLine)
       .filter((line): line is string => Boolean(line))
       .forEach((line) => lines.push(line));
+  }
+
+  const exampleLines = fields
+    .map((field) => {
+      const label = String(field?.label || field?.key || '').trim();
+      const example = String(field?.example || '').trim();
+      return label && example ? `- ${label}: ${example}` : null;
+    })
+    .filter((line): line is string => Boolean(line));
+  if (exampleLines.length > 0) {
+    lines.push('');
+    lines.push('测试样例:');
+    exampleLines.forEach((line) => lines.push(line));
   }
 
   return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();
@@ -401,7 +373,6 @@ export function buildProcessAuthoringTextTemplate(input: {
 
   const lines: string[] = [];
   const processName = String(input.processName || definition.processName || '').trim();
-  const processCode = String(input.processCode || definition.processCode || '').trim();
   const description = String(definition.description || '').trim();
   const platform = definition.platform && typeof definition.platform === 'object'
     ? definition.platform as Record<string, any>
@@ -410,54 +381,47 @@ export function buildProcessAuthoringTextTemplate(input: {
     ? definition.fields as Array<Record<string, any>>
     : [];
 
-  if (processName) {
-    lines.push(`流程: ${processName}`);
+  const successText = String(definition?.actions?.submit?.successAssert?.value || '').trim();
+
+  lines.push('# 系统基本信息');
+  if (platform.entryUrl) {
+    lines.push(`${input.accessMode === 'url' ? '认证入口' : '系统网址'}: ${platform.entryUrl}`);
   }
-  if (processCode) {
-    lines.push(`流程编码: ${processCode}`);
+  if (input.accessMode === 'url' && platform.businessBaseUrl) {
+    lines.push(`系统网址: ${platform.businessBaseUrl}`);
+  }
+  if (successText) {
+    lines.push(`办理完成标志: 看到 ${successText} 就结束`);
+  }
+  lines.push('');
+
+  if (processName) {
+    lines.push(`## 流程: ${processName}`);
   }
   if (description) {
     lines.push(`描述: ${description}`);
   }
 
   if (input.accessMode === 'url') {
-    if (platform.entryUrl) {
-      lines.push(`认证入口: ${platform.entryUrl}`);
-    }
     const businessUrl = String(platform.jumpUrlTemplate || platform.targetBaseUrl || platform.businessBaseUrl || '').trim();
-    if (platform.businessBaseUrl) {
-      lines.push(`系统网址: ${platform.businessBaseUrl}`);
-    }
-    if (businessUrl && businessUrl !== String(platform.businessBaseUrl || '').trim()) {
+    if (businessUrl) {
       lines.push(`流程页面: ${businessUrl}`);
     }
   } else if (platform.entryUrl) {
-    lines.push(`入口链接: ${platform.entryUrl}`);
+    lines.push(`流程入口: ${platform.entryUrl}`);
   }
 
-  const fillFields = fields.filter((field) => String(field?.type || '').trim().toLowerCase() !== 'file');
-  const uploadFields = fields.filter((field) => String(field?.type || '').trim().toLowerCase() === 'file');
-
-  if (fillFields.length > 0) {
+  if (fields.length > 0) {
     lines.push('');
-    lines.push('需要填写的信息:');
-    fillFields
-      .map(formatFieldLine)
-      .filter((line): line is string => Boolean(line))
-      .forEach((line) => lines.push(line));
-  }
-
-  if (uploadFields.length > 0) {
-    lines.push('');
-    lines.push('需要上传的材料:');
-    uploadFields
+    lines.push('用户办理时需要补充的信息:');
+    fields
       .map(formatFieldLine)
       .filter((line): line is string => Boolean(line))
       .forEach((line) => lines.push(line));
   }
 
   lines.push('');
-  lines.push('步骤:');
+  lines.push('办理步骤:');
 
   if (input.accessMode === 'url') {
     const urlLines = buildDirectLinkStepLines(definition);
@@ -476,9 +440,21 @@ export function buildProcessAuthoringTextTemplate(input: {
       .forEach((line) => lines.push(line));
   }
 
-  const successText = String(definition?.actions?.submit?.successAssert?.value || '').trim();
   if (successText) {
     lines.push(`- 看到 ${successText} 就结束`);
+  }
+
+  const exampleLines = fields
+    .map((field) => {
+      const label = String(field?.label || field?.key || '').trim();
+      const example = String(field?.example || '').trim();
+      return label && example ? `- ${label}: ${example}` : null;
+    })
+    .filter((line): line is string => Boolean(line));
+  if (exampleLines.length > 0) {
+    lines.push('');
+    lines.push('测试样例:');
+    exampleLines.forEach((line) => lines.push(line));
   }
 
   return lines.join('\n').replace(/\n{3,}/g, '\n\n').trim();

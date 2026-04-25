@@ -12,7 +12,7 @@ import { PrismaService } from '../common/prisma.service';
 import { ChatSessionProcessService } from '../common/chat-session-process.service';
 import { AuditService } from '../audit/audit.service';
 import { AdapterRuntimeService } from '../adapter-runtime/adapter-runtime.service';
-import { mapExternalStatusToSubmissionStatus } from '../common/submission-status.util';
+import { interpretExternalStatusToSubmissionStatus } from '../common/submission-status.util';
 
 @Injectable()
 export class WebhookService {
@@ -154,7 +154,20 @@ export class WebhookService {
     }
 
     const previousStatus = submission.status;
-    const nextSubmissionStatus = mapExternalStatusToSubmissionStatus(eventStatus, previousStatus);
+    const statusInterpretation = await interpretExternalStatusToSubmissionStatus({
+      externalStatus: eventStatus,
+      fallbackStatus: previousStatus,
+      eventType,
+      payload,
+      source: 'webhook',
+      trace: {
+        scope: 'api.webhook.runtime_judgement',
+        traceId: `webhook-${inbox.id}`,
+        tenantId: submission.tenantId,
+        userId: submission.userId,
+      },
+    });
+    const nextSubmissionStatus = statusInterpretation.mappedStatus;
 
     const eventCreated = await this.createSubmissionEvent({
       tenantId: submission.tenantId,

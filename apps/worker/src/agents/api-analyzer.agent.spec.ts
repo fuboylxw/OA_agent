@@ -11,8 +11,8 @@ jest.mock('@uniflow/agent-kernel', () => ({
 
 import { ApiAnalyzerAgent } from './api-analyzer.agent';
 
-describe('ApiAnalyzerAgent heuristic fallback', () => {
-  it('infers business processes from OpenAPI when LLM analysis fails', async () => {
+describe('ApiAnalyzerAgent LLM-only process identification', () => {
+  it('does not synthesize business processes heuristically when LLM analysis fails', async () => {
     const agent = new ApiAnalyzerAgent();
     (agent as any).llmClient = {
       chat: jest.fn().mockRejectedValue(new Error('timeout')),
@@ -150,34 +150,6 @@ describe('ApiAnalyzerAgent heuristic fallback', () => {
 
     const processes = await (agent as any).analyzeOpenAPI(document, 'http://127.0.0.1:8000');
 
-    expect(processes).toHaveLength(2);
-    expect(processes.map((process: any) => process.processCode).sort()).toEqual(['expense', 'leave']);
-
-    const leaveProcess = processes.find((process: any) => process.processCode === 'leave');
-    expect(leaveProcess).toEqual(expect.objectContaining({
-      processName: '请假申请',
-      category: 'hr',
-    }));
-    expect(leaveProcess.endpoints).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        category: 'submit',
-        method: 'POST',
-        path: '/api/leave/applications',
-        bodyTemplate: expect.objectContaining({
-          leave_type: '{{leave_type}}',
-          reason: '{{reason}}',
-        }),
-      }),
-      expect.objectContaining({
-        category: 'list',
-        method: 'GET',
-        path: '/api/leave/applications',
-      }),
-      expect.objectContaining({
-        category: 'query',
-        method: 'GET',
-        path: '/api/leave/applications/{application_id}',
-      }),
-    ]));
+    expect(processes).toEqual([]);
   });
 });

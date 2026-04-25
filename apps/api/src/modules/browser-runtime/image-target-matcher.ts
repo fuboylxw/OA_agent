@@ -46,12 +46,9 @@ export class ImageTargetMatcher {
       if (targetValue && hintValue === targetValue) {
         score += 100;
         reasons.push('same-image-value');
-      } else if (targetValue && hintValue && (hintValue.includes(targetValue) || targetValue.includes(hintValue))) {
-        score += 70;
-        reasons.push('similar-image-value');
       }
 
-      if (targetLabel && hintLabel && (hintLabel === targetLabel || hintLabel.includes(targetLabel))) {
+      if (targetLabel && hintLabel && hintLabel === targetLabel) {
         score += 45;
         reasons.push('same-image-label');
       }
@@ -65,9 +62,6 @@ export class ImageTargetMatcher {
       if (targetValue && text === targetValue) {
         score += 35;
         reasons.push('same-element-text');
-      } else if (targetValue && text.includes(targetValue)) {
-        score += 20;
-        reasons.push('similar-element-text');
       }
 
       if (targetLabel && text === targetLabel) {

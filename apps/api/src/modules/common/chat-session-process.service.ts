@@ -158,66 +158,56 @@ export class ChatSessionProcessService {
     reason?: string | null,
     payload?: Record<string, any> | null,
   ): ReworkHint {
-    const text = `${reason || ''} ${this.collectStrings(payload).join(' ')}`.toLowerCase();
-    if (!text.trim()) {
+    return this.extractExplicitReworkHint(payload, reason);
+  }
+
+  private extractExplicitReworkHint(
+    payload?: Record<string, any> | null,
+    reason?: string | null,
+  ): ReworkHint {
+    const explicitKeys = [
+      'reworkHint',
+      'reworkType',
+      'action',
+      'actionType',
+      'requiredAction',
+      'nextAction',
+    ];
+
+    for (const key of explicitKeys) {
+      const value = payload?.[key];
+      const normalized = this.normalizeExplicitReworkHint(value);
+      if (normalized !== 'unknown') {
+        return normalized;
+      }
+    }
+
+    if (payload?.requiresSupplement === true || payload?.needSupplement === true) {
+      return 'supplement';
+    }
+
+    if (payload?.requiresModify === true || payload?.needModify === true) {
+      return 'modify';
+    }
+
+    return 'unknown';
+  }
+
+  private normalizeExplicitReworkHint(value: unknown): ReworkHint {
+    const normalized = String(value || '').trim().toLowerCase();
+    if (!normalized) {
       return 'unknown';
     }
 
-    const supplementKeywords = [
-      '附件',
-      '材料',
-      '发票',
-      '票据',
-      '凭证',
-      '证明',
-      '上传',
-      '补充',
-      '补交',
-      '材料不全',
-      '附件缺失',
-      'receipt',
-      'invoice',
-      'attachment',
-      'document',
-      'proof',
-      'material',
-      'upload',
-      'supplement',
-    ];
-    const modifyKeywords = [
-      '修改',
-      '更正',
-      '调整',
-      '重填',
-      '重新填写',
-      '内容',
-      '信息',
-      '金额',
-      '日期',
-      '事由',
-      '错误',
-      '不一致',
-      '不规范',
-      '有误',
-      'modify',
-      'update',
-      'revise',
-      'correct',
-      'amount',
-      'date',
-      'content',
-      'field',
-      'invalid',
-    ];
-
-    const supplementScore = supplementKeywords.filter((keyword) => text.includes(keyword)).length;
-    const modifyScore = modifyKeywords.filter((keyword) => text.includes(keyword)).length;
-
-    if (supplementScore === 0 && modifyScore === 0) {
-      return 'unknown';
+    if (['supplement', 'supplement_material', '补件', '补充', '补充材料', '补交'].includes(normalized)) {
+      return 'supplement';
     }
 
-    return supplementScore >= modifyScore ? 'supplement' : 'modify';
+    if (['modify', 'modification', '修改', '更正', '调整', '重填', '重新填写'].includes(normalized)) {
+      return 'modify';
+    }
+
+    return 'unknown';
   }
 
   private extractStatusReason(payload?: Record<string, any> | null) {
@@ -242,7 +232,6 @@ export class ChatSessionProcessService {
 
     const queue: unknown[] = [payload];
     const visited = new Set<object>();
-    const candidates: Array<{ value: string; score: number }> = [];
 
     while (queue.length > 0) {
       const current = queue.shift();
@@ -265,42 +254,16 @@ export class ChatSessionProcessService {
       visited.add(current);
 
       const record = current as Record<string, any>;
-      const contextText = [
-        record.status,
-        record.currentStepStatus,
-        record.eventType,
-        record.action,
-      ]
-        .filter((value): value is string => typeof value === 'string' && value.trim().length > 0)
-        .join(' ')
-        .toLowerCase();
-      const rejectedContext = /reject|refuse|deny|驳回|拒绝/.test(contextText);
 
       for (const key of candidateKeys) {
         const value = record[key];
         if (typeof value === 'string' && value.trim()) {
-          const normalizedValue = value.trim();
-          let score = 1;
-
           if (key === 'rejectReason') {
-            score += 8;
-          } else if (key === 'comment' || key === 'approvalComment' || key === 'opinion') {
-            score += 3;
+            return value.trim();
           }
-
-          if (rejectedContext) {
-            score += 10;
+          if ((key === 'approvalComment' || key === 'comment' || key === 'opinion') && record.reworkHint) {
+            return value.trim();
           }
-
-          if (/补充|补交|修改|更正|重新提交|附件|材料|证明|驳回|拒绝|reject|supplement|modify/i.test(normalizedValue)) {
-            score += 4;
-          }
-
-          if (/^(提交申请|审批通过|审批已通过|状态已更新)$/i.test(normalizedValue)) {
-            score -= 6;
-          }
-
-          candidates.push({ value: normalizedValue, score });
         }
       }
 
@@ -311,8 +274,7 @@ export class ChatSessionProcessService {
       }
     }
 
-    candidates.sort((left, right) => right.score - left.score);
-    return candidates[0]?.value || null;
+    return null;
   }
 
   private collectStrings(payload?: Record<string, any> | null) {

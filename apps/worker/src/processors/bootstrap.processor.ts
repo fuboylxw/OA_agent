@@ -8,14 +8,17 @@ import { Prisma } from '@prisma/client';
 import { ApiAnalyzerAgent, BusinessProcess, Endpoint } from '../agents/api-analyzer.agent';
 import { BootstrapRepairAgent } from '../agents/bootstrap-repair.agent';
 import { recordRuntimeDiagnostic } from '@uniflow/agent-kernel';
+import { SystemInferenceEngine } from '@uniflow/compat-engine';
 import {
   BOOTSTRAP_JOB_HEARTBEAT_INTERVAL_MS,
   BOOTSTRAP_TERMINAL_STATUSES,
+  buildProcessRuntimeManifest,
   buildFullUrl,
   getNestedValue,
   normalizeProcessName,
   parseRpaFlowDefinitions,
   resolveAssistantFieldPresentation,
+  toLegacyExecutionModesFromRuntimeManifest,
   type RpaFlowDefinition,
 } from '@uniflow/shared-types';
 
@@ -110,6 +113,7 @@ export class BootstrapProcessor {
   private readonly logger = new Logger(BootstrapProcessor.name);
   private readonly apiAnalyzer = new ApiAnalyzerAgent();
   private readonly bootstrapRepairAgent = new BootstrapRepairAgent();
+  private readonly systemInferenceEngine = new SystemInferenceEngine();
   private readonly prisma: PrismaService;
   private cookieSessionCache: Map<string, { cookie: string; expiresAt: number }> = new Map();
 
@@ -266,6 +270,7 @@ export class BootstrapProcessor {
       await this.runCompiling(
         bootstrapJob,
         validationSummary.passedProcesses,
+        validationSummary.validationResults,
         finalStatus,
         failedProcessCodes,
       );
@@ -554,15 +559,42 @@ ${JSON.stringify(forms, null, 2)}
 
     this.logger.log('Starting auth probing...');
     const probeLog: string[] = [];
+    const systemInference = await this.systemInferenceEngine.infer({
+      baseUrl,
+      oaUrl: bootstrapJob.oaUrl || baseUrl,
+      openApiUrl: bootstrapJob.openApiUrl || undefined,
+      apiDoc,
+      processes,
+      userAuth,
+      trace: {
+        scope: 'worker.bootstrap.auth_inference',
+        traceId: `${bootstrapJob.id}:auth-probing`,
+        tenantId: bootstrapJob.tenantId,
+      },
+    });
 
-    // 1. 从 API 文档中提取 authHint 和 loginEndpoints
-    const authHint = this.extractAuthHint(apiDoc);
-    const loginEndpoints = this.findLoginEndpoints(processes, apiDoc);
+    const authHint = systemInference.authHint || null;
+    const loginEndpoints = systemInference.loginEndpoints.map((endpoint) => ({
+      method: endpoint.method,
+      path: endpoint.path,
+    }));
+
+    probeLog.push(`systemInference: ${JSON.stringify({
+      source: systemInference.source,
+      preferredAuthType: systemInference.preferredAuthType,
+      oaType: systemInference.oaType,
+      authCandidates: systemInference.authCandidates,
+      authHint: systemInference.authHint,
+      loginEndpoints: systemInference.loginEndpoints,
+      signals: systemInference.signals,
+    })}`);
     probeLog.push(`authHint: ${JSON.stringify(authHint)}`);
     probeLog.push(`loginEndpoints: ${loginEndpoints.map(e => `${e.method} ${e.path}`).join(', ') || 'none'}`);
 
     // 2. 先尝试无认证访问
-    const probeTargets = this.buildNoAuthProbeTargets(baseUrl, processes, apiDoc, userAuth);
+    const probeTargets = systemInference.noAuthProbeTargets.length > 0
+      ? systemInference.noAuthProbeTargets
+      : this.buildNoAuthProbeTargets(baseUrl, processes, apiDoc, userAuth);
     probeLog.push(`probeTargets: ${probeTargets.join(', ') || 'none'}`);
     const noAuthResult = await this.probeNoAuth(probeTargets);
     if (noAuthResult) {
@@ -571,9 +603,14 @@ ${JSON.stringify(forms, null, 2)}
       return;
     }
 
-    // 3. 如果有 authHint，优先按提示探测
-    if (authHint?.type && userAuth.token) {
-      const hintResult = await this.probeWithHint(baseUrl, authHint, userAuth);
+    // 3. 如果共享推理给出了 token/header 方向，优先按该方向探测
+    if (authHint?.type && userAuth.token && ['apikey', 'oauth2', 'bearer'].includes(authHint.type)) {
+      const rankedHintCandidates = systemInference.authCandidates.filter((candidate) => candidate.type === authHint.type);
+      const hintResult = await this.probeTokenHeaders(
+        baseUrl,
+        userAuth.token,
+        rankedHintCandidates.length > 0 ? rankedHintCandidates : [authHint],
+      );
       if (hintResult) {
         probeLog.push(`authHint probe succeeded: ${hintResult.authType}, header=${hintResult.headerName}`);
         await this.updateAuthConfig(bootstrapJob.id, { ...userAuth, ...hintResult }, probeLog);
@@ -617,10 +654,13 @@ ${JSON.stringify(forms, null, 2)}
       probeLog.push('Basic Auth probe failed');
     }
 
-    // 6. 如果用户提供了 token，尝试各种 header 携带方式
+    // 6. 如果用户提供了 token，按共享推理给出的候选顺序探测 header 方式
     if (userAuth.token) {
-      probeLog.push('Trying token with various headers');
-      const tokenResult = await this.probeTokenHeaders(baseUrl, userAuth.token);
+      const rankedTokenCandidates = systemInference.authCandidates.filter((candidate) =>
+        ['apikey', 'oauth2', 'bearer'].includes(candidate.type),
+      );
+      probeLog.push(`Trying token with ranked candidates: ${rankedTokenCandidates.map((candidate) => `${candidate.type}:${candidate.headerName || 'default'}`).join(', ') || 'default'}`);
+      const tokenResult = await this.probeTokenHeaders(baseUrl, userAuth.token, rankedTokenCandidates);
       if (tokenResult) {
         probeLog.push(`Token probe succeeded: header=${tokenResult.headerName}`);
         await this.updateAuthConfig(bootstrapJob.id, {
@@ -907,14 +947,9 @@ ${JSON.stringify(forms, null, 2)}
   private async probeTokenHeaders(
     baseUrl: string,
     token: string,
+    candidates: Array<{ type?: string; headerName?: string; headerPrefix?: string }> = [],
   ): Promise<{ authType: string; headerName: string; headerPrefix?: string } | null> {
-    const attempts = [
-      { headerName: 'Authorization', headerValue: `Bearer ${token}`, authType: 'bearer', headerPrefix: 'Bearer ' },
-      { headerName: 'x-token', headerValue: token, authType: 'apikey' },
-      { headerName: 'Authorization', headerValue: token, authType: 'apikey' },
-      { headerName: 'X-API-Key', headerValue: token, authType: 'apikey' },
-      { headerName: 'X-Access-Token', headerValue: token, authType: 'apikey' },
-    ];
+    const attempts = this.buildTokenHeaderAttempts(token, candidates);
 
     for (const attempt of attempts) {
       try {
@@ -931,6 +966,60 @@ ${JSON.stringify(forms, null, 2)}
       }
     }
     return null;
+  }
+
+  private buildTokenHeaderAttempts(
+    token: string,
+    candidates: Array<{ type?: string; headerName?: string; headerPrefix?: string }> = [],
+  ): Array<{ headerName: string; headerValue: string; authType: string; headerPrefix?: string }> {
+    const attempts: Array<{ headerName: string; headerValue: string; authType: string; headerPrefix?: string }> = [];
+    const seen = new Set<string>();
+
+    const pushAttempt = (attempt: { headerName: string; headerValue: string; authType: string; headerPrefix?: string }) => {
+      const key = `${attempt.authType}|${attempt.headerName}|${attempt.headerValue}`;
+      if (seen.has(key)) {
+        return;
+      }
+      seen.add(key);
+      attempts.push(attempt);
+    };
+
+    for (const candidate of candidates) {
+      if (!candidate?.type) {
+        continue;
+      }
+
+      if (candidate.type === 'oauth2' || candidate.type === 'bearer') {
+        const headerName = candidate.headerName || 'Authorization';
+        const headerPrefix = candidate.headerPrefix || 'Bearer ';
+        pushAttempt({
+          headerName,
+          headerValue: `${headerPrefix}${token}`,
+          authType: candidate.type,
+          headerPrefix,
+        });
+        continue;
+      }
+
+      if (candidate.type === 'apikey') {
+        const headerName = candidate.headerName || 'x-token';
+        const headerPrefix = candidate.headerPrefix || '';
+        pushAttempt({
+          headerName,
+          headerValue: `${headerPrefix}${token}`,
+          authType: 'apikey',
+          headerPrefix: headerPrefix || undefined,
+        });
+      }
+    }
+
+    pushAttempt({ headerName: 'Authorization', headerValue: `Bearer ${token}`, authType: 'bearer', headerPrefix: 'Bearer ' });
+    pushAttempt({ headerName: 'x-token', headerValue: token, authType: 'apikey' });
+    pushAttempt({ headerName: 'Authorization', headerValue: token, authType: 'apikey' });
+    pushAttempt({ headerName: 'X-API-Key', headerValue: token, authType: 'apikey' });
+    pushAttempt({ headerName: 'X-Access-Token', headerValue: token, authType: 'apikey' });
+
+    return attempts;
   }
 
   private async probeBasicAuth(baseUrl: string, username: string, password: string): Promise<boolean> {
@@ -1317,7 +1406,6 @@ ${JSON.stringify(forms, null, 2)}
         ? 2
         : 1;
     const responseScore = result.submit?.responseStructureValid ? 0.4 : 0;
-    const purposeScore = result.submit?.purposeMatch ? 0.2 : 0;
     const paramScore = typeof result.paramStructure?.confidence === 'number'
       ? Math.min(result.paramStructure.confidence, 1) * 0.2
       : 0;
@@ -1326,7 +1414,7 @@ ${JSON.stringify(forms, null, 2)}
     const endpointScore = endpointChecks.length > 0
       ? (passedEndpointChecks / endpointChecks.length) * 0.3
       : 0;
-    return overallScore + responseScore + purposeScore + paramScore + endpointScore;
+    return overallScore + responseScore + paramScore + endpointScore;
   }
 
   private mapSubmitFailureType(failureReason?: string): ValidationFailureType {
@@ -1521,21 +1609,19 @@ ${JSON.stringify(forms, null, 2)}
       ? this.mapSubmitFailureType(validation.failureReason)
       : validation.responseStructureValid === false
         ? 'mapping_error'
-        : validation.purposeMatch === false
-          ? 'purpose_mismatch'
-          : undefined;
+        : undefined;
 
     return {
       endpointName: endpoint.name,
       category: endpoint.category || 'submit',
       method: endpoint.method,
       path: endpoint.path,
-      status: validation.success && validation.responseStructureValid !== false && validation.purposeMatch !== false
+      status: validation.success && validation.responseStructureValid !== false
         ? 'passed'
         : 'failed',
       checkedWith: 'core_validation',
       reachable: validation.success || !!validation.statusCode || failureType !== 'network_unreachable',
-      usable: validation.success && validation.responseStructureValid !== false && validation.purposeMatch !== false,
+      usable: validation.success && validation.responseStructureValid !== false,
       statusCode: validation.statusCode ?? null,
       responseStructureValid: validation.responseStructureValid,
       failureType,
@@ -1543,9 +1629,7 @@ ${JSON.stringify(forms, null, 2)}
         ? validation.error || validation.failureReason || 'Submit validation failed'
         : validation.responseStructureValid === false
           ? 'Submit endpoint returned success but response mapping is invalid'
-          : validation.purposeMatch === false
-            ? 'Submit endpoint returned success but response purpose does not match the process'
-            : null,
+          : null,
     };
   }
 
@@ -2158,8 +2242,8 @@ ${JSON.stringify(forms, null, 2)}
         endpoint.responseMapping,
       );
 
-      // 验证接口作用
-      const purposeMatch = this.verifyPurpose(response.data, process.processName);
+      // 不再对业务语义做关键词猜测；这里只保留结构化可达性验证
+      const purposeMatch = response.status >= 200 && response.status < 300;
 
       // 提取 submissionId
       const submissionId = this.extractSubmissionId(response.data);
@@ -2181,7 +2265,7 @@ ${JSON.stringify(forms, null, 2)}
           success: false,
           statusCode: response.status,
           responseStructureValid: false,
-          purposeMatch,
+          purposeMatch: true,
           failureReason: 'param_error',
           error: response.data?.message || 'Parameter validation failed',
         };
@@ -2494,9 +2578,6 @@ ${JSON.stringify(forms, null, 2)}
       return undefined;
     }
 
-    if (/(leave_?type|vacation_?type)/.test(normalized)) return 'annual';
-    if (/expense_?type/.test(normalized)) return 'travel';
-    if (/vehicle_?type/.test(normalized)) return 'visitor';
     if (/(phone|mobile|tel)/.test(normalized)) return '13800138000';
     if (/email/.test(normalized)) return 'test@example.com';
     if (/account/.test(normalized)) return '6222021234567890';
@@ -2504,7 +2585,6 @@ ${JSON.stringify(forms, null, 2)}
     if (/plate/.test(normalized)) return 'TEST123';
     if (/name/.test(normalized)) return 'Test User';
     if (/(reason|purpose|remark|description|content)/.test(normalized)) return 'automation test';
-    if (/type/.test(normalized)) return 'general';
     return undefined;
   }
 
@@ -2592,47 +2672,6 @@ ${JSON.stringify(forms, null, 2)}
     }
 
     return true;
-  }
-
-  /**
-   * 验证接口作用
-   */
-  private verifyPurpose(response: any, processName: string): boolean {
-    const responseText = JSON.stringify(response).toLowerCase();
-
-    // 提取流程名称中的关键词
-    const keywords = this.extractKeywords(processName);
-
-    // 至少匹配一个关键词
-    return keywords.some((kw) => responseText.includes(kw.toLowerCase()));
-  }
-
-  private extractKeywords(processName: string): string[] {
-    // "请假申请" → ["请假", "leave"]
-    const keywordMap: Record<string, string[]> = {
-      '请假': ['请假', 'leave', 'vacation'],
-      '报销': ['报销', 'expense', 'reimbursement'],
-      '采购': ['采购', 'purchase', 'procurement'],
-      '出差': ['出差', 'travel', 'trip'],
-      '用印': ['用印', 'seal', 'stamp'],
-      '会议': ['会议', 'meeting', 'conference'],
-      '加班': ['加班', 'overtime'],
-      '调休': ['调休', 'compensatory'],
-    };
-
-    const keywords: string[] = [];
-    for (const [key, values] of Object.entries(keywordMap)) {
-      if (processName.includes(key)) {
-        keywords.push(...values);
-      }
-    }
-
-    // 如果没有匹配到预定义关键词，使用流程名称本身
-    if (keywords.length === 0) {
-      keywords.push(processName);
-    }
-
-    return keywords;
   }
 
   private extractSubmissionId(response: any): string | undefined {
@@ -3069,6 +3108,7 @@ ${JSON.stringify(forms, null, 2)}
   private async runCompiling(
     bootstrapJob: any,
     processes: BusinessProcess[],
+    validationResults: ProcessValidationResult[],
     finalStatus: 'PUBLISHED' | 'PARTIALLY_PUBLISHED',
     failedProcessCodes: string[],
   ) {
@@ -3081,6 +3121,9 @@ ${JSON.stringify(forms, null, 2)}
 
     const rpaDefinitions = this.getRpaDefinitions(bootstrapJob);
     const rpaDefinitionMap = new Map(rpaDefinitions.map((definition) => [definition.processCode, definition]));
+    const validationByProcessCode = new Map(
+      validationResults.map((result) => [result.processCode, result]),
+    );
     const hasRpaDefinitions = rpaDefinitions.length > 0;
     const hasApiEndpoints = normalizedProcesses.some((process) =>
       process.endpoints.some((endpoint) => endpoint.method.toUpperCase() !== 'RPA'),
@@ -3096,7 +3139,11 @@ ${JSON.stringify(forms, null, 2)}
         ? 'rpa'
         : 'mcp';
     const baseUrl = this.resolveBaseUrl(bootstrapJob);
-    const authConfig = bootstrapJob.authConfig || {};
+    const authConfig = this.inferBootstrapExecutionAuthConfig({
+      bootstrapJob,
+      rpaDefinitions,
+      resolvedBaseUrl: baseUrl,
+    });
     const authType = authConfig.authType || (hasRpaDefinitions ? 'cookie' : 'apikey');
     const oclLevel = this.computeOclLevel(processes);
 
@@ -3316,6 +3363,7 @@ ${JSON.stringify(forms, null, 2)}
       let publishedCount = 0;
 
       for (const proc of normalizedProcesses) {
+        const validation = validationByProcessCode.get(proc.processCode);
         const sourceHash = createHash('sha256')
           .update(JSON.stringify({
             processCode: proc.processCode,
@@ -3374,17 +3422,25 @@ ${JSON.stringify(forms, null, 2)}
           .reduce((acc, p) => {
             if (!acc.find((f: any) => f.key === p.name)) {
               const sourceField = rpaDefinition?.fields?.find((field) => field.key === p.name) as Record<string, any> | undefined;
+              const sourceOptions = this.normalizeTemplateFieldOptions(sourceField?.options);
+              const rawLabel = this.sanitizeStructuredGuideLabel(
+                sourceField?.label || p.description || p.name,
+              );
+              const rawType = String(sourceField?.type || p.type || '').trim()
+                || this.mapFieldType(p.type);
               const presentation = resolveAssistantFieldPresentation({
                 key: p.name,
-                label: p.description || p.name,
-                type: this.mapFieldType(p.type),
+                label: rawLabel,
+                type: rawType,
+                options: sourceOptions,
                 processCode: proc.processCode,
               });
               acc.push({
                 key: p.name,
                 label: presentation.label,
-                type: presentation.type,
-                required: p.required || false,
+                type: String(sourceField?.type || presentation.type || this.mapFieldType(p.type)).trim() || presentation.type,
+                required: sourceField?.required ?? (p.required || false),
+                ...(sourceOptions ? { options: sourceOptions } : {}),
                 ...(sourceField?.description ? { description: sourceField.description } : {}),
                 ...(sourceField?.example ? { example: sourceField.example } : {}),
                 ...(sourceField?.multiple !== undefined ? { multiple: Boolean(sourceField.multiple) } : {}),
@@ -3421,37 +3477,46 @@ ${JSON.stringify(forms, null, 2)}
           })
           : null;
 
+        const runtimeManifest = buildProcessRuntimeManifest({
+          submitPaths: proc.endpoints.some((endpoint) => endpoint.category === 'submit' && endpoint.method.toUpperCase() !== 'RPA')
+            ? [
+                'api',
+                ...(hasDirectLinkSubmit ? ['url'] : []),
+                ...(hasRpaSubmit ? ['vision'] : []),
+              ]
+            : [
+                ...(hasDirectLinkSubmit ? ['url'] : []),
+                ...(hasRpaSubmit ? ['vision'] : []),
+              ],
+          queryStatusPaths: proc.endpoints.some((endpoint) =>
+            ['query', 'status_query'].includes(endpoint.category) && endpoint.method.toUpperCase() !== 'RPA',
+          )
+            ? [
+                'api',
+                ...(hasDirectLinkQuery ? ['url'] : []),
+                ...(hasRpaQuery ? ['vision'] : []),
+              ]
+            : [
+                ...(hasDirectLinkQuery ? ['url'] : []),
+                ...(hasRpaQuery ? ['vision'] : []),
+              ],
+          definition: (rpaDefinition || null) as any,
+          endpoints: proc.endpoints.map((e) => ({
+            path: e.path,
+            method: e.method,
+            category: e.category,
+          })),
+        });
         const templateUiHints = {
-          executionModes: {
-            submit: proc.endpoints.some((endpoint) => endpoint.category === 'submit' && endpoint.method.toUpperCase() !== 'RPA')
-              ? [
-                  'api',
-                  ...(hasDirectLinkSubmit ? ['url'] : []),
-                  ...(hasRpaSubmit ? ['rpa'] : []),
-                ]
-              : [
-                  ...(hasDirectLinkSubmit ? ['url'] : []),
-                  ...(hasRpaSubmit ? ['rpa'] : []),
-                ],
-            queryStatus: proc.endpoints.some((endpoint) =>
-              ['query', 'status_query'].includes(endpoint.category) && endpoint.method.toUpperCase() !== 'RPA',
-            )
-              ? [
-                  'api',
-                  ...(hasDirectLinkQuery ? ['url'] : []),
-                  ...(hasRpaQuery ? ['rpa'] : []),
-                ]
-              : [
-                  ...(hasDirectLinkQuery ? ['url'] : []),
-                  ...(hasRpaQuery ? ['rpa'] : []),
-                ],
-          },
+          runtimeManifest,
+          executionModes: toLegacyExecutionModesFromRuntimeManifest(runtimeManifest),
           rpaDefinition: (rpaDefinition || null) as any,
           endpoints: proc.endpoints.map((e) => ({
             path: e.path,
             method: e.method,
             category: e.category,
           })),
+          validationResult: this.toProcessTemplateValidationResult(validation),
         } as any;
 
         const templatePayload = {
@@ -3537,6 +3602,7 @@ ${JSON.stringify(forms, null, 2)}
         where: { id: bootstrapJob.id },
         data: {
           connectorId: connector.id,
+          authConfig: authConfig as any,
           status: finalStatus,
           currentStage: finalStatus,
           stageStartedAt: new Date(),
@@ -3946,6 +4012,73 @@ ${JSON.stringify(forms, null, 2)}
     };
   }
 
+  private inferBootstrapExecutionAuthConfig(input: {
+    bootstrapJob: any;
+    rpaDefinitions: RpaFlowDefinition[];
+    resolvedBaseUrl: string;
+  }) {
+    const baseAuthConfig = this.asPlainObject(input.bootstrapJob?.authConfig);
+    const directLinkDefinitions = input.rpaDefinitions.filter((definition) => this.isDirectLinkDefinition(definition));
+
+    if (directLinkDefinitions.length === 0) {
+      return baseAuthConfig;
+    }
+
+    const platformConfig = this.asPlainObject(baseAuthConfig.platformConfig);
+    const portalUrl = this.resolveDirectLinkPortalUrl(directLinkDefinitions, platformConfig);
+    const businessBaseUrl = this.resolveDirectLinkBusinessBaseUrl(
+      directLinkDefinitions,
+      platformConfig,
+      input.resolvedBaseUrl,
+    );
+    const targetBaseUrl = this.resolveDirectLinkTargetBaseUrl(
+      directLinkDefinitions,
+      platformConfig,
+      businessBaseUrl,
+    );
+    const portalOrigin = this.tryNormalizeOrigin(portalUrl);
+    const businessOrigin = this.tryNormalizeOrigin(targetBaseUrl || businessBaseUrl);
+    const hasCrossOriginBridge = Boolean(
+      portalOrigin
+      && businessOrigin
+      && portalOrigin !== businessOrigin,
+    );
+
+    const nextPlatformConfig: Record<string, any> = {
+      ...platformConfig,
+      ...(portalUrl && !platformConfig.entryUrl ? { entryUrl: portalUrl } : {}),
+      ...(businessBaseUrl && !platformConfig.businessBaseUrl ? { businessBaseUrl } : {}),
+      ...(targetBaseUrl && !platformConfig.targetBaseUrl ? { targetBaseUrl } : {}),
+    };
+
+    if (hasCrossOriginBridge) {
+      const existingDiscovery = this.asPlainObject(nextPlatformConfig.authDiscovery);
+      nextPlatformConfig.authDiscovery = {
+        ...existingDiscovery,
+        mode: String(existingDiscovery.mode || '').trim() || 'portal_token_bridge',
+        portalUrl: String(existingDiscovery.portalUrl || '').trim() || portalUrl,
+        businessBaseUrl: String(existingDiscovery.businessBaseUrl || '').trim() || businessBaseUrl,
+        targetBaseUrl: String(existingDiscovery.targetBaseUrl || '').trim() || targetBaseUrl || businessBaseUrl,
+        requiresPortalPageInit: existingDiscovery.requiresPortalPageInit !== false,
+        requiresAuthorizationHeader: existingDiscovery.requiresAuthorizationHeader !== false,
+        discoveredBy: String(existingDiscovery.discoveredBy || '').trim() || 'bootstrap_pipeline',
+      };
+    }
+
+    if (!this.hasBackendLoginConfig(baseAuthConfig, nextPlatformConfig)) {
+      const inferredBackendLogin = this.inferSharedOauthBackendLoginConfig(portalUrl || businessBaseUrl);
+      if (inferredBackendLogin) {
+        nextPlatformConfig.oaBackendLogin = inferredBackendLogin;
+      }
+    }
+
+    return {
+      ...baseAuthConfig,
+      ...(baseAuthConfig.authType ? {} : { authType: 'cookie' }),
+      platformConfig: nextPlatformConfig,
+    };
+  }
+
   private hasNetworkRequest(value: unknown) {
     return Boolean(
       value
@@ -4083,6 +4216,32 @@ ${JSON.stringify(forms, null, 2)}
     };
   }
 
+  private toProcessTemplateValidationResult(validation?: ProcessValidationResult) {
+    const metadata = this.toFlowValidationMetadata(validation);
+    const overall = String(metadata.status || 'failed').trim();
+    const status = overall === 'passed'
+      ? 'passed'
+      : overall === 'partial'
+        ? 'blocked'
+        : 'failed';
+
+    return {
+      status,
+      reason: metadata.reason || (status === 'passed'
+        ? '初始化中心已完成流程校验，可用于后续办理。'
+        : '初始化中心校验未通过。'),
+      checkedAt: new Date().toISOString(),
+      checkedMode: 'bootstrap_validation',
+      failureType: metadata.failureType,
+      repairable: metadata.repairable,
+      endpointCheckedCount: metadata.endpointCheckedCount,
+      endpointPassedCount: metadata.endpointPassedCount,
+      endpointFailedCount: metadata.endpointFailedCount,
+      failedEndpoints: metadata.failedEndpoints,
+      error: metadata.error,
+    };
+  }
+
   /**
    * 拆分 authConfig 为公开部分和敏感部分
    */
@@ -4181,6 +4340,51 @@ ${JSON.stringify(forms, null, 2)}
       file: 'file',
     };
     return typeMap[apiType] || 'text';
+  }
+
+  private sanitizeStructuredGuideLabel(value: unknown): string {
+    const raw = String(value || '').trim();
+    if (!raw || !raw.includes('|')) {
+      return raw;
+    }
+
+    const segments = raw
+      .split('|')
+      .map((segment) => segment.trim())
+      .filter(Boolean);
+    if (segments.length <= 1) {
+      return raw;
+    }
+
+    const metadataPattern = /^(?:必填|选填|required|optional|说明|解释|描述|含义|用途|description|desc|示例|样例|例子|参考值|example|sample|可选值|选项|候选值|options?|上传要求|附件要求|upload|可多选|多选|多选框|只能选一个|单选|单份|checkbox|radio|是否必填|required|是否可多选|multiple|是否支持多份|支持多份|允许多份)\b/iu;
+    return segments.slice(1).every((segment) => metadataPattern.test(segment))
+      ? segments[0]
+      : raw;
+  }
+
+  private normalizeTemplateFieldOptions(options: unknown): Array<{ label: string; value: string }> | undefined {
+    if (!Array.isArray(options) || options.length === 0) {
+      return undefined;
+    }
+
+    const normalized = options
+      .map((option) => {
+        if (typeof option === 'string') {
+          const value = option.trim();
+          return value ? { label: value, value } : null;
+        }
+
+        if (!option || typeof option !== 'object' || Array.isArray(option)) {
+          return null;
+        }
+
+        const label = String((option as Record<string, any>).label || (option as Record<string, any>).value || '').trim();
+        const value = String((option as Record<string, any>).value || (option as Record<string, any>).label || '').trim();
+        return label && value ? { label, value } : null;
+      })
+      .filter((option): option is { label: string; value: string } => Boolean(option));
+
+    return normalized.length > 0 ? normalized : undefined;
   }
 
   private normalizeBusinessProcessNames(processes: BusinessProcess[]): BusinessProcess[] {
@@ -4340,6 +4544,195 @@ ${JSON.stringify(forms, null, 2)}
     }
 
     return 'http://localhost';
+  }
+
+  private asPlainObject(value: unknown): Record<string, any> {
+    if (!value || typeof value !== 'object' || Array.isArray(value)) {
+      return {};
+    }
+
+    return { ...(value as Record<string, any>) };
+  }
+
+  private resolveDirectLinkPortalUrl(
+    definitions: RpaFlowDefinition[],
+    platformConfig: Record<string, any>,
+  ) {
+    const candidates = [
+      platformConfig.entryUrl,
+      ...definitions.flatMap((definition) => {
+        const platform = this.asPlainObject(definition.platform);
+        const portalSsoBridge = this.asPlainObject(platform.portalSsoBridge);
+        return [
+          portalSsoBridge.portalUrl,
+          platform.entryUrl,
+        ];
+      }),
+    ];
+
+    return this.pickAbsoluteUrl(candidates);
+  }
+
+  private resolveDirectLinkBusinessBaseUrl(
+    definitions: RpaFlowDefinition[],
+    platformConfig: Record<string, any>,
+    resolvedBaseUrl: string,
+  ) {
+    const platformCandidate = this.pickAbsoluteUrl([
+      platformConfig.businessBaseUrl,
+      platformConfig.targetBaseUrl,
+      platformConfig.targetSystem,
+      platformConfig.jumpUrlTemplate,
+      ...definitions.flatMap((definition) => {
+        const platform = this.asPlainObject(definition.platform);
+        const runtime = this.asPlainObject(definition.runtime);
+        const networkSubmit = this.asPlainObject(runtime.networkSubmit);
+        const networkStatus = this.asPlainObject(runtime.networkStatus);
+        const preflightSteps = Array.isArray(runtime.preflight?.steps)
+          ? runtime.preflight.steps as Array<Record<string, any>>
+          : [];
+
+        return [
+          platform.businessBaseUrl,
+          platform.targetBaseUrl,
+          platform.targetSystem,
+          platform.jumpUrlTemplate,
+          networkSubmit.url,
+          networkStatus.url,
+          ...preflightSteps
+            .filter((step) => String(step?.type || '').trim().toLowerCase() === 'goto')
+            .map((step) => step?.value),
+        ];
+      }),
+      resolvedBaseUrl,
+    ]);
+
+    return this.tryNormalizeOrigin(platformCandidate);
+  }
+
+  private resolveDirectLinkTargetBaseUrl(
+    definitions: RpaFlowDefinition[],
+    platformConfig: Record<string, any>,
+    businessBaseUrl?: string,
+  ) {
+    const candidate = this.pickAbsoluteUrl([
+      platformConfig.targetBaseUrl,
+      platformConfig.businessBaseUrl,
+      platformConfig.targetSystem,
+      ...definitions.flatMap((definition) => {
+        const platform = this.asPlainObject(definition.platform);
+        return [
+          platform.targetBaseUrl,
+          platform.businessBaseUrl,
+          platform.targetSystem,
+          platform.jumpUrlTemplate,
+        ];
+      }),
+      businessBaseUrl,
+    ]);
+
+    return this.tryNormalizeOrigin(candidate);
+  }
+
+  private pickAbsoluteUrl(values: unknown[]) {
+    for (const value of values) {
+      const raw = String(value || '').trim();
+      if (/^https?:\/\//i.test(raw)) {
+        return raw;
+      }
+    }
+
+    return '';
+  }
+
+  private tryNormalizeOrigin(value: unknown) {
+    const raw = String(value || '').trim();
+    if (!raw) {
+      return '';
+    }
+
+    try {
+      return new URL(raw).origin;
+    } catch {
+      return '';
+    }
+  }
+
+  private hasBackendLoginConfig(
+    authConfig: Record<string, any>,
+    platformConfig: Record<string, any>,
+  ) {
+    return [
+      platformConfig.oaBackendLogin,
+      platformConfig.backendLogin,
+      platformConfig.whiteListLogin,
+      platformConfig.whitelistLogin,
+      authConfig.oaBackendLogin,
+      authConfig.backendLogin,
+      authConfig.whiteListLogin,
+      authConfig.whitelistLogin,
+    ].some((value) => value && typeof value === 'object' && !Array.isArray(value));
+  }
+
+  private inferSharedOauthBackendLoginConfig(candidatePortalUrl?: string) {
+    const loginUrl = this.resolveSharedOauthLoginUrl(candidatePortalUrl);
+    if (!loginUrl) {
+      return null;
+    }
+
+    const accountField = String(process.env.AUTH_OAUTH2_ACCOUNT_FIELD || '').trim() || 'username';
+    const cookieOrigin = this.tryNormalizeOrigin(candidatePortalUrl)
+      || this.tryNormalizeOrigin(process.env.AUTH_OAUTH2_BASE_URL)
+      || this.tryNormalizeOrigin(loginUrl);
+
+    return {
+      enabled: true,
+      loginUrl,
+      method: 'GET',
+      requestMode: 'query',
+      clientIdEnv: 'AUTH_OAUTH2_CLIENT_ID',
+      privateKeyEnv: 'AUTH_OAUTH2_PRIVATE_KEY',
+      accountField,
+      cookieOrigin: cookieOrigin || undefined,
+      persistBinding: false,
+      refreshOnExecute: true,
+      discoveredBy: 'bootstrap_pipeline',
+    };
+  }
+
+  private resolveSharedOauthLoginUrl(candidatePortalUrl?: string) {
+    const clientId = String(process.env.AUTH_OAUTH2_CLIENT_ID || '').trim();
+    const privateKey = String(process.env.AUTH_OAUTH2_PRIVATE_KEY || '').trim();
+    if (!clientId || !privateKey) {
+      return '';
+    }
+
+    const explicitLoginUrl = String(process.env.AUTH_OAUTH2_LOGIN_URL || '').trim();
+    if (explicitLoginUrl) {
+      const explicitOrigin = this.tryNormalizeOrigin(explicitLoginUrl);
+      const portalOrigin = this.tryNormalizeOrigin(candidatePortalUrl);
+      if (portalOrigin && explicitOrigin && portalOrigin !== explicitOrigin) {
+        return '';
+      }
+      return explicitLoginUrl;
+    }
+
+    const baseUrl = String(process.env.AUTH_OAUTH2_BASE_URL || '').trim();
+    if (!baseUrl) {
+      return '';
+    }
+
+    const providerOrigin = this.tryNormalizeOrigin(baseUrl);
+    const portalOrigin = this.tryNormalizeOrigin(candidatePortalUrl);
+    if (portalOrigin && providerOrigin && portalOrigin !== providerOrigin) {
+      return '';
+    }
+
+    try {
+      return new URL('/auth2/api/v1/login', baseUrl).toString();
+    } catch {
+      return '';
+    }
   }
 
   /**

@@ -78,7 +78,7 @@ export class CreateBootstrapJobDto {
   @ApiProperty({
     required: false,
     description: '页面流程 JSON，或按“先访问什么、再填写什么、最后点击什么”描述的流程化文字模板',
-    example: '# 全局\n认证入口: https://auth.example.com/\n系统网址: https://oa.example.com/\n\n## 流程: 请假申请\n描述: 教职工请假申请示例\n步骤:\n- 访问 https://auth.example.com/\n- 访问 https://oa.example.com/\n- 访问 https://oa.example.com/workflow/new?templateId=leave_request\n- 填写 请假事由\n- 填写 开始日期\n- 填写 结束日期\n- 点击 保存待发\n- 看到 提交成功 就结束',
+    example: '# 全局\n认证入口: https://auth.example.com/\n系统网址: https://oa.example.com/\n\n## 流程: 流程A\n描述: 通用页面办理流程示例\n步骤:\n- 访问 https://auth.example.com/\n- 访问 https://oa.example.com/\n- 访问 https://oa.example.com/workflow/new?templateId=process_alpha\n- 填写 字段一\n- 填写 字段二\n- 上传 材料一\n- 点击 保存待发\n- 看到 提交成功 就结束',
   })
   @IsOptional()
   @IsString()

@@ -2,7 +2,7 @@ import { AuthorizationResolver } from './authorization-resolver';
 import type {
   ExecuteIntegrationInput,
   ExecutionResult,
-  RouteKind,
+  IntegrationRouteKind,
 } from './types';
 
 export class ExecutionKernel {
@@ -47,8 +47,8 @@ export class ExecutionKernel {
 
   private selectRoute(
     capability: string,
-    routes: Partial<Record<string, RouteKind[]>>,
-  ): RouteKind {
+    routes: Partial<Record<string, IntegrationRouteKind[]>>,
+  ): IntegrationRouteKind {
     const route = routes[capability]?.[0];
     if (!route) {
       throw new Error(`No route configured for capability "${capability}"`);

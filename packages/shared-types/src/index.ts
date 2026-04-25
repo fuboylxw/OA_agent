@@ -574,7 +574,7 @@ export interface DeliveryCapabilitySummary {
     ocrReady?: boolean;
   };
   fallbackOrder?: DeliveryPath[];
-  source?: 'delivery' | 'legacy_ui_hints' | 'inferred';
+  source?: 'delivery' | 'runtime_manifest' | 'legacy_ui_hints' | 'inferred';
 }
 
 export interface RpaFlowDefinition {
@@ -589,6 +589,104 @@ export interface RpaFlowDefinition {
   };
   platform?: RpaPlatformDefinition;
   runtime?: RpaRuntimeDefinition;
+}
+
+export interface ProcessRuntimeEndpointSummary {
+  path: string;
+  method: string;
+  category: string;
+}
+
+export interface ProcessRuntimeManifest {
+  version: 1;
+  capabilities: {
+    submit: DeliveryPath[];
+    queryStatus: DeliveryPath[];
+  };
+  definition?: RpaFlowDefinition;
+  endpoints?: ProcessRuntimeEndpointSummary[];
+}
+
+export interface ProcessRuntimeManifestResolution {
+  manifest: ProcessRuntimeManifest | null;
+  source: 'runtime_manifest' | 'legacy_ui_hints' | 'none';
+}
+
+export function buildProcessRuntimeManifest(input: {
+  submitPaths?: unknown;
+  queryStatusPaths?: unknown;
+  definition?: RpaFlowDefinition | null;
+  endpoints?: unknown;
+}): ProcessRuntimeManifest {
+  const manifest: ProcessRuntimeManifest = {
+    version: 1,
+    capabilities: {
+      submit: normalizeProcessRuntimePaths(input.submitPaths),
+      queryStatus: normalizeProcessRuntimePaths(input.queryStatusPaths),
+    },
+  };
+
+  if (input.definition && isRpaFlowDefinition(input.definition)) {
+    manifest.definition = input.definition;
+  }
+
+  const endpoints = normalizeProcessRuntimeEndpoints(input.endpoints);
+  if (endpoints.length > 0) {
+    manifest.endpoints = endpoints;
+  }
+
+  return manifest;
+}
+
+export function resolveProcessRuntimeManifest(uiHints: unknown): ProcessRuntimeManifestResolution {
+  const normalizedUiHints = asRecord(uiHints);
+  const explicit = normalizeProcessRuntimeManifest(normalizedUiHints.runtimeManifest);
+  if (explicit) {
+    return {
+      manifest: explicit,
+      source: 'runtime_manifest',
+    };
+  }
+
+  const legacy = buildLegacyProcessRuntimeManifest(normalizedUiHints);
+  if (legacy) {
+    return {
+      manifest: legacy,
+      source: 'legacy_ui_hints',
+    };
+  }
+
+  return {
+    manifest: null,
+    source: 'none',
+  };
+}
+
+export function getProcessRuntimeDefinition(uiHints: unknown): RpaFlowDefinition | undefined {
+  return resolveProcessRuntimeManifest(uiHints).manifest?.definition;
+}
+
+export function getProcessRuntimeEndpoints(uiHints: unknown): ProcessRuntimeEndpointSummary[] {
+  return resolveProcessRuntimeManifest(uiHints).manifest?.endpoints || [];
+}
+
+export function getProcessRuntimePaths(
+  uiHints: unknown,
+  action: 'submit' | 'queryStatus',
+): DeliveryPath[] {
+  return resolveProcessRuntimeManifest(uiHints).manifest?.capabilities[action] || [];
+}
+
+export function toLegacyExecutionModesFromRuntimeManifest(
+  manifest: ProcessRuntimeManifest | null | undefined,
+): {
+  submit: string[];
+  queryStatus: string[];
+} {
+  return {
+    submit: toLegacyExecutionModes(manifest?.capabilities.submit),
+    queryStatus: toLegacyExecutionModes(manifest?.capabilities.queryStatus),
+  };
 }
 
 export interface ArtifactReference {
@@ -780,6 +878,130 @@ function safeParseJson(input: string): unknown {
   } catch {
     return null;
   }
+}
+
+function normalizeProcessRuntimeManifest(input: unknown): ProcessRuntimeManifest | null {
+  const raw = asRecord(input);
+  const capabilities = asRecord(raw.capabilities);
+  const definition = parseRpaFlowDefinitions(raw.definition ? [raw.definition] : [])[0];
+  const endpoints = normalizeProcessRuntimeEndpoints(raw.endpoints);
+  const manifest = buildProcessRuntimeManifest({
+    submitPaths: capabilities.submit,
+    queryStatusPaths: capabilities.queryStatus,
+    definition,
+    endpoints,
+  });
+
+  const hasDefinition = Boolean(manifest.definition);
+  const hasEndpoints = Array.isArray(manifest.endpoints) && manifest.endpoints.length > 0;
+  const hasCapabilities = manifest.capabilities.submit.length > 0 || manifest.capabilities.queryStatus.length > 0;
+  if (!hasDefinition && !hasEndpoints && !hasCapabilities) {
+    return null;
+  }
+
+  return manifest;
+}
+
+function buildLegacyProcessRuntimeManifest(uiHints: Record<string, unknown>): ProcessRuntimeManifest | null {
+  const executionModes = asRecord(uiHints.executionModes);
+  const definition = parseRpaFlowDefinitions(uiHints.rpaDefinition ? [uiHints.rpaDefinition] : [])[0];
+  const endpoints = normalizeProcessRuntimeEndpoints(uiHints.endpoints);
+  const manifest = buildProcessRuntimeManifest({
+    submitPaths: normalizeLegacyRuntimePaths(executionModes.submit),
+    queryStatusPaths: normalizeLegacyRuntimePaths(executionModes.queryStatus),
+    definition,
+    endpoints,
+  });
+
+  const hasDefinition = Boolean(manifest.definition);
+  const hasEndpoints = Array.isArray(manifest.endpoints) && manifest.endpoints.length > 0;
+  const hasCapabilities = manifest.capabilities.submit.length > 0 || manifest.capabilities.queryStatus.length > 0;
+  if (!hasDefinition && !hasEndpoints && !hasCapabilities) {
+    return null;
+  }
+
+  return manifest;
+}
+
+function normalizeProcessRuntimePaths(value: unknown): DeliveryPath[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const ordered = new Set<DeliveryPath>();
+  for (const item of value) {
+    if (isDeliveryPath(item)) {
+      ordered.add(item);
+    }
+  }
+
+  return [...ordered];
+}
+
+function normalizeLegacyRuntimePaths(value: unknown): DeliveryPath[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  const ordered = new Set<DeliveryPath>();
+  for (const item of value) {
+    const normalized = String(item || '').trim().toLowerCase();
+    if (normalized === API_DELIVERY_PATH) {
+      ordered.add(API_DELIVERY_PATH);
+    } else if (normalized === URL_DELIVERY_PATH) {
+      ordered.add(URL_DELIVERY_PATH);
+    } else if (normalized === 'rpa' || normalized === VISION_DELIVERY_PATH) {
+      ordered.add(VISION_DELIVERY_PATH);
+    }
+  }
+
+  return [...ordered];
+}
+
+function normalizeProcessRuntimeEndpoints(value: unknown): ProcessRuntimeEndpointSummary[] {
+  if (!Array.isArray(value)) {
+    return [];
+  }
+
+  return value.reduce<ProcessRuntimeEndpointSummary[]>((acc, item) => {
+    const raw = asRecord(item);
+    const path = String(raw.path || '').trim();
+    const method = String(raw.method || '').trim().toUpperCase();
+    const category = String(raw.category || '').trim();
+    if (!path || !method || !category) {
+      return acc;
+    }
+
+    acc.push({ path, method, category });
+    return acc;
+  }, []);
+}
+
+function toLegacyExecutionModes(paths: DeliveryPath[] | undefined): string[] {
+  if (!Array.isArray(paths)) {
+    return [];
+  }
+
+  const ordered = new Set<string>();
+  for (const path of paths) {
+    if (path === API_DELIVERY_PATH) {
+      ordered.add(API_DELIVERY_PATH);
+    } else if (path === URL_DELIVERY_PATH) {
+      ordered.add(URL_DELIVERY_PATH);
+    } else if (path === VISION_DELIVERY_PATH) {
+      ordered.add('rpa');
+    }
+  }
+
+  return [...ordered];
+}
+
+function asRecord(value: unknown): Record<string, unknown> {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return {};
+  }
+
+  return value as Record<string, unknown>;
 }
 
 function isRpaFlowDefinition(value: unknown): value is RpaFlowDefinition {

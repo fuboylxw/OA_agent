@@ -236,4 +236,73 @@ describe('DeliveryCapabilityRouter', () => {
     expect(summary.vision.available).toBe(false);
     expect(router.selectPrimaryPath(summary, 'submit')).toBe('url');
   });
+
+  it('prefers runtimeManifest over legacy executionModes when both exist', () => {
+    const router = new DeliveryCapabilityRouter({} as any);
+    const summary = router.resolveForTemplateRecord({
+      id: 'template-5',
+      tenantId: 'tenant-1',
+      connectorId: 'connector-1',
+      remoteProcessId: 'remote-1',
+      processCode: 'manifest_first_flow',
+      processName: 'Manifest First Flow',
+      processCategory: 'hr',
+      description: null,
+      status: 'published',
+      falLevel: null,
+      version: 1,
+      sourceVersion: '1',
+      sourceHash: null,
+      schema: {},
+      rules: null,
+      permissions: null,
+      uiHints: {
+        runtimeManifest: {
+          version: 1,
+          capabilities: {
+            submit: ['url'],
+            queryStatus: [],
+          },
+          definition: {
+            processCode: 'manifest_first_flow',
+            processName: 'Manifest First Flow',
+            accessMode: 'direct_link',
+            sourceType: 'direct_link',
+            platform: {
+              jumpUrlTemplate: 'https://oa.example.com/workflow/manifest_first_flow',
+            },
+            runtime: {
+              networkSubmit: {
+                url: 'https://oa.example.com/api/workflow/submit',
+              },
+            },
+          },
+        },
+        executionModes: {
+          submit: ['rpa'],
+          queryStatus: ['rpa'],
+        },
+        rpaDefinition: {
+          processCode: 'manifest_first_flow',
+          processName: 'Manifest First Flow',
+          actions: {
+            submit: {
+              steps: [{ type: 'click', selector: '#submit' }],
+            },
+          },
+        },
+      },
+      lastSyncedAt: new Date(),
+      publishedAt: new Date(),
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      supersedesId: null,
+      connector: null,
+    } as any);
+
+    expect(summary.source).toBe('runtime_manifest');
+    expect(summary.url.available).toBe(true);
+    expect(summary.vision.available).toBe(false);
+    expect(router.selectPrimaryPath(summary, 'submit')).toBe('url');
+  });
 });

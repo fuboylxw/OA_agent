@@ -3,22 +3,25 @@
 import { useEffect, useState } from 'react';
 import Link from 'next/link';
 import { apiClient } from '../lib/api-client';
+import { buildChatFlowHref } from '../lib/chat-flow-link';
 
-const CATEGORY_ICONS: Record<string, string> = {
-  '财务': 'fa-money-bill-wave',
-  '人事': 'fa-users',
-  '行政': 'fa-clipboard-list',
-  '采购': 'fa-shopping-cart',
-  '其他': 'fa-folder',
-};
+const CATEGORY_ICONS = [
+  'fa-folder',
+  'fa-diagram-project',
+  'fa-clipboard-list',
+  'fa-layer-group',
+  'fa-briefcase',
+  'fa-file-lines',
+];
 
-const CATEGORY_COLORS: Record<string, string> = {
-  '财务': 'text-blue-600 bg-blue-100',
-  '人事': 'text-green-600 bg-green-100',
-  '行政': 'text-purple-600 bg-purple-100',
-  '采购': 'text-orange-600 bg-orange-100',
-  '其他': 'text-gray-600 bg-gray-100',
-};
+const CATEGORY_COLORS = [
+  'text-blue-600 bg-blue-100',
+  'text-green-600 bg-green-100',
+  'text-purple-600 bg-purple-100',
+  'text-orange-600 bg-orange-100',
+  'text-cyan-600 bg-cyan-100',
+  'text-slate-600 bg-slate-100',
+];
 
 const FAL_COLORS: Record<string, { bg: string; text: string }> = {
   F0: { bg: 'bg-orange-100', text: 'text-orange-600' },
@@ -27,6 +30,23 @@ const FAL_COLORS: Record<string, { bg: string; text: string }> = {
   F3: { bg: 'bg-green-100', text: 'text-green-600' },
   F4: { bg: 'bg-green-100', text: 'text-green-600' },
 };
+
+function hashText(value: string) {
+  let hash = 0;
+  for (const char of value) {
+    hash = ((hash << 5) - hash + char.charCodeAt(0)) | 0;
+  }
+  return Math.abs(hash);
+}
+
+function getCategoryVisual(category: string) {
+  const normalized = String(category || '未分类').trim() || '未分类';
+  const hash = hashText(normalized);
+  return {
+    iconClass: CATEGORY_ICONS[hash % CATEGORY_ICONS.length],
+    colorClass: CATEGORY_COLORS[hash % CATEGORY_COLORS.length],
+  };
+}
 
 export default function ProcessesContent({ initialProcesses }: { initialProcesses: any[] }) {
   const [processes, setProcesses] = useState<any[]>(initialProcesses);
@@ -74,8 +94,7 @@ export default function ProcessesContent({ initialProcesses }: { initialProcesse
       </div>
 
       {Object.entries(grouped).map(([category, items]) => {
-        const iconClass = CATEGORY_ICONS[category] || 'fa-folder';
-        const colorClass = CATEGORY_COLORS[category] || 'text-gray-600 bg-gray-100';
+        const { iconClass, colorClass } = getCategoryVisual(category);
         return (
           <div key={category} className="mb-10">
             <div className="flex items-center gap-3 mb-5">
@@ -104,7 +123,11 @@ export default function ProcessesContent({ initialProcesses }: { initialProcesse
                     <div className="flex items-center justify-between pt-4 border-t border-gray-200">
                       <span className="text-xs text-gray-500">版本 v{process.version || '-'}</span>
                       <a
-                        href={`/chat?flow=${process.processCode}`}
+                        href={buildChatFlowHref({
+                          processCode: process.processCode,
+                          templateId: process.id,
+                          connectorId: process.connector?.id || null,
+                        })}
                         className="text-sm text-blue-600 hover:text-blue-800 font-medium inline-flex items-center gap-1"
                       >
                         发起申请

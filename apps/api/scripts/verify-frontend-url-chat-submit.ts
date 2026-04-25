@@ -198,6 +198,15 @@ async function ensureFrontendSession(context: any, page: any, webBaseUrl: string
   await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => undefined);
   await page.waitForTimeout(2000);
   await maybeAcceptAuthorize(page);
+  if (/\/login(?:[?#]|$)/.test(page.url())) {
+    await page.goto(`${webBaseUrl}/api/v1/auth/oauth2/start?returnTo=${encodeURIComponent(returnTo)}`, {
+      waitUntil: 'domcontentloaded',
+      timeout: 30000,
+    }).catch(() => undefined);
+    await page.waitForLoadState('networkidle', { timeout: 15000 }).catch(() => undefined);
+    await page.waitForTimeout(2000);
+    await maybeAcceptAuthorize(page);
+  }
 
   for (let index = 0; index < 12; index += 1) {
     const currentUrl = page.url();
@@ -208,8 +217,15 @@ async function ensureFrontendSession(context: any, page: any, webBaseUrl: string
   }
 
   const authSession = (await context.cookies()).find((cookie: any) => cookie.name === 'auth_session');
-  if (!authSession) {
-    throw new Error('Frontend auth_session cookie was not established');
+  const sessionToken = await page.evaluate(() => {
+    try {
+      return localStorage.getItem('sessionToken') || '';
+    } catch {
+      return '';
+    }
+  }).catch(() => '');
+  if (!authSession && !sessionToken) {
+    throw new Error(`Frontend session was not established (missing auth_session cookie and sessionToken). Current URL: ${page.url()}`);
   }
 }
 
@@ -342,8 +358,9 @@ async function pollForSubmission(input: {
   processCode: string;
   beforeIds: Set<string>;
   startedAt: number;
+  timeoutMs: number;
 }) {
-  const deadline = Date.now() + 120000;
+  const deadline = Date.now() + Math.max(1000, input.timeoutMs);
   let latestList: any[] = [];
 
   while (Date.now() < deadline) {
@@ -359,7 +376,7 @@ async function pollForSubmission(input: {
     });
 
     if (candidate?.id) {
-      const detailDeadline = Date.now() + 120000;
+      const detailDeadline = Date.now() + Math.max(1000, input.timeoutMs);
       let latestDetail: JsonRecord | null = null;
 
       while (Date.now() < detailDeadline) {
@@ -401,6 +418,122 @@ async function pollForSubmission(input: {
   };
 }
 
+function findLatestAssistantProcessMessage(messages: any[]) {
+  if (!Array.isArray(messages)) {
+    return null;
+  }
+
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const message = messages[index];
+    if (message?.role === 'assistant' && (message?.processCard || String(message?.content || '').trim())) {
+      return message;
+    }
+  }
+
+  return null;
+}
+
+function getExpectedFinalChatPresentation(status: string) {
+  const normalized = String(status || '').trim().toLowerCase();
+  switch (normalized) {
+    case 'draft_saved':
+      return {
+        statusText: '已保存待发',
+        messagePattern: /已保存到\s*OA\s*待发箱|尚未正式送审/u,
+      };
+    case 'submitted':
+      return {
+        statusText: '审批中',
+        messagePattern: /已提交成功|审批中/u,
+      };
+    case 'failed':
+      return {
+        statusText: '处理失败',
+        messagePattern: /处理失败/u,
+      };
+    case 'completed':
+      return {
+        statusText: '已完成',
+        messagePattern: /审批通过|已完成/u,
+      };
+    case 'cancelled':
+      return {
+        statusText: '已取消',
+        messagePattern: /已取消|撤回/u,
+      };
+    case 'rework_required':
+      return {
+        statusText: '驳回待处理',
+        messagePattern: /退回|驳回/u,
+      };
+    default:
+      return null;
+  }
+}
+
+async function waitForChatFinalReflection(input: {
+  page: any;
+  apiBaseUrl: string;
+  sessionToken: string;
+  sessionId: string;
+  expectedStatus: string;
+  timeoutMs: number;
+}) {
+  const expectation = getExpectedFinalChatPresentation(input.expectedStatus);
+  if (!expectation) {
+    return {
+      reflected: false,
+      reason: `unsupported_status:${input.expectedStatus || 'unknown'}`,
+      sessionMessage: null,
+      domAssistantMessage: await latestAssistantBubbleText(input.page),
+      bodyPreview: await readBodyPreview(input.page),
+    };
+  }
+
+  const deadline = Date.now() + Math.max(3000, input.timeoutMs);
+  let latestSessionMessage: any = null;
+  let domAssistantMessage = '';
+  let bodyPreview = '';
+
+  while (Date.now() < deadline) {
+    const sessionResponse = await fetchJson(
+      `${input.apiBaseUrl}/assistant/sessions/${encodeURIComponent(input.sessionId)}/messages`,
+      input.sessionToken,
+    );
+    const sessionData = toPlainObject(sessionResponse.data);
+    latestSessionMessage = findLatestAssistantProcessMessage(Array.isArray(sessionData.messages) ? sessionData.messages : []);
+    domAssistantMessage = await latestAssistantBubbleText(input.page);
+    bodyPreview = await readBodyPreview(input.page);
+
+    const processCard = toPlainObject(latestSessionMessage?.processCard);
+    const sessionStatusText = String(processCard.statusText || '').trim();
+    const sessionProcessStatus = String(processCard.processStatus || latestSessionMessage?.processStatus || '').trim();
+    const normalizedDomMessage = String(domAssistantMessage || '').replace(/\s+/g, ' ').trim();
+
+    const reflected = sessionStatusText === expectation.statusText
+      && sessionProcessStatus === input.expectedStatus
+      && expectation.messagePattern.test(normalizedDomMessage);
+
+    if (reflected) {
+      return {
+        reflected: true,
+        sessionMessage: latestSessionMessage,
+        domAssistantMessage: normalizedDomMessage,
+        bodyPreview,
+      };
+    }
+
+    await input.page.waitForTimeout(1500);
+  }
+
+  return {
+    reflected: false,
+    sessionMessage: latestSessionMessage,
+    domAssistantMessage,
+    bodyPreview,
+  };
+}
+
 function toPlainObject(value: unknown) {
   return value && typeof value === 'object' ? value as Record<string, any> : {};
 }
@@ -414,12 +547,21 @@ async function main() {
   const apiBaseUrl = `${webBaseUrl}/api/v1`;
   const processCode = String(getArg('--process-code', process.env.E2E_PROCESS_CODE || '') || '').trim();
   const processName = String(getArg('--process-name', process.env.E2E_PROCESS_NAME || '') || '').trim();
+  const templateId = String(getArg('--template-id', process.env.E2E_TEMPLATE_ID || '') || '').trim();
+  const connectorId = String(getArg('--connector-id', process.env.E2E_CONNECTOR_ID || '') || '').trim();
   const detailPrompt = String(getArg('--detail-prompt', process.env.E2E_DETAIL_PROMPT || '') || '').trim();
   const uploadFileArg = String(getArg('--upload-file', process.env.E2E_UPLOAD_FILE || '') || '').trim();
   const uploadFieldLabel = String(getArg('--upload-field-label', process.env.E2E_UPLOAD_FIELD_LABEL || '') || '').trim();
   const uploadFile = uploadFileArg
     ? path.resolve(process.cwd(), uploadFileArg)
     : '';
+  const submissionTimeoutMs = Math.max(
+    1000,
+    parseInt(
+      String(getArg('--submission-timeout-ms', process.env.E2E_SUBMISSION_TIMEOUT_MS || '300000') || '300000'),
+      10,
+    ) || 300000,
+  );
   if (!processCode) {
     throw new Error('Missing --process-code');
   }
@@ -446,9 +588,12 @@ async function main() {
     apiBaseUrl,
     processCode,
     processName,
+    templateId: templateId || null,
+    connectorId: connectorId || null,
     detailPrompt,
     uploadFile: uploadFile || null,
     uploadFieldLabel: uploadFieldLabel || null,
+    submissionTimeoutMs,
     steps: {},
     assertions: {},
     success: false,
@@ -490,11 +635,17 @@ async function main() {
       { timeout: 90000 },
     );
 
-    const processLink = page.locator(`a[href="/chat?flow=${processCode}"]`).first();
+    const chatQuery = new URLSearchParams({
+      flow: processCode,
+      ...(templateId ? { templateId } : {}),
+      ...(connectorId ? { connectorId } : {}),
+    });
+    const chatHref = `/chat?${chatQuery.toString()}`;
+    const processLink = page.locator(`a[href="${chatHref}"]`).first();
     if (await processLink.count()) {
       await processLink.click();
     } else {
-      await page.goto(`${webBaseUrl}/chat?flow=${encodeURIComponent(processCode)}`, {
+      await page.goto(`${webBaseUrl}${chatHref}`, {
         waitUntil: 'domcontentloaded',
         timeout: 30000,
       });
@@ -557,17 +708,37 @@ async function main() {
       processCode,
       beforeIds,
       startedAt,
+      timeoutMs: submissionTimeoutMs,
     });
 
     const submissionDetail = toPlainObject(submissionResult.detail);
     const submitResult = toPlainObject(submissionDetail.submitResult);
     const submitMetadata = toPlainObject(submitResult.metadata);
     const submitRequest = toPlainObject(submitMetadata.request);
+    const sessionId = String(
+      bootstrapData?.sessionId
+      || detailTurn.data?.sessionId
+      || confirmTurn.data?.sessionId
+      || '',
+    ).trim();
 
     report.steps.submission = {
       listCount: Array.isArray(submissionResult.list) ? submissionResult.list.length : 0,
       detail: submissionDetail,
     };
+
+    const finalChatReflection = sessionId
+      ? await waitForChatFinalReflection({
+          page,
+          apiBaseUrl,
+          sessionToken,
+          sessionId,
+          expectedStatus: String(submissionDetail.status || ''),
+          timeoutMs: Math.min(Math.max(15000, Math.floor(submissionTimeoutMs / 6)), 60000),
+        })
+      : null;
+
+    report.steps.finalChatReflection = finalChatReflection;
 
     report.assertions = {
       processesPageContainsProcess: processesBody.includes(processName) && processesBody.includes(processCode),
@@ -575,6 +746,7 @@ async function main() {
       uploadCompleted: uploadFile ? Boolean(report.steps.upload) : true,
       detailTurnReadyForConfirmation: Boolean(detailTurn.data?.processCard) && Array.isArray(detailTurn.data?.actionButtons),
       confirmTurnAccepted: confirmTurn.status >= 200 && confirmTurn.status < 300,
+      confirmTurnShowsAcceptedState: /受理|提交/.test(String(report.steps.confirmTurn?.domAssistantMessage || '')),
       submissionCreated: Boolean(submissionDetail.id),
       submissionFinished: Boolean(submissionDetail.submitResult),
       deliveryPathIsUrl: submitMetadata.deliveryPath === 'url',
@@ -582,6 +754,8 @@ async function main() {
       requestContainsUrlMode: submitMetadata.mode === 'url-network',
       confirmTurnReflectsDraftSaved: confirmTurn.data?.processStatus === 'draft_saved'
         && confirmTurn.data?.processCard?.statusText === '已保存待发',
+      chatPollReflectsFinalStatus: Boolean(finalChatReflection?.reflected),
+      finalStatusIsDraftSaved: submissionDetail.status === 'draft_saved',
       finalStatus: submissionDetail.status || null,
     };
 
@@ -591,12 +765,14 @@ async function main() {
       && report.assertions.uploadCompleted
       && report.assertions.detailTurnReadyForConfirmation
       && report.assertions.confirmTurnAccepted
+      && report.assertions.confirmTurnShowsAcceptedState
       && report.assertions.submissionCreated
       && report.assertions.submissionFinished
       && report.assertions.deliveryPathIsUrl
       && report.assertions.requestTargetsSaveDraft
       && report.assertions.requestContainsUrlMode
-      && report.assertions.confirmTurnReflectsDraftSaved,
+      && report.assertions.chatPollReflectsFinalStatus
+      && report.assertions.finalStatusIsDraftSaved,
     );
   } catch (error: any) {
     report.error = {

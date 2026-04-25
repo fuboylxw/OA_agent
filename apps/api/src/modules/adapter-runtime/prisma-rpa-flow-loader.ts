@@ -1,12 +1,17 @@
 import { PrismaService } from '../common/prisma.service';
-import { parseRpaFlowDefinitions, type RpaFlowDefinition } from '@uniflow/shared-types';
+import {
+  getProcessRuntimePaths,
+  resolveProcessRuntimeManifest,
+  type DeliveryPath,
+  type RpaFlowDefinition,
+} from '@uniflow/shared-types';
 
 export interface LoadedRpaFlow {
   processCode: string;
   processName: string;
   executionModes: {
-    submit: string[];
-    queryStatus: string[];
+    submit: DeliveryPath[];
+    queryStatus: DeliveryPath[];
   };
   rpaDefinition: RpaFlowDefinition;
 }
@@ -32,20 +37,17 @@ export class PrismaRpaFlowLoader {
 
     for (const template of templates) {
       const uiHints = (template.uiHints as Record<string, any> | null) || {};
-      const parsed = parseRpaFlowDefinitions(uiHints.rpaDefinition ? [uiHints.rpaDefinition] : []);
-      const definition = parsed[0];
+      const definition = resolveProcessRuntimeManifest(uiHints).manifest?.definition;
       if (!definition) {
         continue;
       }
-
-      const executionModes = uiHints.executionModes as Record<string, any> | undefined;
 
       flows.push({
         processCode: template.processCode,
         processName: template.processName,
         executionModes: {
-          submit: normalizeModes(executionModes?.submit),
-          queryStatus: normalizeModes(executionModes?.queryStatus),
+          submit: getProcessRuntimePaths(uiHints, 'submit'),
+          queryStatus: getProcessRuntimePaths(uiHints, 'queryStatus'),
         },
         rpaDefinition: definition,
       });
@@ -53,14 +55,4 @@ export class PrismaRpaFlowLoader {
 
     return flows;
   }
-}
-
-function normalizeModes(value: unknown): string[] {
-  if (!Array.isArray(value)) {
-    return [];
-  }
-
-  return value
-    .filter((item): item is string => typeof item === 'string')
-    .map((item) => item.toLowerCase());
 }

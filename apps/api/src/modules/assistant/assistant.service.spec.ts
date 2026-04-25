@@ -85,6 +85,7 @@ describe('AssistantService', () => {
     processLibraryService = {
       list: jest.fn(),
       getByCode: jest.fn(),
+      getById: jest.fn(),
     };
     submissionService = {
       submit: jest.fn(),
@@ -189,6 +190,66 @@ describe('AssistantService', () => {
     expect(resolution.connectorName).toBe('网信处');
     expect(resolution.needsConnectorSelection).toBe(false);
     expect(resolution.needsFlowClarification).toBe(false);
+    expect(connectorRouter.route).not.toHaveBeenCalled();
+  });
+
+  it('prefers the explicitly requested template when duplicate process codes exist across connectors', async () => {
+    processLibraryService.list.mockResolvedValue([
+      {
+        id: 'template-old',
+        processCode: 'flow_dup',
+        processName: '请假申请',
+        processCategory: '人事',
+        connector: {
+          id: 'connector-old',
+          name: '旧OA',
+          oaType: 'form-page',
+          oclLevel: 'OCL0',
+        },
+      },
+      {
+        id: 'template-new',
+        processCode: 'flow_dup',
+        processName: '请假申请',
+        processCategory: 'direct_link',
+        connector: {
+          id: 'connector-new',
+          name: '新OA',
+          oaType: 'form-page',
+          oclLevel: 'OCL0',
+        },
+      },
+    ]);
+
+    const resolution = await (service as any).resolveSubmissionTarget(
+      {
+        tenantId: 'tenant-1',
+        userId: 'user-1',
+        message: '我要办理请假申请',
+      },
+      {
+        id: 'session-1',
+        metadata: {
+          requestedTemplateId: 'template-new',
+          routedConnectorId: 'connector-new',
+        },
+      },
+      {
+        intent: ChatIntent.CREATE_SUBMISSION,
+        extractedEntities: {},
+      },
+    );
+
+    expect(resolution.matchedFlow).toEqual({
+      processCode: 'flow_dup',
+      processName: '请假申请',
+      confidence: 1,
+    });
+    expect(resolution.connectorId).toBe('connector-new');
+    expect(resolution.connectorName).toBe('新OA');
+    expect(resolution.flows).toHaveLength(1);
+    expect(resolution.flows[0].id).toBe('template-new');
+    expect(flowAgent.matchFlow).not.toHaveBeenCalled();
     expect(connectorRouter.route).not.toHaveBeenCalled();
   });
 
@@ -311,7 +372,7 @@ describe('AssistantService', () => {
 
     expect(response.needsInput).toBe(true);
     expect(response.processStatus).toBe(ChatProcessStatus.PARAMETER_COLLECTION);
-    expect(response.message).toContain('正在为您填写“请假申请”');
+    expect(response.message).toContain('还差 2 项信息');
     expect(response.message).not.toContain('请问您想办理哪个流程');
     expect(response.message).not.toContain('请选择要使用的系统');
     expect(response.missingFields).toEqual([
@@ -325,6 +386,81 @@ describe('AssistantService', () => {
       '我要请假，明天开始，请假三天，事假，去北京出差，联系电话13800138000',
       {},
     );
+  });
+
+  it('asks the user to choose when multiple similar flows exist instead of guessing one', async () => {
+    processLibraryService.list.mockResolvedValue([
+      {
+        id: 'flow-staff-leave',
+        processCode: 'staff_leave_request',
+        processName: '网信处科员请假',
+        processCategory: '人事',
+        connector: {
+          id: 'connector-leave',
+          name: '网信处',
+          oaType: 'hybrid',
+          oclLevel: 'OCL2',
+        },
+      },
+      {
+        id: 'flow-director-leave',
+        processCode: 'director_leave_request',
+        processName: '网信处处长请假',
+        processCategory: '人事',
+        connector: {
+          id: 'connector-leave',
+          name: '网信处',
+          oaType: 'hybrid',
+          oclLevel: 'OCL2',
+        },
+      },
+    ]);
+    flowAgent.matchFlow.mockResolvedValue({
+      matchedFlow: undefined,
+      candidateFlows: [
+        { processCode: 'staff_leave_request', processName: '网信处科员请假' },
+        { processCode: 'director_leave_request', processName: '网信处处长请假' },
+      ],
+      needsClarification: true,
+      clarificationQuestion: '您是要办理“网信处科员请假”还是“网信处处长请假”？',
+    });
+
+    const session = {
+      id: 'session-ambiguity-1',
+      metadata: {},
+    };
+
+    const response = await (service as any).handleCreateSubmission(
+      {
+        tenantId: 'tenant-1',
+        userId: 'user-1',
+        message: '我要请假',
+      },
+      session,
+      {
+        intent: ChatIntent.CREATE_SUBMISSION,
+        extractedEntities: {},
+      },
+      sharedContext,
+      'trace-1',
+    );
+
+    expect(response.needsInput).toBe(true);
+    expect(response.message).toContain('网信处科员请假');
+    expect(response.message).toContain('网信处处长请假');
+    expect(prisma.chatSession.update).toHaveBeenCalledWith({
+      where: { id: 'session-ambiguity-1' },
+      data: {
+        metadata: expect.objectContaining({
+          pendingFlowSelection: true,
+          flowCandidates: [
+            { processCode: 'staff_leave_request', processName: '网信处科员请假' },
+            { processCode: 'director_leave_request', processName: '网信处处长请假' },
+          ],
+        }),
+      },
+    });
+    expect(permissionService.check).not.toHaveBeenCalled();
   });
 
   it('continues the original request after the user selects a connector from a pending connector prompt', async () => {
@@ -391,6 +527,91 @@ describe('AssistantService', () => {
       sharedContext,
       'trace-1',
     );
+  });
+
+  it('resolves natural-language connector selection through llm understanding', async () => {
+    const continuation = {
+      sessionId: 'session-1',
+      message: '继续办理',
+      needsInput: true,
+    };
+    jest.spyOn(service as any, 'handleCreateSubmission').mockResolvedValue(continuation);
+    jest.spyOn(service as any, 'resolvePendingSelectionWithLlm').mockResolvedValue({
+      action: 'select',
+      candidateId: 'connector-b',
+    });
+
+    const session = {
+      id: 'session-1',
+      metadata: {
+        pendingConnectorSelection: true,
+        connectorCandidates: [
+          { id: 'connector-a', name: '统一门户' },
+          { id: 'connector-b', name: '网信处' },
+        ],
+        pendingConnectorSelectionContext: {
+          originalMessage: '我要请假，明天开始，请假三天',
+          processCode: 'leave_request',
+          processName: '请假申请',
+        },
+      },
+    };
+
+    const response = await (service as any).tryHandlePendingConnectorSelection(
+      {
+        tenantId: 'tenant-1',
+        userId: 'user-1',
+        message: '网信处那个',
+      },
+      session,
+      sharedContext,
+      'trace-1',
+    );
+
+    expect(response).toBe(continuation);
+    expect(prisma.chatSession.update).toHaveBeenCalledWith({
+      where: { id: 'session-1' },
+      data: {
+        metadata: {
+          routedConnectorId: 'connector-b',
+          routedConnectorName: '网信处',
+        },
+      },
+    });
+  });
+
+  it('treats natural-language cancel as pending connector abort through llm understanding', async () => {
+    jest.spyOn(service as any, 'resolvePendingSelectionWithLlm').mockResolvedValue({
+      action: 'cancel',
+    });
+
+    const session = {
+      id: 'session-cancel-1',
+      metadata: {
+        pendingConnectorSelection: true,
+        connectorCandidates: [
+          { id: 'connector-a', name: '统一门户' },
+          { id: 'connector-b', name: '网信处' },
+        ],
+      },
+    };
+
+    const response = await (service as any).tryHandlePendingConnectorSelection(
+      {
+        tenantId: 'tenant-1',
+        userId: 'user-1',
+        message: '算了，不选了',
+      },
+      session,
+      sharedContext,
+      'trace-1',
+    );
+
+    expect(response).toEqual({
+      sessionId: 'session-cancel-1',
+      message: '已取消本次系统选择。如需继续办理，请重新告诉我您要办什么。',
+      needsInput: false,
+    });
   });
 
   it('auto-binds a general uploaded attachment to the required attachment field during parameter collection', async () => {
@@ -519,6 +740,147 @@ describe('AssistantService', () => {
       }),
     }));
     expect(response.processStatus).toBe(ChatProcessStatus.PARAMETER_COLLECTION);
+  });
+
+  it('binds attachments when the user message explicitly points to one missing file field', async () => {
+    const session = {
+      id: 'session-attachment-2',
+      userId: 'user-1',
+      metadata: {
+        currentProcessCode: 'reimburse_submit',
+        currentProcessName: '报销申请',
+        currentConnectorId: 'connector-reimburse',
+        processStatus: ChatProcessStatus.PARAMETER_COLLECTION,
+        currentFormData: {},
+        missingFields: [
+          {
+            key: 'field_project',
+            label: '立项材料',
+            type: 'file',
+            question: '请上传立项材料。',
+          },
+          {
+            key: 'field_invoice',
+            label: '发票附件',
+            type: 'file',
+            question: '请上传发票附件。',
+          },
+        ],
+      },
+    };
+
+    const normalizedAttachment = {
+      attachmentId: 'attachment-2',
+      fileId: 'file-2',
+      fileName: '差旅发票.pdf',
+      fileSize: 2048,
+      mimeType: 'application/pdf',
+      bindScope: 'general' as const,
+      fieldKey: null,
+    };
+
+    jest.spyOn(service as any, 'getOrCreateSession').mockResolvedValue(session);
+    jest.spyOn(service as any, 'loadSharedContext').mockResolvedValue(sharedContext);
+    jest.spyOn(service as any, 'tryHandlePendingActionSelection').mockResolvedValue(null);
+    jest.spyOn(service as any, 'tryHandlePendingConnectorSelection').mockResolvedValue(null);
+    jest.spyOn(service as any, 'tryHandlePendingActionExecution').mockResolvedValue(null);
+    jest.spyOn(service as any, 'enrichChatResponse').mockImplementation(async (response: any) => response);
+    jest.spyOn(service as any, 'saveAssistantMessage').mockResolvedValue(undefined);
+    intentAgent.detectIntent.mockResolvedValue({
+      intent: ChatIntent.SERVICE_REQUEST,
+      confidence: 0.2,
+      extractedEntities: {},
+    });
+
+    attachmentService.normalizeAttachmentRefs.mockResolvedValue([normalizedAttachment]);
+    prisma.chatMessage = {
+      create: jest.fn().mockResolvedValue(undefined),
+    };
+    prisma.processTemplate.findFirst.mockResolvedValue({
+      id: 'template-reimburse-1',
+      tenantId: 'tenant-1',
+      processCode: 'reimburse_submit',
+      processName: '报销申请',
+      status: 'published',
+      version: 1,
+      schema: {
+        fields: [
+          {
+            key: 'field_project',
+            label: '立项材料',
+            type: 'file',
+            required: true,
+            description: '上传立项申请书扫描件',
+            example: '立项申请书.pdf',
+          },
+          {
+            key: 'field_invoice',
+            label: '发票附件',
+            type: 'file',
+            required: true,
+            description: '上传报销发票扫描件',
+            example: '发票.pdf',
+          },
+        ],
+      },
+      connector: {
+        id: 'connector-reimburse',
+        name: 'OA系统',
+        authConfig: {},
+      },
+    });
+    formAgent.extractFields.mockResolvedValue({
+      extractedFields: {},
+      fieldOrigins: {},
+      missingFields: [
+        {
+          key: 'field_project',
+          label: '立项材料',
+          question: '请上传立项材料。',
+          type: 'file',
+        },
+      ],
+      isComplete: false,
+    });
+
+    await service.chat({
+      tenantId: 'tenant-1',
+      userId: 'user-1',
+      sessionId: 'session-attachment-2',
+      message: '我已上传发票附件',
+      attachments: [normalizedAttachment],
+    });
+
+    expect(formAgent.extractFields).toHaveBeenCalledWith(
+      'reimburse_submit',
+      expect.any(Object),
+      '我已上传发票附件',
+      expect.objectContaining({
+        field_invoice: [
+          expect.objectContaining({
+            fileId: 'file-2',
+            fileName: '差旅发票.pdf',
+            fieldKey: 'field_invoice',
+          }),
+        ],
+      }),
+    );
+    expect(prisma.chatSession.update).toHaveBeenCalledWith(expect.objectContaining({
+      where: { id: 'session-attachment-2' },
+      data: expect.objectContaining({
+        metadata: expect.objectContaining({
+          currentFormData: expect.objectContaining({
+            field_invoice: [
+              expect.objectContaining({
+                fileId: 'file-2',
+                fileName: '差旅发票.pdf',
+                fieldKey: 'field_invoice',
+              }),
+            ],
+          }),
+        }),
+      }),
+    }));
   });
 
   it('treats conflicting user input during parameter collection as direct field modification before continuing to ask missing fields', async () => {
@@ -898,5 +1260,98 @@ describe('AssistantService', () => {
         initialSubmitStatus: 'pending',
       }),
     }));
+  });
+
+  it('refreshes the latest tracked process message content when polling reaches a newer terminal status', () => {
+    const decorated = (service as any).decorateMessagesForSession(
+      {
+        id: 'session-1',
+        metadata: {
+          currentProcessCode: 'flow_url_1',
+          processId: 'process-1',
+          processStatus: ChatProcessStatus.DRAFT_SAVED,
+        },
+      },
+      [
+        {
+          id: 'assistant-1',
+          role: 'assistant',
+          content: '申请已受理，正在通过URL通道提交。',
+          createdAt: '2026-04-24T10:35:14.000Z',
+          metadata: {
+            processCard: {
+              processInstanceId: 'process-1',
+              processCode: 'flow_url_1',
+              processName: '科员请假申请',
+              processStatus: ChatProcessStatus.EXECUTING,
+              statusText: '提交执行中',
+              stage: 'executing',
+            },
+          },
+        },
+      ],
+      {
+        hasActiveProcess: false,
+        processInstanceId: 'process-1',
+        processCode: 'flow_url_1',
+        processName: '科员请假申请',
+        processStatus: ChatProcessStatus.DRAFT_SAVED,
+        stage: 'draft',
+        isTerminal: true,
+        activeProcessCard: {
+          processInstanceId: 'process-1',
+          processCode: 'flow_url_1',
+          processName: '科员请假申请',
+          processStatus: ChatProcessStatus.DRAFT_SAVED,
+          stage: 'draft',
+          actionState: 'readonly',
+          canContinue: false,
+          statusText: '已保存待发',
+          fields: [],
+          submissionId: 'submission-1',
+          oaSubmissionId: 'oa-1',
+          updatedAt: '2026-04-24T10:36:39.000Z',
+        },
+      },
+    );
+
+    expect(decorated).toEqual([
+      expect.objectContaining({
+        content: '科员请假申请已保存到 OA 待发箱，尚未正式送审。\n申请编号：oa-1',
+        processStatus: ChatProcessStatus.DRAFT_SAVED,
+        processCard: expect.objectContaining({
+          processStatus: ChatProcessStatus.DRAFT_SAVED,
+          statusText: '已保存待发',
+          stage: 'draft',
+          oaSubmissionId: 'oa-1',
+        }),
+      }),
+    ]);
+  });
+
+  it('does not use regex fallback for natural-language confirmation intent when llm is unavailable', async () => {
+    const originalFactory = jest.requireActual('@uniflow/agent-kernel').LLMClientFactory;
+    const createFromEnvSpy = jest.spyOn(originalFactory, 'createFromEnv').mockReturnValue({
+      chat: jest.fn().mockRejectedValue(new Error('llm unavailable')),
+    } as any);
+
+    const result = await (service as any).detectConfirmIntent(
+      '好的，提交吧',
+      {
+        processCode: 'leave_request',
+        parameters: {
+          reason: '出差',
+        },
+      },
+    );
+
+    expect(result).toEqual({ action: 'unknown' });
+    createFromEnvSpy.mockRestore();
+  });
+
+  it('treats only action-token cancel as pending-selection abort', () => {
+    expect((service as any).isAbortPendingSelectionMessage('__ACTION_CANCEL__')).toBe(true);
+    expect((service as any).isAbortPendingSelectionMessage('__ACTION_CONFIRM__')).toBe(false);
+    expect((service as any).isAbortPendingSelectionMessage('__ACTION_CANCEL_EXTRA__')).toBe(false);
   });
 });

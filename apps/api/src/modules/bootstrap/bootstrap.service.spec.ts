@@ -5,6 +5,7 @@ import { PrismaService } from '../common/prisma.service';
 import { BootstrapService } from './bootstrap.service';
 import { TextGuideLlmParserService } from './text-guide-llm-parser.service';
 import { WorkerAvailabilityService } from './worker-availability.service';
+import { buildPageAutomationFlowBundle } from '../process-library/process-library-authoring.util';
 
 jest.mock('axios');
 
@@ -408,7 +409,7 @@ describe('BootstrapService', () => {
       expect(mockQueue.add).not.toHaveBeenCalled();
     });
 
-    it('accepts text-guide access and converts the description into a generated page flow', async () => {
+    it('accepts structured text-guide templates and converts them into generated page flows', async () => {
       const mockJob = {
         id: 'guide-job-id',
         tenantId: 'default-tenant',
@@ -428,12 +429,19 @@ describe('BootstrapService', () => {
         oaUrl: 'https://portal.example.com',
         identityScope: 'student',
         rpaFlowContent: [
-          '先点击 新建申请',
-          '输入 开始日期 为 2026-03-20',
-          '输入 结束日期 为 2026-03-21',
-          '输入 请假原因 为 家中有事',
-          '点击 提交',
-          '看到 提交成功 就结束',
+          '流程: 请假申请',
+          '流程编码: leave_request',
+          '用户办理时需要补充的信息:',
+          '- 开始日期 | 示例: 2026-03-20',
+          '- 结束日期 | 示例: 2026-03-21',
+          '- 请假原因 | 示例: 家中有事',
+          '办理步骤:',
+          '- 点击 新建申请',
+          '- 输入 开始日期',
+          '- 输入 结束日期',
+          '- 输入 请假原因',
+          '- 点击 提交',
+          '- 看到 提交成功 就结束',
         ].join('\n'),
         platformConfig: {
           entryUrl: 'https://portal.example.com/leave',
@@ -447,7 +455,7 @@ describe('BootstrapService', () => {
           metadata: expect.objectContaining({
             accessMode: 'text_guide',
             sourceType: 'text_guide',
-            guideText: expect.stringContaining('先点击 新建申请'),
+            guideText: expect.stringContaining('流程: 请假申请'),
           }),
         }),
       }));
@@ -458,11 +466,12 @@ describe('BootstrapService', () => {
       const generatedFlow = JSON.parse(createdSource.data.sourceContent);
 
       expect(generatedFlow.flows[0]).toMatchObject({
+        processCode: 'leave_request',
+        processName: '请假申请',
         runtime: expect.objectContaining({
           executorMode: 'browser',
         }),
       });
-      expect(generatedFlow.flows[0].processCode).toMatch(/^flow_[a-f0-9]{8}$/);
       expect(generatedFlow.flows[0].actions.submit.steps).toEqual(
         expect.arrayContaining([
           expect.objectContaining({ type: 'goto', value: 'https://portal.example.com/leave' }),
@@ -476,7 +485,7 @@ describe('BootstrapService', () => {
       });
     });
 
-    it('prefers llm parsing for text-guide content when the model returns a structured document', async () => {
+    it('falls back to llm parsing for free-form text-guide content when deterministic parsing cannot understand it', async () => {
       const mockJob = {
         id: 'guide-job-llm-id',
         tenantId: 'default-tenant',
@@ -562,14 +571,31 @@ describe('BootstrapService', () => {
       );
     });
 
-    it('falls back to rule parsing when llm parsing fails', async () => {
+    it('uses deterministic structured-template parsing first and keeps llm as fallback only', async () => {
       const mockJob = {
         id: 'guide-job-fallback-id',
         tenantId: 'default-tenant',
         status: 'CREATED',
       };
 
-      mockTextGuideLlmParserService.parse.mockRejectedValue(new Error('llm unavailable'));
+      mockTextGuideLlmParserService.parse.mockResolvedValue({
+        platformConfig: {
+          entryUrl: 'https://wrong.example.com/should-not-win',
+        },
+        sharedSteps: [
+          '点击 错误入口',
+        ],
+        flows: [
+          {
+            processName: 'Wrong Flow',
+            processCode: 'wrong_flow',
+            fields: [],
+            steps: [
+              '点击 错误步骤',
+            ],
+          },
+        ],
+      });
 
       jest.spyOn(prisma.bootstrapJob, 'create').mockResolvedValue(mockJob as any);
       jest.spyOn(prisma.bootstrapJob, 'findUnique').mockResolvedValue({
@@ -584,6 +610,9 @@ describe('BootstrapService', () => {
         oaUrl: 'https://portal.example.com',
         identityScope: 'both',
         rpaFlowContent: [
+          '流程: Fallback Flow',
+          '流程编码: fallback_flow',
+          '办理步骤:',
           '\u70b9\u51fb \u65b0\u5efa\u7533\u8bf7',
           '\u8f93\u5165 \u539f\u56e0 \u4e3a \u5bb6\u4e2d\u6709\u4e8b',
           '\u70b9\u51fb \u63d0\u4ea4',
@@ -596,7 +625,7 @@ describe('BootstrapService', () => {
       )?.[0];
       const generatedFlow = JSON.parse(createdSource.data.sourceContent);
 
-      expect(mockTextGuideLlmParserService.parse).toHaveBeenCalled();
+      expect(mockTextGuideLlmParserService.parse).not.toHaveBeenCalled();
       expect(generatedFlow.flows[0]).toMatchObject({
         processCode: 'fallback_flow',
         processName: 'Fallback Flow',
@@ -605,6 +634,27 @@ describe('BootstrapService', () => {
         type: 'text',
         value: '\u63d0\u4ea4\u6210\u529f',
       });
+    });
+
+    it('rejects free-form text-guide input when llm parsing fails instead of rule-guessing', async () => {
+      mockTextGuideLlmParserService.parse.mockRejectedValue(new Error('llm unavailable'));
+
+      await expect(service.createJob({
+        tenantId: 'default-tenant',
+        accessMode: 'text_guide',
+        name: 'Fallback Flow',
+        oaUrl: 'https://portal.example.com',
+        identityScope: 'both',
+        rpaFlowContent: [
+          '\u70b9\u51fb \u65b0\u5efa\u7533\u8bf7',
+          '\u8f93\u5165 \u539f\u56e0 \u4e3a \u5bb6\u4e2d\u6709\u4e8b',
+          '\u70b9\u51fb \u63d0\u4ea4',
+          '\u770b\u5230 \u63d0\u4ea4\u6210\u529f \u5c31\u7ed3\u675f',
+        ].join('\n'),
+      })).rejects.toThrow('页面流程内容无效，无法识别可执行步骤');
+
+      expect(prisma.bootstrapJob.create).not.toHaveBeenCalled();
+      expect(mockQueue.add).not.toHaveBeenCalled();
     });
 
     it('accepts a multi-flow text-guide document and generates multiple flows with shared steps', async () => {
@@ -838,6 +888,275 @@ describe('BootstrapService', () => {
       expect(generatedFlow.flows[0].actions).toBeUndefined();
     });
 
+    it('preserves implicit field semantics when llm parsing returns fields without explicit type', async () => {
+      const mockJob = {
+        id: 'llm-implicit-field-types-job-id',
+        tenantId: 'default-tenant',
+        status: 'CREATED',
+      };
+
+      mockTextGuideLlmParserService.parse.mockResolvedValue({
+        platformConfig: {
+          entryUrl: 'https://portal.example.com/workbench',
+          executorMode: 'browser',
+        },
+        sharedSteps: [],
+        flows: [
+          {
+            processName: '请假申请',
+            processCode: 'leave_request',
+            fields: [
+              {
+                label: '开始日期',
+                required: true,
+                description: '请填写请假开始日期',
+                example: '2026-04-20',
+              },
+              {
+                label: '结束日期',
+                required: true,
+                description: '请填写请假结束日期',
+                example: '2026-04-21',
+              },
+              {
+                label: '请假事由',
+                required: true,
+                description: '填写本次请假的详细原因说明',
+                example: '家中有事，需要请假半天',
+              },
+            ],
+            steps: [
+              '点击 请假申请',
+              '输入 开始日期',
+              '输入 结束日期',
+              '输入 请假事由',
+              '点击 保存待发',
+              '看到 保存成功 就结束',
+            ],
+            testData: {
+              开始日期: '2026-04-20',
+              结束日期: '2026-04-21',
+              请假事由: '家中有事，需要请假半天',
+            },
+          },
+        ],
+      });
+
+      jest.spyOn(prisma.bootstrapJob, 'create').mockResolvedValue(mockJob as any);
+      jest.spyOn(prisma.bootstrapJob, 'findUnique').mockResolvedValue({
+        ...mockJob,
+        queueJobId: 'queue-job-id',
+      } as any);
+
+      await service.createJob({
+        tenantId: 'default-tenant',
+        accessMode: 'text_guide',
+        name: '请假申请',
+        oaUrl: 'https://portal.example.com',
+        identityScope: 'teacher',
+        rpaFlowContent: 'free form guide',
+      });
+
+      const createdSource = (prisma.bootstrapSource.create as jest.Mock).mock.calls.find(
+        ([call]) => call.data?.sourceType === 'manual_rpa',
+      )?.[0];
+      const generatedFlow = JSON.parse(createdSource.data.sourceContent).flows[0];
+
+      expect(generatedFlow.fields).toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({
+            label: '开始日期',
+            type: 'date',
+            description: '请填写请假开始日期',
+            example: '2026-04-20',
+          }),
+          expect.objectContaining({
+            label: '结束日期',
+            type: 'date',
+            description: '请填写请假结束日期',
+            example: '2026-04-21',
+          }),
+          expect.objectContaining({
+            label: '请假事由',
+            type: 'textarea',
+            description: '填写本次请假的详细原因说明',
+            example: '家中有事，需要请假半天',
+          }),
+        ]),
+      );
+    });
+
+    it('keeps bootstrap direct-link compilation aligned with the shared page-automation compiler', async () => {
+      const mockJob = {
+        id: 'shared-compiler-alignment-job-id',
+        tenantId: 'default-tenant',
+        status: 'CREATED',
+      };
+      const directLinkGuide = [
+        '# 全局',
+        '认证入口: https://sz.xpu.edu.cn/',
+        '系统网址: https://oa.example.com',
+        '## 流程: 请假申请',
+        '描述: 网信处科员请假申请',
+        '流程编码: leave_request',
+        '参数:',
+        '- 请假事由 | textarea | 必填',
+        '- 开始日期 | date | 必填',
+        '- 结束日期 | date | 必填',
+        '步骤:',
+        '- 访问 https://sz.xpu.edu.cn/',
+        '- 访问 https://oa.example.com',
+        '- 访问 https://oa.example.com/leave/new',
+        '- 填写 请假事由',
+        '- 填写 开始日期',
+        '- 填写 结束日期',
+        '- 点击 保存待发',
+        '- 看到 提交成功 就结束',
+      ].join('\n');
+
+      jest.spyOn(prisma.bootstrapJob, 'create').mockResolvedValue(mockJob as any);
+      jest.spyOn(prisma.bootstrapJob, 'findUnique').mockResolvedValue({
+        ...mockJob,
+        queueJobId: 'queue-job-id',
+      } as any);
+
+      await service.createJob({
+        tenantId: 'default-tenant',
+        accessMode: 'direct_link',
+        name: '综合 OA',
+        oaUrl: 'https://oa.example.com',
+        identityScope: 'both',
+        rpaFlowContent: directLinkGuide,
+      });
+
+      const createdSource = (prisma.bootstrapSource.create as jest.Mock).mock.calls.find(
+        ([call]) => call.data?.sourceType === 'manual_rpa',
+      )?.[0];
+      const generatedFlow = JSON.parse(createdSource.data.sourceContent);
+      const expectedBundle = buildPageAutomationFlowBundle({
+        content: directLinkGuide,
+        accessMode: 'direct_link',
+        connectorBaseUrl: 'https://oa.example.com',
+        processName: '综合 OA',
+      });
+
+      expect(generatedFlow).toEqual(expectedBundle);
+    });
+
+    it('keeps bootstrap text-guide compilation aligned with the shared page-automation compiler', async () => {
+      const mockJob = {
+        id: 'shared-text-guide-alignment-job-id',
+        tenantId: 'default-tenant',
+        status: 'CREATED',
+      };
+      const textGuide = [
+        '# 系统基本信息',
+        '系统名称: 示例 OA',
+        '系统网址: https://portal.example.com',
+        '## 流程: 用印申请',
+        '描述: 用印流程示例',
+        '用户办理时需要补充的信息:',
+        '- 文件类型、名称及份数 | 必填 | 说明: 填写需要用印的文件类型、名称和份数 | 示例: 劳务合同 2份',
+        '- 用印类型 | 必填 | 说明: 选择本次需要办理的印章类型 | 示例: 党委公章、学校公章 | 可选值: 党委公章、学校公章、书记签名章 | 可多选',
+        '- 用印附件 | 必填 | 说明: 上传本次用印对应的附件材料 | 示例: 用印申请材料.pdf | 上传要求: 支持上传多份，未上传视为信息缺失 | 可多选',
+        '办理步骤:',
+        '- 点击 流程中心',
+        '- 点击 用印申请',
+        '- 输入 文件类型、名称及份数',
+        '- 勾选 用印类型',
+        '- 上传 用印附件',
+        '- 点击 保存待发',
+        '- 看到 保存待发成功 就结束',
+        '测试样例:',
+        '- 文件类型、名称及份数: 劳务合同 2份',
+        '- 用印类型: 党委公章、学校公章',
+        '- 用印附件: 用印申请材料.pdf',
+      ].join('\n');
+
+      jest.spyOn(prisma.bootstrapJob, 'create').mockResolvedValue(mockJob as any);
+      jest.spyOn(prisma.bootstrapJob, 'findUnique').mockResolvedValue({
+        ...mockJob,
+        queueJobId: 'queue-job-id',
+      } as any);
+
+      await service.createJob({
+        tenantId: 'default-tenant',
+        accessMode: 'text_guide',
+        name: '用印申请',
+        oaUrl: 'https://portal.example.com',
+        identityScope: 'teacher',
+        rpaFlowContent: textGuide,
+      });
+
+      const createdSource = (prisma.bootstrapSource.create as jest.Mock).mock.calls.find(
+        ([call]) => call.data?.sourceType === 'manual_rpa',
+      )?.[0];
+      const generatedFlow = JSON.parse(createdSource.data.sourceContent);
+      const expectedBundle = buildPageAutomationFlowBundle({
+        content: textGuide,
+        accessMode: 'text_guide',
+        connectorBaseUrl: 'https://portal.example.com',
+        processName: '用印申请',
+      });
+
+      expect(generatedFlow).toEqual(expectedBundle);
+    });
+
+    it('does not treat unified direct-link metadata lines as executable browser steps', () => {
+      const bundle = buildPageAutomationFlowBundle({
+        content: [
+          '# 系统基本信息',
+          '系统名称: 示例 OA',
+          '认证入口: https://auth.example.com/',
+          '系统网址: https://oa.example.com/',
+          '适用对象: 教师',
+          '登录说明: 统一认证登录',
+          '办理完成标志: 看到 保存待发成功 就结束',
+          '',
+          '## 流程: 请假申请',
+          '描述: 教职工请假申请示例',
+          '流程页面: https://oa.example.com/workflow/new?templateId=leave_request',
+          '用户办理时需要补充的信息:',
+          '- 开始日期 | 必填 | 说明: 请假开始日期 | 示例: 2026-04-20',
+          '- 结束日期 | 必填 | 说明: 请假结束日期 | 示例: 2026-04-20',
+          '- 请假原因 | 必填 | 说明: 填写本次请假的具体原因 | 示例: 家中有事，需要请假半天',
+          '办理步骤:',
+          '- 访问 https://auth.example.com/',
+          '- 访问 https://oa.example.com/',
+          '- 访问 https://oa.example.com/workflow/new?templateId=leave_request',
+          '- 输入 开始日期',
+          '- 输入 结束日期',
+          '- 输入 请假原因',
+          '- 点击 保存待发',
+          '- 看到 保存待发成功 就结束',
+        ].join('\n'),
+        accessMode: 'direct_link',
+        connectorBaseUrl: 'https://oa.example.com',
+        processName: '请假申请',
+      });
+
+      const flow = bundle.flows[0] as any;
+      const preflightSteps = Array.isArray(flow.runtime?.preflight?.steps)
+        ? flow.runtime.preflight.steps
+        : [];
+      const clickLabels = preflightSteps
+        .filter((step: any) => step?.type === 'click')
+        .map((step: any) => String(step?.target?.label || step?.target?.value || '').trim())
+        .filter(Boolean);
+
+      expect(clickLabels).not.toEqual(expect.arrayContaining([
+        '# 系统基本信息',
+        '适用对象: 教师',
+        '登录说明: 统一认证登录',
+        '办理完成标志: 看到 保存待发成功 就结束',
+      ]));
+      expect(preflightSteps).toEqual(expect.arrayContaining([
+        expect.objectContaining({ type: 'goto', value: 'https://auth.example.com/' }),
+        expect.objectContaining({ type: 'goto', value: 'https://oa.example.com/workflow/new?templateId=leave_request' }),
+        expect.objectContaining({ builtin: 'capture_form_submit' }),
+      ]));
+    });
+
     it('auto-generates a stable process code for Chinese direct-link flow names when 流程编码 is omitted', async () => {
       const mockJob = {
         id: 'auto-process-code-job-id',
@@ -1014,7 +1333,7 @@ describe('BootstrapService', () => {
       }));
       expect(sealTypeField).toEqual(expect.objectContaining({
         label: '用印类型',
-        type: 'select',
+        type: 'checkbox',
         required: true,
         multiple: true,
         options: [
@@ -1047,6 +1366,151 @@ describe('BootstrapService', () => {
             [attachmentField.key]: '用印申请材料.pdf',
           }),
         },
+      }));
+    });
+
+    it('keeps fallback fill-fields conservative and does not infer file type only from attachment-like wording', () => {
+      const bundle = buildPageAutomationFlowBundle({
+        content: [
+          '流程: 信息登记',
+          '用户办理时需要补充的信息:',
+          '- 附件名称 | 说明: 这里只是填写附件名称，不是上传入口 | 示例: 申请材料.pdf',
+          '办理步骤:',
+          '- 输入 附件名称',
+          '- 点击 保存',
+        ].join('\n'),
+        accessMode: 'text_guide',
+        connectorBaseUrl: 'https://oa.example.com',
+        processName: '信息登记',
+      });
+
+      const flow = bundle.flows[0] as any;
+      const attachmentNameField = flow.fields.find((field: any) => field.label === '附件名称');
+      const attachmentStep = flow.actions.submit.steps.find((step: any) => step.fieldKey === attachmentNameField?.key);
+
+      expect(attachmentNameField).toEqual(expect.objectContaining({
+        label: '附件名称',
+        type: 'text',
+      }));
+      expect(attachmentStep).toEqual(expect.objectContaining({
+        type: 'input',
+        fieldKey: attachmentNameField.key,
+      }));
+      expect(flow.actions.submit.steps).not.toEqual(
+        expect.arrayContaining([
+          expect.objectContaining({ type: 'upload', fieldKey: attachmentNameField.key }),
+        ]),
+      );
+    });
+
+    it('infers date and textarea field types conservatively from inline labels, descriptions, and examples', () => {
+      const bundle = buildPageAutomationFlowBundle({
+        content: [
+          '流程: 请假申请',
+          '步骤:',
+          '- 填写 请假事由 | 说明: 填写本次请假的具体原因 | 示例: 家中有事，需要请假半天',
+          '- 填写 开始日期 | 说明: 请假开始日期 | 示例: 2026-04-20',
+          '- 填写 结束日期 | 说明: 请假结束日期 | 示例: 2026-04-21',
+          '- 点击 保存待发',
+        ].join('\n'),
+        accessMode: 'direct_link',
+        connectorBaseUrl: 'https://oa.example.com',
+        processName: '请假申请',
+      });
+
+      const flow = bundle.flows[0] as any;
+      expect(flow.fields.find((field: any) => field.label === '请假事由')).toEqual(
+        expect.objectContaining({
+          type: 'textarea',
+        }),
+      );
+      expect(flow.fields.find((field: any) => field.label === '开始日期')).toEqual(
+        expect.objectContaining({
+          type: 'date',
+        }),
+      );
+      expect(flow.fields.find((field: any) => field.label === '结束日期')).toEqual(
+        expect.objectContaining({
+          type: 'date',
+        }),
+      );
+    });
+
+    it('preserves clean labels and choice options when direct-link templates describe fields inline in steps', async () => {
+      const mockJob = {
+        id: 'direct-link-inline-fields-job-id',
+        tenantId: 'default-tenant',
+        status: 'CREATED',
+      };
+
+      jest.spyOn(prisma.bootstrapJob, 'create').mockResolvedValue(mockJob as any);
+      jest.spyOn(prisma.bootstrapJob, 'findUnique').mockResolvedValue({
+        ...mockJob,
+        queueJobId: 'queue-job-id',
+      } as any);
+
+      await service.createJob({
+        tenantId: 'default-tenant',
+        accessMode: 'direct_link',
+        name: '用印申请',
+        oaUrl: 'https://oa.example.com',
+        identityScope: 'teacher',
+        rpaFlowContent: [
+          '# 全局',
+          '认证入口: https://auth.example.com/',
+          '系统网址: https://oa.example.com/',
+          '',
+          '## 流程: 用印申请',
+          '描述: 用印流程示例',
+          '步骤:',
+          '- 访问 https://auth.example.com/',
+          '- 访问 https://oa.example.com/',
+          '- 填写 文件类型、名称及份数 | 说明: 填写需要用印的文件类型、名称和份数 | 示例: 劳务合同 2份',
+          '- 上传 用印附件 | 说明: 上传本次用印对应的附件材料 | 示例: 用印申请材料.pdf | 上传要求: 支持上传多份，未上传视为信息缺失 | 可多选',
+          '- 选择 用印类型 | 说明: 选择本次需要办理的印章类型 | 示例: 党委公章 | 可选值: 党委公章、学校公章、书记签名章 | 可多选',
+          '- 点击 保存待发',
+          '- 看到 保存成功 就结束',
+        ].join('\n'),
+      });
+
+      const createdSource = (prisma.bootstrapSource.create as jest.Mock).mock.calls.find(
+        ([call]) => call.data?.sourceType === 'manual_rpa',
+      )?.[0];
+      const generatedFlow = JSON.parse(createdSource.data.sourceContent);
+      const flow = generatedFlow.flows[0];
+      const attachmentField = flow.fields.find((field: any) => field.label === '用印附件');
+      const sealTypeField = flow.fields.find((field: any) => field.label === '用印类型');
+      const captureStep = flow.runtime.preflight.steps.find((step: any) => step.builtin === 'capture_form_submit');
+      const sealTypeMapping = captureStep.options.fieldMappings.find((mapping: any) => mapping.fieldKey === sealTypeField?.key);
+
+      expect(attachmentField).toEqual(expect.objectContaining({
+        label: '用印附件',
+        type: 'file',
+        required: true,
+        multiple: true,
+      }));
+      expect(attachmentField.description).toContain('上传要求：支持上传多份');
+      expect(sealTypeField).toEqual(expect.objectContaining({
+        label: '用印类型',
+        type: 'checkbox',
+        required: true,
+        multiple: true,
+        options: [
+          { label: '党委公章', value: '党委公章' },
+          { label: '学校公章', value: '学校公章' },
+          { label: '书记签名章', value: '书记签名章' },
+        ],
+      }));
+      expect(sealTypeMapping).toEqual(expect.objectContaining({
+        fieldType: 'checkbox',
+        target: expect.objectContaining({
+          label: '用印类型',
+        }),
+        options: [
+          { label: '党委公章', value: '党委公章' },
+          { label: '学校公章', value: '学校公章' },
+          { label: '书记签名章', value: '书记签名章' },
+        ],
       }));
     });
   });

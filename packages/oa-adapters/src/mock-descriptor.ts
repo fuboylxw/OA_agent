@@ -5,9 +5,8 @@ import { MockOAAdapter } from './mock-adapter';
 /**
  * Mock Adapter Descriptor — fallback adapter for testing and development.
  *
- * Match heuristics:
- *   - vendor name contains 'mock'  → 50
- *   - Always returns 1 as fallback (lowest priority)
+ * Match rule:
+ *   - Always returns 1 as explicit development fallback (lowest priority)
  */
 export const MockDescriptor: AdapterDescriptor = {
   id: 'mock',
@@ -27,9 +26,6 @@ export const MockDescriptor: AdapterDescriptor = {
   },
 
   match(config: AdapterConnectionConfig): number {
-    const vendor = (config.oaVendor || '').toLowerCase();
-    if (vendor.includes('mock')) return 50;
-    // Fallback: always match with lowest priority
     return 1;
   },
 

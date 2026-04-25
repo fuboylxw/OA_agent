@@ -15,6 +15,7 @@ import { ProcessLibraryService } from './process-library.service';
 import { RequestAuthService } from '../common/request-auth.service';
 import { FLOW_MANAGER_ROLES, requireRoles } from '../common/access-role.util';
 import { CreateProcessTemplateDto } from './dto/create-process-template.dto';
+import { PreviewProcessTemplateDto } from './dto/preview-process-template.dto';
 
 @ApiTags('process-library')
 @Controller('process-library')
@@ -48,7 +49,21 @@ export class ProcessLibraryController {
     const auth = await this.requestAuth.resolveUser(req, { requireUser: true });
     requireRoles(auth.roles, FLOW_MANAGER_ROLES, '只有管理员或流程管理员可以添加流程');
 
-    return this.processLibraryService.createManualProcessTemplate(auth.tenantId, dto);
+    return this.processLibraryService.createManualProcessTemplate(auth.tenantId, dto, {
+      userId: auth.userId,
+    });
+  }
+
+  @Post('preview')
+  @ApiOperation({ summary: 'Preview parsed process metadata from template content' })
+  async preview(
+    @Req() req: Request,
+    @Body() dto: PreviewProcessTemplateDto,
+  ) {
+    const auth = await this.requestAuth.resolveUser(req, { requireUser: true });
+    requireRoles(auth.roles, FLOW_MANAGER_ROLES, '只有管理员或流程管理员可以预解析流程');
+
+    return this.processLibraryService.previewManualProcessTemplate(auth.tenantId, dto);
   }
 
   @Put('id/:id')
@@ -61,7 +76,9 @@ export class ProcessLibraryController {
     const auth = await this.requestAuth.resolveUser(req, { requireUser: true });
     requireRoles(auth.roles, FLOW_MANAGER_ROLES, '只有管理员或流程管理员可以修改流程');
 
-    return this.processLibraryService.updateManualProcessTemplate(auth.tenantId, id, dto);
+    return this.processLibraryService.updateManualProcessTemplate(auth.tenantId, id, dto, {
+      userId: auth.userId,
+    });
   }
 
   @Delete('id/:id')
@@ -83,12 +100,14 @@ export class ProcessLibraryController {
     @Param('processCode') processCode: string,
     @Query('tenantId') tenantId: string,
     @Query('version') version?: string,
+    @Query('connectorId') connectorId?: string,
   ) {
     const auth = await this.requestAuth.resolveUser(req, { tenantId, requireUser: true });
     return this.processLibraryService.getByCode(
       auth.tenantId,
       processCode,
       version ? parseInt(version, 10) : undefined,
+      connectorId,
       {
         identityType: auth.identityType,
         roles: auth.roles,

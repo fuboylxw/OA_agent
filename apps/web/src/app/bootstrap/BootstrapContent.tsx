@@ -21,6 +21,7 @@ import {
   type IdentityScope,
   normalizeIdentityScope,
 } from '../lib/identity-scope';
+import { FLOW_TEXT_TEMPLATE_PLACEHOLDERS } from '../lib/flow-text-templates';
 
 const TERMINAL_STATUSES = ['PUBLISHED', 'FAILED', 'VALIDATION_FAILED', 'PARTIALLY_PUBLISHED', 'MANUAL_REVIEW'];
 type ReactivateMode = 'reuse' | 'new';
@@ -100,66 +101,6 @@ const TEXT_GUIDE_FILE_ACCEPT = '.txt,.md,.markdown,.text,.log';
 const DIRECT_LINK_FILE_ACCEPT = '.json,.txt,.md,.markdown,.text,.log';
 const TEXT_GUIDE_TEMPLATE_DOWNLOAD_URL = '/examples/text-guide-example.txt';
 const DIRECT_LINK_TEMPLATE_DOWNLOAD_URL = '/examples/direct-link-example.txt';
-const TEXT_GUIDE_PLACEHOLDER = [
-  '# 系统基本信息',
-  '系统名称: 示例 OA',
-  '系统网址: https://oa.example.com/',
-  '适用对象: 教职工',
-  '登录说明: 统一认证登录',
-  '流程入口: 工作台 > 流程中心 > 用印申请',
-  '办理完成标志: 看到 保存待发成功 就结束',
-  '',
-  '## 流程: 用印申请',
-  '描述: 公章或合同章申请示例',
-  '用户办理时需要补充的信息:',
-  '- 文件类型、名称及份数 | 必填 | 说明: 填写需要用印的文件类型、名称和份数 | 示例: 劳务合同 2份',
-  '- 用印类型 | 必填 | 说明: 选择本次需要办理的印章类型 | 示例: 党委公章、学校公章 | 可选值: 党委公章、学校公章、书记签名章、校长签名章 | 可多选',
-  '- 用印附件 | 必填 | 说明: 上传本次用印对应的附件材料 | 示例: 用印申请材料.pdf | 上传要求: 支持上传多份，未上传视为信息缺失 | 可多选',
-  '办理步骤:',
-  '- 打开 OA 首页',
-  '- 点击 流程中心',
-  '- 点击 用印申请',
-  '- 输入 文件类型、名称及份数',
-  '- 勾选 用印类型',
-  '- 上传 用印附件',
-  '- 点击 保存待发',
-  '- 看到 保存待发成功 就结束',
-  '测试样例:',
-  '- 文件类型、名称及份数: 劳务合同 2份',
-  '- 用印类型: 党委公章、学校公章',
-  '- 用印附件: 用印申请材料.pdf',
-].join('\n');
-const DIRECT_LINK_GUIDE_PLACEHOLDER = [
-  '# 系统基本信息',
-  '系统名称: 示例 OA',
-  '认证入口: https://auth.example.com/',
-  '系统网址: https://oa.example.com/',
-  '适用对象: 教职工',
-  '登录说明: 统一认证登录',
-  '办理完成标志: 看到 保存待发成功 就结束',
-  '',
-  '## 流程: 用印申请',
-  '描述: 公章或合同章申请示例',
-  '流程页面: https://oa.example.com/workflow/new?templateId=seal_apply',
-  '用户办理时需要补充的信息:',
-  '- 文件类型、名称及份数 | 必填 | 说明: 填写需要用印的文件类型、名称和份数 | 示例: 劳务合同 2份',
-  '- 用印类型 | 必填 | 说明: 选择本次需要办理的印章类型 | 示例: 党委公章、学校公章 | 可选值: 党委公章、学校公章、书记签名章、校长签名章 | 可多选',
-  '- 用印附件 | 必填 | 说明: 上传本次用印对应的附件材料 | 示例: 用印申请材料.pdf | 上传要求: 支持上传多份，未上传视为信息缺失 | 可多选',
-  '办理步骤:',
-  '- 访问 https://auth.example.com/',
-  '- 访问 https://oa.example.com/',
-  '- 访问 https://oa.example.com/workflow/new?templateId=seal_apply',
-  '- 输入 文件类型、名称及份数',
-  '- 勾选 用印类型',
-  '- 上传 用印附件',
-  '- 点击 保存待发',
-  '- 看到 保存待发成功 就结束',
-  '测试样例:',
-  '- 文件类型、名称及份数: 劳务合同 2份',
-  '- 用印类型: 党委公章、学校公章',
-  '- 用印附件: 用印申请材料.pdf',
-].join('\n');
-
 function normalizeAuthConfig(value: Record<string, any> | null | undefined) {
   return Object.fromEntries(Object.entries(value || {}).filter(([key, val]) => !key.startsWith('_') && val !== ''));
 }
@@ -506,10 +447,10 @@ function FlowFields({
   const isTextGuide = state.accessMode === 'text_guide';
   const isDirectLink = state.accessMode === 'direct_link';
   const placeholder = isTextGuide
-    ? TEXT_GUIDE_PLACEHOLDER
+    ? FLOW_TEXT_TEMPLATE_PLACEHOLDERS.rpa
     : (isDirectLink
-      ? DIRECT_LINK_GUIDE_PLACEHOLDER
-      : JSON.stringify({ flows: [{ processCode: 'expense_submit', processName: '费用报销', actions: { submit: { steps: [{ type: 'goto', value: 'https://oa.example.com/expense' }, { type: 'click', target: { kind: 'text', value: '新建申请' } }, { type: 'click', target: { kind: 'text', value: '提交' } }] } } }] }, null, 2));
+      ? FLOW_TEXT_TEMPLATE_PLACEHOLDERS.url
+      : JSON.stringify({ flows: [{ processCode: 'process_alpha', processName: '流程A', actions: { submit: { steps: [{ type: 'goto', value: 'https://oa.example.com/process-alpha' }, { type: 'click', target: { kind: 'text', value: '新建申请' } }, { type: 'click', target: { kind: 'text', value: '提交' } }] } } }] }, null, 2));
 
   return (
     <section className="space-y-4 rounded-xl border border-gray-200 p-4">

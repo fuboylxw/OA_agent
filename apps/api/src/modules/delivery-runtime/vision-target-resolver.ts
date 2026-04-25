@@ -125,16 +125,6 @@ export class VisionTargetResolver {
       };
     }
 
-    const partial = elements.find((element) => this.normalize(element.selector).includes(normalizedSelector));
-    if (partial) {
-      return {
-        element: partial,
-        strategy: 'selector',
-        score: 110,
-        reason: 'matched_partial_selector',
-      };
-    }
-
     return {
       strategy: 'none',
       score: 0,
@@ -159,8 +149,6 @@ export class VisionTargetResolver {
       let score = 0;
       if (candidateKey === normalizedFieldKey) {
         score += 130;
-      } else if (candidateKey.includes(normalizedFieldKey) || normalizedFieldKey.includes(candidateKey)) {
-        score += 95;
       }
 
       if (score === 0) {
@@ -210,10 +198,6 @@ export class VisionTargetResolver {
       for (const candidate of texts) {
         if (candidate === normalizedText) {
           score = Math.max(score, 120);
-        } else if (candidate.includes(normalizedText) || normalizedText.includes(candidate)) {
-          score = Math.max(score, 85);
-        } else if (this.tokenOverlap(candidate, normalizedText) > 0) {
-          score = Math.max(score, 65);
         }
       }
 
@@ -272,12 +256,6 @@ export class VisionTargetResolver {
       return 0;
     }
     return 4;
-  }
-
-  private tokenOverlap(left: string, right: string) {
-    const leftTokens = left.split(/[\s_\-:.#/]+/).filter(Boolean);
-    const rightTokens = new Set(right.split(/[\s_\-:.#/]+/).filter(Boolean));
-    return leftTokens.filter((token) => rightTokens.has(token)).length;
   }
 
   private normalize(value: unknown) {

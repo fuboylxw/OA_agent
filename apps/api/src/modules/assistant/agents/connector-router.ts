@@ -35,7 +35,7 @@ const CONNECTOR_ROUTE_SYSTEM_PROMPT = `你是一个 OA 系统路由助手。
 
 ## 规则
 1. 如果只有一个系统，直接选它
-2. 如果用户消息中明确提到了某个系统的名称或关键词，选那个系统
+2. 多个系统时，必须结合用户整句话、候选系统名称、厂商、类型做整体判断，不要只做关键词命中
 3. 如果当前候选系统已经是某个已识别流程的候选范围，只能在这些系统里选择
 4. 如果无法判断，返回 needsSelection=true，列出可选系统让用户选择
 5. 不要猜测，宁可让用户选择也不要选错
@@ -60,8 +60,7 @@ export class ConnectorRouter {
    * 决策优先级：
    *   1. 租户只有 1 个 active connector → 直接选它
    *   2. 用户有 session 上下文中的 connector → 沿用
-   *   3. 用户部门/角色有默认 connector 绑定 → 用它
-   *   4. 多个 connector → LLM 判断或让用户选
+   *   3. 多个 connector → LLM 判断或让用户选
    */
   async route(
     tenantId: string,
@@ -109,54 +108,12 @@ export class ConnectorRouter {
       }
     }
 
-    // 3. 尝试按用户部门自动路由
-    const autoRouted = await this.autoRouteByUser(userId, connectors);
-    if (autoRouted) {
-      return autoRouted;
-    }
-
-    // 4. 多个 connector → LLM 判断或让用户选
+    // 3. 多个 connector → LLM 判断或让用户选
     return this.routeWithLLM(message, connectors, {
       tenantId,
       userId,
       sessionConnectorId,
     });
-  }
-
-  /**
-   * 按用户信息自动路由（部门、最近使用等）
-   */
-  private async autoRouteByUser(
-    userId: string,
-    connectors: ConnectorInfo[],
-  ): Promise<ConnectorRouteResult | null> {
-    // 查用户最近一次提交，再通过 templateId 找到 connectorId
-    const recentSubmission = await this.prisma.submission.findFirst({
-      where: { userId },
-      select: { templateId: true },
-      orderBy: { createdAt: 'desc' },
-    });
-
-    if (recentSubmission?.templateId) {
-      const template = await this.prisma.processTemplate.findUnique({
-        where: { id: recentSubmission.templateId },
-        select: { connectorId: true },
-      });
-
-      if (template?.connectorId) {
-        const match = connectors.find(c => c.id === template.connectorId);
-        if (match) {
-          this.logger.log(`Auto-routed to "${match.name}" based on user's recent submission`);
-          return {
-            connectorId: match.id,
-            connectorName: match.name,
-            needsSelection: false,
-          };
-        }
-      }
-    }
-
-    return null;
   }
 
   /**

@@ -94,16 +94,6 @@ export class LocalRpaExecutor implements RpaExecutor {
   }
 
   private deriveStatus(submissionId: string | undefined) {
-    const value = String(submissionId || '').toLowerCase();
-    if (value.includes('reject') || value.includes('fail')) {
-      return 'rejected';
-    }
-    if (value.includes('approve') || value.includes('done')) {
-      return 'approved';
-    }
-    if (value.includes('process') || value.includes('pending')) {
-      return 'processing';
-    }
     return 'submitted';
   }
 }

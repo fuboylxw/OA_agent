@@ -46,34 +46,42 @@ describe('FormAgent', () => {
 
     const result = await agent.extractFields('leave', leaveSchema, '我要请假');
 
-    expect(result.missingFields.find((field) => field.key === 'leave_type')?.label).toBe('请假类型');
-    expect(result.missingFields.find((field) => field.key === 'start_time')?.label).toBe('开始时间');
+    expect(result.missingFields.find((field) => field.key === 'leave_type')?.label).toBe('leave type');
+    expect(result.missingFields.find((field) => field.key === 'start_time')?.label).toBe('start time');
     expect(result.missingFields.find((field) => field.key === 'leave_type')?.question).not.toContain('leave_type');
     expect(result.missingFields.find((field) => field.key === 'start_time')?.question).not.toContain('start_time');
   });
 
-  it('falls back to rules for relative dates, duration, and reason aliases', async () => {
+  it('does not use regex fallback for natural-language field extraction when llm is unavailable', async () => {
     (agent as any).llmClient = {
       chat: jest.fn().mockRejectedValue(new Error('llm unavailable')),
     };
 
-    const today = new Date();
+    const genericSchema = {
+      fields: [
+        { key: 'request_kind', label: '申请类型', type: 'select', required: true, options: ['事假', '病假', '年假'] },
+        { key: 'start_time', label: '开始时间', type: 'date', required: true },
+        { key: 'end_time', label: '结束时间', type: 'date', required: true },
+        { key: 'reason', label: '事由', type: 'text', required: true },
+      ],
+    };
     const result = await agent.extractFields(
-      'leave',
-      leaveSchema,
-      '我要请假，明天开始，请假三天，理由是出去旅游',
+      'generic_request',
+      genericSchema,
+      '我要提交申请，申请类型是事假，开始时间是明天，事由是出去旅游',
     );
 
-    expect(result.extractedFields.start_time).toBe(formatDate(addDays(today, 1)));
-    expect(result.extractedFields.end_time).toBe(formatDate(addDays(today, 3)));
-    expect(result.extractedFields.reason).toBe('出去旅游');
-    expect(result.fieldOrigins.start_time).toBe('user');
-    expect(result.fieldOrigins.end_time).toBe('derived');
-    expect(result.missingFields).toHaveLength(1);
-    expect(result.missingFields[0].key).toBe('leave_type');
+    expect(result.extractedFields).toEqual({});
+    expect(result.fieldOrigins).toEqual({});
+    expect(result.missingFields.map((field) => field.key)).toEqual([
+      'request_kind',
+      'start_time',
+      'end_time',
+      'reason',
+    ]);
   });
 
-  it('stabilizes free-text reason fields when the utterance contains a clear natural-language cause segment', async () => {
+  it('accepts llm duplication when one user expression should populate multiple fields', async () => {
     const duplicatedReasonSchema = {
       fields: [
         { key: 'field_1', label: '开始日期', type: 'date', required: true },
@@ -94,12 +102,12 @@ describe('FormAgent', () => {
             field_1: '明天',
             field_2: '2026-04-18',
             field_3: '事假',
+            field_4: '去北京出差',
+            field_5: '去北京出差',
             field_6: '北京',
             field_7: '13800138000',
           },
           missingFieldQuestions: {
-            field_4: '请说明一下请假的具体原因是什么？',
-            field_5: '可以详细描述一下请假的事由吗？',
             field_8: '请问具体的请假时间是几点到几点？',
           },
         }),
@@ -200,7 +208,7 @@ describe('FormAgent', () => {
     expect(result.fieldOrigins.endDate).toBe('user');
   });
 
-  it('falls back to targeted modification rules and re-derives dependent dates', async () => {
+  it('does not use regex fallback for natural-language modifications when llm is unavailable', async () => {
     (agent as any).llmClient = {
       chat: jest.fn().mockRejectedValue(new Error('llm unavailable')),
     };
@@ -215,14 +223,12 @@ describe('FormAgent', () => {
     const result = await agent.extractModifications(
       'leave',
       leaveSchema,
-      '把开始时间提前一天，请假改三天',
+      '把开始时间提前一天，结束时间改成2026-03-27',
       current,
     );
 
-    expect(result.modifiedFields.start_time).toBe('2026-03-25');
-    expect(result.modifiedFields.end_time).toBe('2026-03-27');
-    expect(result.fieldOrigins.start_time).toBe('user');
-    expect(result.fieldOrigins.end_time).toBe('derived');
+    expect(result.modifiedFields).toEqual({});
+    expect(result.fieldOrigins).toEqual({});
   });
 
   it('prefers llm-generated user-facing questions when available', async () => {
@@ -244,7 +250,7 @@ describe('FormAgent', () => {
     expect(leaveTypeField?.question).not.toContain('leave_type');
   });
 
-  it('appends field description and example to user-facing questions and supports multi-file hints', async () => {
+  it('keeps file-field question concise while retaining description/example in metadata', async () => {
     (agent as any).llmClient = {
       chat: jest.fn().mockRejectedValue(new Error('llm unavailable')),
     };
@@ -274,8 +280,8 @@ describe('FormAgent', () => {
     });
     expect(result.missingFields[0].question).toContain('还需要上传用印附件');
     expect(result.missingFields[0].question).toContain('支持上传多份文件');
-    expect(result.missingFields[0].question).toContain('说明：请上传需要盖章的完整材料');
-    expect(result.missingFields[0].question).toContain('示例：盖章申请表.pdf');
+    expect(result.missingFields[0].question).not.toContain('说明：');
+    expect(result.missingFields[0].question).not.toContain('示例：');
   });
 
   it('normalizes multi-select values when the field is marked multiple even if the type is select', async () => {
@@ -313,5 +319,136 @@ describe('FormAgent', () => {
 
     expect(result.modifiedFields.seal_types).toEqual(['党委公章', '学校公章']);
     expect(agent.normalizeDirectFieldValue('seal_apply', schema, 'seal_types', '党委公章、学校公章')).toEqual(['党委公章', '学校公章']);
+  });
+
+  it('does not use regex fallback for option modifications when llm is unavailable', async () => {
+    (agent as any).llmClient = {
+      chat: jest.fn().mockRejectedValue(new Error('llm unavailable')),
+    };
+
+    const schema = {
+      fields: [
+        {
+          key: 'apply_mode',
+          label: '办理方式',
+          type: 'select',
+          required: true,
+          options: ['线下办理', '线上办理'],
+        },
+        {
+          key: 'remark',
+          label: '备注',
+          type: 'text',
+          required: false,
+        },
+      ],
+    };
+
+    const result = await agent.extractModifications(
+      'generic_apply',
+      schema,
+      '把办理方式改成线上办理，备注改成线下办理',
+      {
+        apply_mode: '线下办理',
+        remark: '旧备注',
+      },
+    );
+
+    expect(result.modifiedFields).toEqual({});
+  });
+
+  it('keeps option normalization conservative and does not fuzzy-map generic fragments', () => {
+    const schema = {
+      fields: [
+        {
+          key: 'seal_types',
+          label: '用印类型',
+          type: 'select',
+          required: true,
+          options: ['党委公章', '学校公章', '书记签名章'],
+        },
+      ],
+    };
+
+    expect(agent.normalizeDirectFieldValue('seal_apply', schema, 'seal_types', '公章')).toBeUndefined();
+  });
+
+  it('includes options in missing-field prompts and metadata for option-like fields', async () => {
+    (agent as any).llmClient = {
+      chat: jest.fn().mockRejectedValue(new Error('llm unavailable')),
+    };
+
+    const schema = {
+      fields: [
+        {
+          key: 'seal_types',
+          label: '用印类型',
+          type: 'checkbox',
+          required: true,
+          multiple: true,
+          options: ['党委公章', '学校公章', '书记签名章'],
+        },
+      ],
+    };
+
+    const result = await agent.extractFields('seal_apply', schema, '我要申请用印');
+
+    expect(result.missingFields).toHaveLength(1);
+    expect(result.missingFields[0]).toMatchObject({
+      key: 'seal_types',
+      type: 'checkbox',
+      multiple: true,
+      options: [
+        { label: '党委公章', value: '党委公章' },
+        { label: '学校公章', value: '学校公章' },
+        { label: '书记签名章', value: '书记签名章' },
+      ],
+    });
+    expect(result.missingFields[0].question).toContain('可选项有：党委公章、学校公章、书记签名章');
+  });
+
+  it('does not treat a process name mention as a field value when llm follows conservative extraction', async () => {
+    const schema = {
+      fields: [
+        {
+          key: 'seal_types',
+          label: '用印类型',
+          type: 'checkbox',
+          required: true,
+          multiple: true,
+          options: ['党委公章', '学校公章', '书记签名章'],
+        },
+        {
+          key: 'file_summary',
+          label: '文件类型、名称及份数',
+          type: 'textarea',
+          required: true,
+        },
+      ],
+    };
+
+    (agent as any).llmClient = {
+      chat: jest.fn().mockResolvedValue({
+        content: JSON.stringify({
+          extractedFields: {},
+          missingFieldQuestions: {
+            seal_types: '请问您需要哪些用印类型？',
+            file_summary: '请提供文件类型、名称及份数。',
+          },
+        }),
+      }),
+    };
+
+    const result = await agent.extractFields(
+      'seal_apply',
+      schema,
+      '我要办理西安工程大学用印申请单',
+    );
+
+    expect(result.extractedFields).toEqual({});
+    expect(result.missingFields.map((field) => field.key)).toEqual([
+      'seal_types',
+      'file_summary',
+    ]);
   });
 });

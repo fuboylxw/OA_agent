@@ -17,7 +17,6 @@ import type {
 import type { AdapterLifecycle } from '@uniflow/oa-adapters';
 import {
   classifyProbeStatus,
-  resolveAssistantFieldPresentation,
   type ProbeStatus,
 } from '@uniflow/shared-types';
 
@@ -521,19 +520,9 @@ export class GenericHttpAdapter implements OAAdapter, AdapterLifecycle {
     );
   }
 
-  private normalizeParamValue(key: string, value: any): any {
-    const semantic = resolveAssistantFieldPresentation({ key, label: key }).semanticKind;
-
-    if (semantic === 'attachment' && Array.isArray(value) && value.length === 0) {
+  private normalizeParamValue(_key: string, value: any): any {
+    if (Array.isArray(value) && value.length === 0) {
       return undefined;
-    }
-
-    if (
-      (semantic === 'start_time' || semantic === 'end_time')
-      && typeof value === 'string'
-      && /^\d{4}-\d{2}-\d{2}$/.test(value)
-    ) {
-      return `${value}${semantic === 'end_time' ? 'T18:00:00Z' : 'T09:00:00Z'}`;
     }
 
     return value;

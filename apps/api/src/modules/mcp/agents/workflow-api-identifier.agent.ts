@@ -21,8 +21,8 @@ const WorkflowApiIdentifierOutputSchema = z.object({
       path: z.string(),
       method: z.string(),
       description: z.string(),
-      workflowType: z.string(), // leave_request, expense_claim, attendance_query, etc.
-      workflowCategory: z.string(), // 请假, 报销, 考勤, etc.
+      workflowType: z.string(), // process_alpha, process_beta_query, etc.
+      workflowCategory: z.string(), // 通用分类，如行政/财务/人事/协作
       confidence: z.number().min(0).max(1),
       reason: z.string(),
       parameters: z.array(z.any()),
@@ -46,7 +46,7 @@ type WorkflowApiIdentifierOutput = z.infer<typeof WorkflowApiIdentifierOutputSch
  * 智能体：识别办事流程接口
  *
  * 功能：
- * 1. 从API列表中识别哪些是办事流程接口（请假、报销、考勤等）
+ * 1. 从API列表中识别哪些是办事流程接口
  * 2. 过滤掉非办事流程接口（系统管理、用户管理等）
  * 3. 对每个办事流程接口进行分类和置信度评分
  */
@@ -74,45 +74,12 @@ export class WorkflowApiIdentifierAgent extends BaseAgent<
   ): Promise<WorkflowApiIdentifierOutput> {
     this.logger.log(`Analyzing ${input.endpoints.length} endpoints`);
 
-    // 先用规则过滤明显的非办事流程接口
-    const candidates = this.ruleBasedFilter(input.endpoints);
-    this.logger.log(`${candidates.length} candidates after rule-based filtering`);
-
     // 使用LLM进行智能识别
-    const result = await this.identifyWithLLM(candidates, context);
+    const result = await this.identifyWithLLM(input.endpoints, context);
 
     this.logger.log(`Identified ${result.workflowApis.length} workflow APIs`);
 
     return result;
-  }
-
-  /**
-   * 基于规则的初步过滤
-   */
-  private ruleBasedFilter(endpoints: any[]): any[] {
-    const excludePatterns = [
-      /\/auth\//i,
-      /\/login/i,
-      /\/logout/i,
-      /\/user\/profile/i,
-      /\/system\//i,
-      /\/admin\//i,
-      /\/config\//i,
-      /\/health/i,
-      /\/metrics/i,
-      /\/swagger/i,
-      /\/api-docs/i,
-    ];
-
-    return endpoints.filter(endpoint => {
-      // 排除明显的系统接口
-      for (const pattern of excludePatterns) {
-        if (pattern.test(endpoint.path)) {
-          return false;
-        }
-      }
-      return true;
-    });
   }
 
   /**
@@ -126,7 +93,7 @@ export class WorkflowApiIdentifierAgent extends BaseAgent<
 你是一个OA系统API分析专家。请分析以下API端点列表，识别哪些是办事流程接口。
 
 办事流程接口的特征：
-1. 用于处理业务流程，如：请假申请、报销申请、考勤查询、出差申请、加班申请、采购申请等
+1. 用于处理面向终端用户的业务流程，如：发起申请、查询状态、审批处理等
 2. 通常包含提交、查询、审批等操作
 3. 与员工日常办公业务相关
 
@@ -145,8 +112,8 @@ ${JSON.stringify(endpoints, null, 2)}
       "path": "API路径",
       "method": "HTTP方法",
       "description": "端点描述",
-      "workflowType": "流程类型英文标识（如leave_request, expense_claim, attendance_query）",
-      "workflowCategory": "流程分类中文（如请假, 报销, 考勤）",
+      "workflowType": "流程类型英文标识（如process_alpha, process_beta_query）",
+      "workflowCategory": "流程分类中文（如通用、行政、人事）",
       "confidence": 0.95,
       "reason": "识别为办事流程的原因",
       "parameters": [...],

@@ -127,7 +127,7 @@ describe('VisionDeliveryService', () => {
     ]));
   });
 
-  it('fails submit when the final page only indicates save-to-draft behavior', async () => {
+  it('treats an explicitly configured save-to-draft assert as a successful configured terminal state', async () => {
     const runtime = {
       run: jest.fn().mockResolvedValue({
         success: true,
@@ -219,13 +219,12 @@ describe('VisionDeliveryService', () => {
       idempotencyKey: 'idem-2',
     });
 
-    expect(result.submitResult.success).toBe(false);
-    expect(result.submitResult.submissionId).toBeUndefined();
-    expect(result.submitResult.errorMessage).toContain('未真正送审');
+    expect(result.submitResult.success).toBe(true);
+    expect(result.submitResult.errorMessage).toBeUndefined();
     expect(result.submitResult.metadata).toMatchObject({
       submitConfirmation: expect.objectContaining({
-        confirmed: false,
-        matchedDraftSignal: true,
+        confirmed: true,
+        matchedSuccessAssert: true,
       }),
     });
   });

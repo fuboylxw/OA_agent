@@ -1029,6 +1029,500 @@ describe('UrlNetworkSubmitService', () => {
     expect(decoded).toContain('"field0054":""');
   });
 
+  it('merges preflight-resolved field bindings to infer CAP4 body patches for generic imported fields', async () => {
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      data: {
+        success: true,
+      },
+    });
+    mockedAxios.create.mockReturnValue({
+      request,
+    } as any);
+
+    const service = new UrlNetworkSubmitService({
+      run: jest.fn().mockResolvedValue({
+        success: true,
+        extractedValues: {
+          submitCapture: {
+            action: 'https://oa.example.com/form/leave/saveDraft',
+            method: 'post',
+            bodyMode: 'form',
+            fields: {
+              _json_params: JSON.stringify({
+                workflow_definition: {},
+                colMainData: {
+                  field0004: '',
+                },
+              }),
+            },
+          },
+          filledFields: {
+            field_1: false,
+          },
+          resolvedFieldBindings: [
+            {
+              key: 'field_1',
+              type: 'textarea',
+              id: 'field0004_id',
+              selector: '#field0004_id',
+            },
+          ],
+        },
+      }),
+    } as any);
+
+    await service.execute({
+      action: 'submit',
+      connectorId: 'connector-1',
+      processCode: 'leave_apply',
+      processName: '请假申请',
+      payload: {
+        formData: {
+          field_1: '家中有事，需要请假半天',
+        },
+      },
+      context: {
+        path: 'url',
+        action: 'submit',
+        authConfig: {
+          cookie: 'SESSION=abc123',
+        },
+        ticket: {
+          jumpUrl: 'https://oa.example.com/form/leave/new',
+        },
+        runtime: {
+          preflight: {
+            steps: [
+              { type: 'evaluate', builtin: 'capture_form_submit' },
+            ],
+          },
+          networkSubmit: {
+            url: '{{preflight.submitCapture.action}}',
+            method: '{{preflight.submitCapture.method}}',
+            bodyMode: '{{preflight.submitCapture.bodyMode}}',
+            successMode: 'http2xx',
+            completionKind: 'draft',
+            body: { source: 'preflight.submitCapture.fields' },
+          },
+        },
+        navigation: {},
+        rpaFlow: {
+          processCode: 'leave_apply',
+          processName: '请假申请',
+          rpaDefinition: {
+            processCode: 'leave_apply',
+            processName: '请假申请',
+            fields: [
+              {
+                key: 'field_1',
+                label: '请假事由',
+                type: 'textarea',
+                required: true,
+              },
+            ],
+          },
+        },
+      } as any,
+    });
+
+    const data = String(request.mock.calls[0][0].data);
+    expect(decodeURIComponent(data.replace(/\+/g, '%20'))).toContain('"field0004":"家中有事，需要请假半天"');
+  });
+
+  it('infers body patch paths from structured field tokens even when they are outside colMainData', async () => {
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      data: {
+        success: true,
+      },
+    });
+    mockedAxios.create.mockReturnValue({
+      request,
+    } as any);
+
+    const service = new UrlNetworkSubmitService({
+      run: jest.fn().mockResolvedValue({
+        success: true,
+        extractedValues: {
+          submitCapture: {
+            action: 'https://oa.example.com/form/leave/saveDraft',
+            method: 'post',
+            bodyMode: 'form',
+            fields: {
+              _json_params: JSON.stringify({
+                workflow_definition: {},
+                nestedPayload: {
+                  formData: {
+                    field0004: '',
+                  },
+                },
+              }),
+            },
+          },
+          filledFields: {
+            field_1: false,
+          },
+          resolvedFieldBindings: [
+            {
+              key: 'field_1',
+              type: 'textarea',
+              id: 'field0004_id',
+              selector: '#field0004_id',
+            },
+          ],
+        },
+      }),
+    } as any);
+
+    await service.execute({
+      action: 'submit',
+      connectorId: 'connector-1',
+      processCode: 'leave_apply',
+      processName: '请假申请',
+      payload: {
+        formData: {
+          field_1: '需要处理家庭事务',
+        },
+      },
+      context: {
+        path: 'url',
+        action: 'submit',
+        authConfig: {
+          cookie: 'SESSION=abc123',
+        },
+        ticket: {
+          jumpUrl: 'https://oa.example.com/form/leave/new',
+        },
+        runtime: {
+          preflight: {
+            steps: [
+              { type: 'evaluate', builtin: 'capture_form_submit' },
+            ],
+          },
+          networkSubmit: {
+            url: '{{preflight.submitCapture.action}}',
+            method: '{{preflight.submitCapture.method}}',
+            bodyMode: '{{preflight.submitCapture.bodyMode}}',
+            successMode: 'http2xx',
+            completionKind: 'draft',
+            body: { source: 'preflight.submitCapture.fields' },
+          },
+        },
+        navigation: {},
+        rpaFlow: {
+          processCode: 'leave_apply',
+          processName: '请假申请',
+          rpaDefinition: {
+            processCode: 'leave_apply',
+            processName: '请假申请',
+            fields: [
+              {
+                key: 'field_1',
+                label: '请假事由',
+                type: 'textarea',
+                required: true,
+              },
+            ],
+          },
+        },
+      } as any,
+    });
+
+    const data = String(request.mock.calls[0][0].data);
+    expect(decodeURIComponent(data.replace(/\+/g, '%20'))).toContain('"field0004":"需要处理家庭事务"');
+  });
+
+  it('prefers preflight-resolved checkbox mappings when static imported fields lack per-option ids', async () => {
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      data: {
+        success: true,
+      },
+    });
+    mockedAxios.create.mockReturnValue({
+      request,
+    } as any);
+
+    const service = new UrlNetworkSubmitService({
+      run: jest.fn().mockResolvedValue({
+        success: true,
+        extractedValues: {
+          submitCapture: {
+            action: 'https://oa.example.com/form/seal/saveDraft',
+            method: 'post',
+            bodyMode: 'form',
+            fields: {
+              _json_params: JSON.stringify({
+                workflow_definition: {},
+                colMainData: {
+                  field0053: '',
+                  field0054: '',
+                },
+              }),
+            },
+          },
+          filledFields: {
+            field_3: true,
+          },
+          resolvedFieldBindings: [
+            {
+              key: 'field_3',
+              type: 'checkbox',
+              multiple: true,
+            },
+          ],
+          resolvedFieldMappings: [
+            {
+              fieldKey: 'field_3',
+              fieldType: 'checkbox',
+              target: {
+                id: 'field0053_id',
+                label: '党委公章',
+                selector: '#field0053_id',
+              },
+              options: [{ label: '党委公章', value: '党委公章' }],
+            },
+            {
+              fieldKey: 'field_3',
+              fieldType: 'checkbox',
+              target: {
+                id: 'field0054_id',
+                label: '学校公章',
+                selector: '#field0054_id',
+              },
+              options: [{ label: '学校公章', value: '学校公章' }],
+            },
+          ],
+        },
+      }),
+    } as any);
+
+    await service.execute({
+      action: 'submit',
+      connectorId: 'connector-1',
+      processCode: 'seal_apply',
+      processName: '西安工程大学用印申请单',
+      payload: {
+        formData: {
+          field_3: ['党委公章'],
+        },
+      },
+      context: {
+        path: 'url',
+        action: 'submit',
+        authConfig: {
+          cookie: 'SESSION=abc123',
+        },
+        ticket: {
+          jumpUrl: 'https://oa.example.com/form/seal/new',
+        },
+        runtime: {
+          preflight: {
+            steps: [
+              {
+                type: 'evaluate',
+                builtin: 'capture_form_submit',
+                options: {
+                  fieldMappings: [
+                    {
+                      fieldKey: 'field_3',
+                      fieldType: 'select',
+                      target: { label: '用印类型' },
+                      options: [
+                        { label: '党委公章', value: '党委公章' },
+                        { label: '学校公章', value: '学校公章' },
+                      ],
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          networkSubmit: {
+            url: '{{preflight.submitCapture.action}}',
+            method: '{{preflight.submitCapture.method}}',
+            bodyMode: '{{preflight.submitCapture.bodyMode}}',
+            successMode: 'http2xx',
+            completionKind: 'draft',
+            body: { source: 'preflight.submitCapture.fields' },
+          },
+        },
+        navigation: {},
+        rpaFlow: {
+          processCode: 'seal_apply',
+          processName: '西安工程大学用印申请单',
+          rpaDefinition: {
+            processCode: 'seal_apply',
+            processName: '西安工程大学用印申请单',
+            fields: [
+              {
+                key: 'field_3',
+                label: '用印类型',
+                type: 'select',
+                required: true,
+                multiple: true,
+                options: [
+                  { label: '党委公章', value: '党委公章' },
+                  { label: '学校公章', value: '学校公章' },
+                ],
+              },
+            ],
+          },
+        },
+      } as any,
+    });
+
+    const data = String(request.mock.calls[0][0].data);
+    const decoded = decodeURIComponent(data.replace(/\+/g, '%20'));
+    expect(decoded).toContain('"field0053":"1"');
+    expect(decoded).toContain('"field0054":""');
+  });
+
+  it('keeps the original field label when resolved checkbox bindings carry per-option labels', async () => {
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      data: {
+        success: true,
+      },
+    });
+    mockedAxios.create.mockReturnValue({
+      request,
+    } as any);
+
+    const service = new UrlNetworkSubmitService({
+      run: jest.fn().mockResolvedValue({
+        success: true,
+        extractedValues: {
+          submitCapture: {
+            action: 'https://oa.example.com/form/seal/saveDraft',
+            method: 'post',
+            bodyMode: 'form',
+            fields: {
+              _json_params: JSON.stringify({
+                workflow_definition: {},
+                colMainData: {
+                  field0053: '',
+                  field0054: '',
+                },
+              }),
+            },
+          },
+          filledFields: {
+            field_3: true,
+          },
+          resolvedFieldBindings: [
+            {
+              key: 'field_3',
+              label: '法人身份证复印件',
+              type: 'checkbox',
+              multiple: true,
+            },
+          ],
+          resolvedFieldMappings: [
+            {
+              fieldKey: 'field_3',
+              fieldType: 'checkbox',
+              target: {
+                id: 'field0053_id',
+                label: '党委公章',
+                selector: '#field0053_id',
+              },
+              options: [{ label: '党委公章', value: '党委公章' }],
+            },
+            {
+              fieldKey: 'field_3',
+              fieldType: 'checkbox',
+              target: {
+                id: 'field0054_id',
+                label: '学校公章',
+                selector: '#field0054_id',
+              },
+              options: [{ label: '学校公章', value: '学校公章' }],
+            },
+          ],
+        },
+      }),
+    } as any);
+
+    await service.execute({
+      action: 'submit',
+      connectorId: 'connector-1',
+      processCode: 'seal_apply',
+      processName: '西安工程大学用印申请单',
+      payload: {
+        formData: {
+          field_3: ['党委公章'],
+        },
+      },
+      context: {
+        path: 'url',
+        action: 'submit',
+        authConfig: {
+          cookie: 'SESSION=abc123',
+        },
+        ticket: {
+          jumpUrl: 'https://oa.example.com/form/seal/new',
+        },
+        runtime: {
+          preflight: {
+            steps: [
+              {
+                type: 'evaluate',
+                builtin: 'capture_form_submit',
+                options: {
+                  fieldMappings: [
+                    {
+                      fieldKey: 'field_3',
+                      fieldType: 'checkbox',
+                      target: { label: '用印类型' },
+                      options: [
+                        { label: '党委公章', value: '党委公章' },
+                        { label: '学校公章', value: '学校公章' },
+                      ],
+                    },
+                  ],
+                },
+              },
+            ],
+          },
+          networkSubmit: {
+            url: '{{preflight.submitCapture.action}}',
+            method: '{{preflight.submitCapture.method}}',
+            bodyMode: '{{preflight.submitCapture.bodyMode}}',
+            successMode: 'http2xx',
+            completionKind: 'draft',
+            body: { source: 'preflight.submitCapture.fields' },
+          },
+        },
+        navigation: {},
+        rpaFlow: {
+          processCode: 'seal_apply',
+          processName: '西安工程大学用印申请单',
+          rpaDefinition: {
+            processCode: 'seal_apply',
+            processName: '西安工程大学用印申请单',
+            fields: [
+              {
+                key: 'field_3',
+                label: '用印类型',
+                type: 'checkbox',
+                required: true,
+                multiple: true,
+                options: [
+                  { label: '党委公章', value: '党委公章' },
+                  { label: '学校公章', value: '学校公章' },
+                ],
+              },
+            ],
+          },
+        },
+      } as any,
+    });
+
+    expect(request).toHaveBeenCalled();
+  });
+
   it('fails fast when a required URL field is neither DOM-bound nor request-patched', async () => {
     const request = jest.fn().mockResolvedValue({
       status: 200,
@@ -1116,7 +1610,7 @@ describe('UrlNetworkSubmitService', () => {
     expect(request).not.toHaveBeenCalled();
   });
 
-  it('fails fast when a required checkbox field is DOM-clicked but still missing from the request payload', async () => {
+  it('accepts required checkbox fields from DOM binding when the captured request exposes no observable patch path', async () => {
     const request = jest.fn().mockResolvedValue({
       status: 200,
       data: {
@@ -1152,7 +1646,7 @@ describe('UrlNetworkSubmitService', () => {
       }),
     } as any);
 
-    await expect(service.execute({
+    const result = await service.execute({
       action: 'submit',
       connectorId: 'connector-1',
       processCode: 'seal_apply',
@@ -1221,9 +1715,109 @@ describe('UrlNetworkSubmitService', () => {
           },
         },
       } as any,
-    })).rejects.toThrow('URL runtime failed to bind required fields: 用印类型');
+    });
 
-    expect(request).not.toHaveBeenCalled();
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(result.submitResult).toMatchObject({
+      success: true,
+    });
+  });
+
+  it('accepts required file fields when preflight confirms DOM binding even without a requestFieldName', async () => {
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      data: {
+        ok: true,
+      },
+    });
+    mockedAxios.create.mockReturnValue({
+      request,
+    } as any);
+
+    const service = new UrlNetworkSubmitService({
+      run: jest.fn().mockResolvedValue({
+        success: true,
+        extractedValues: {
+          submitCapture: {
+            action: 'https://oa.example.com/form/seal/saveDraft',
+            method: 'post',
+            bodyMode: 'form',
+            fields: {
+              _json_params: '{"demo":true}',
+            },
+          },
+          filledFields: {
+            sealAttachment: true,
+            '用印附件': true,
+          },
+        },
+      }),
+    } as any);
+
+    await service.execute({
+      action: 'submit',
+      connectorId: 'connector-1',
+      processCode: 'seal_apply',
+      processName: '西安工程大学用印申请单',
+      payload: {
+        formData: {},
+        attachments: [
+          {
+            fieldKey: 'sealAttachment',
+            filename: 'seal.pdf',
+            mimeType: 'application/pdf',
+            content: Buffer.from('seal-file-content').toString('base64'),
+          },
+        ],
+      },
+      context: {
+        path: 'url',
+        action: 'submit',
+        authConfig: {
+          cookie: 'SESSION=abc123',
+        },
+        ticket: {
+          jumpUrl: 'https://oa.example.com/form/seal/new',
+        },
+        runtime: {
+          preflight: {
+            steps: [
+              { type: 'evaluate', builtin: 'capture_form_submit' },
+            ],
+          },
+          networkSubmit: {
+            url: '{{preflight.submitCapture.action}}',
+            method: '{{preflight.submitCapture.method}}',
+            bodyMode: '{{preflight.submitCapture.bodyMode}}',
+            successMode: 'http2xx',
+            completionKind: 'draft',
+            body: { source: 'preflight.submitCapture.fields' },
+          },
+        },
+        navigation: {},
+        rpaFlow: {
+          processCode: 'seal_apply',
+          processName: '西安工程大学用印申请单',
+          rpaDefinition: {
+            processCode: 'seal_apply',
+            processName: '西安工程大学用印申请单',
+            fields: [
+              {
+                key: 'sealAttachment',
+                label: '用印附件',
+                type: 'file',
+                required: true,
+              },
+            ],
+          },
+        },
+      } as any,
+    });
+
+    expect(request).toHaveBeenCalledWith(expect.objectContaining({
+      method: 'POST',
+      url: 'https://oa.example.com/form/seal/saveDraft',
+    }));
   });
 
   it('supports multipart submit by merging captured fields with uploaded attachments', async () => {

@@ -20,7 +20,7 @@ const TextGuidePlatformConfigSchema = z.object({
 const TextGuideFieldSchema = z.object({
   label: z.string().trim().min(1),
   fieldKey: z.string().trim().min(1).optional(),
-  type: z.enum(['text', 'number', 'date', 'select', 'file', 'textarea']).optional(),
+  type: z.enum(['text', 'number', 'date', 'select', 'file', 'textarea', 'checkbox', 'radio']).optional(),
   required: z.boolean().optional(),
   description: z.string().trim().min(1).optional(),
   example: z.string().trim().min(1).optional(),
@@ -94,7 +94,7 @@ const TEXT_GUIDE_PARSE_TOOL: LLMToolDef = {
                     fieldKey: { type: 'string' },
                     type: {
                       type: 'string',
-                      enum: ['text', 'number', 'date', 'select', 'file', 'textarea'],
+                      enum: ['text', 'number', 'date', 'select', 'file', 'textarea', 'checkbox', 'radio'],
                     },
                     required: { type: 'boolean' },
                     description: { type: 'string' },

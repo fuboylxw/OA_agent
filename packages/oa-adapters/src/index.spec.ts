@@ -157,7 +157,7 @@ describe('OA Adapters', () => {
         oaType: 'hybrid',
         baseUrl: 'http://oa.example.com/services/WorkflowService',
         authType: 'basic',
-        authConfig: { username: 'admin', password: 'pass' },
+        authConfig: { username: 'admin', password: 'pass', wsdlUrl: 'http://oa.example.com/services/WorkflowService?wsdl' },
       });
       expect(adapter).toBeInstanceOf(SoapXmlAdapter);
     });
@@ -263,6 +263,7 @@ describe('OA Adapters', () => {
         oaType: 'hybrid',
         baseUrl: 'http://oa.example.com/services/WorkflowService',
         authType: 'basic',
+        authConfig: { wsdlUrl: 'http://oa.example.com/services/WorkflowService?wsdl' },
       });
       expect(soapMatch?.id).toBe('soap-xml');
 

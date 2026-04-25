@@ -19,6 +19,6 @@ import { TextGuideLlmParserService } from './text-guide-llm-parser.service';
     TextGuideLlmParserService,
     WorkerAvailabilityService,
   ],
-  exports: [BootstrapService, WorkerAvailabilityService],
+  exports: [BootstrapService, WorkerAvailabilityService, TextGuideLlmParserService],
 })
 export class BootstrapModule {}

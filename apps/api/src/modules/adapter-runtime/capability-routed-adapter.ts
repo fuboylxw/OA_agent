@@ -53,7 +53,7 @@ export class CapabilityRoutedAdapter implements OAAdapter {
       return this.apiAdapter.submit(request);
     }
 
-    if (this.rpaAdapter && submitModes.includes('rpa')) {
+    if (this.rpaAdapter && submitModes.includes('vision')) {
       return this.rpaAdapter.submit(request);
     }
 
@@ -70,7 +70,7 @@ export class CapabilityRoutedAdapter implements OAAdapter {
 
   async queryStatus(submissionId: string): Promise<StatusResult> {
     const hasApiStatus = this.rpaFlows.some((flow) => flow.executionModes.queryStatus.includes('api'));
-    const hasRpaStatus = this.rpaFlows.some((flow) => flow.executionModes.queryStatus.includes('rpa'));
+    const hasRpaStatus = this.rpaFlows.some((flow) => flow.executionModes.queryStatus.includes('vision'));
 
     if (this.apiAdapter && hasApiStatus) {
       return this.apiAdapter.queryStatus(submissionId);

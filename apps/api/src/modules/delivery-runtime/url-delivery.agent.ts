@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import {
+  getProcessRuntimeDefinition,
+  getProcessRuntimePaths,
   type DeliveryPath,
   URL_DELIVERY_PATH,
   VISION_DELIVERY_PATH,
@@ -142,15 +144,14 @@ export class UrlDeliveryAgent implements DeliveryAgent {
     uiHints: Record<string, any>,
     action: 'submit' | 'queryStatus',
   ) {
-    const executionModes = (uiHints.executionModes as Record<string, any> | undefined) || {};
-    const explicitUrl = Array.isArray(executionModes[action])
-      && executionModes[action].some((item) => String(item || '').trim().toLowerCase() === 'url');
-    const runtime = definition?.runtime as Record<string, any> | undefined;
+    const runtimeDefinition = (getProcessRuntimeDefinition(uiHints) as Record<string, any> | undefined) || definition;
+    const explicitUrl = getProcessRuntimePaths(uiHints, action).includes('url');
+    const runtime = runtimeDefinition?.runtime as Record<string, any> | undefined;
     const networkRequest = action === 'submit'
       ? this.hasNetworkRequest(runtime?.networkSubmit)
       : this.hasNetworkRequest(runtime?.networkStatus);
 
-    return explicitUrl || (this.isDirectLinkDefinition(definition) && networkRequest);
+    return explicitUrl || (this.isDirectLinkDefinition(runtimeDefinition) && networkRequest);
   }
 
   private isDirectLinkDefinition(definition: Record<string, any> | undefined) {

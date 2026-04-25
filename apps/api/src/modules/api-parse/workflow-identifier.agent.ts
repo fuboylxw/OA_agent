@@ -9,32 +9,11 @@ import {
   EndpointRole,
 } from './types';
 
-const EXCLUDE_PATTERNS = [
-  /\/auth\//i,
-  /\/login$/i,
-  /\/logout$/i,
-  /\/token$/i,
-  /\/refresh-token/i,
-  /\/admin\//i,
-  /\/system\//i,
-  /\/config\//i,
-  /\/settings\//i,
-  /\/health$/i,
-  /\/ping$/i,
-  /\/metrics/i,
-  /\/swagger/i,
-  /\/api-docs/i,
-  /\/openapi/i,
-  /\/favicon/i,
-  /\/static\//i,
-  /\/assets\//i,
-];
-
 const SYSTEM_PROMPT = `你是一个 OA 系统 API 分析专家。你的任务是从 API 端点列表中识别出面向普通用户的"办事流程"接口，并识别系统级辅助接口。
 
 ## 办事流程接口特征
-- 用户可以发起的业务操作（请假、报销、发起审批、考勤打卡、预约会议、采购申请、出差申请等）
-- 用户可以查询的业务状态（我的待办、我的已办、考勤记录、申请状态等）
+- 用户可以发起的业务操作（发起某类申请、提交表单、办理事项等）
+- 用户可以查询的业务状态（我的待办、我的已办、办理记录、申请状态等）
 - 用户可以执行的业务动作（审批通过、撤回申请、催办等）
 
 ## 特别注意：通用申请接口
@@ -65,14 +44,14 @@ const SYSTEM_PROMPT = `你是一个 OA 系统 API 分析专家。你的任务是
 {
   "workflows": [
     {
-      "processCode": "leave_request",
-      "processName": "请假申请",
-      "category": "人事",
-      "description": "员工请假申请流程",
+      "processCode": "process_alpha",
+      "processName": "流程A",
+      "category": "通用",
+      "description": "用户办理某类事项的流程",
       "confidence": 0.95,
       "endpoints": [
-        { "role": "submit", "path": "/api/leave/submit", "method": "POST" },
-        { "role": "query", "path": "/api/leave/{id}", "method": "GET" }
+        { "role": "submit", "path": "/api/process-alpha/submit", "method": "POST" },
+        { "role": "query", "path": "/api/process-alpha/{id}", "method": "GET" }
       ]
     }
   ],
@@ -117,25 +96,19 @@ export class WorkflowIdentifierAgent {
    * 从标准化端点列表中识别业务流程和同步能力
    */
   async identify(endpoints: NormalizedEndpoint[]): Promise<IdentifyResult> {
-    // 1. 规则预过滤
-    const { candidates, filteredCount } = this.ruleBasedFilter(endpoints);
-    this.logger.log(
-      `Rule filter: ${endpoints.length} → ${candidates.length} candidates (${filteredCount} filtered)`,
-    );
-
-    if (candidates.length === 0) {
+    if (endpoints.length === 0) {
       return {
         workflows: [],
         syncCapabilities: { singleQueryEndpoints: [] },
-        filteredCount,
+        filteredCount: 0,
       };
     }
 
-    // 2. 分批 LLM 识别
+    // 1. 分批 LLM 识别
     const batchSize = 50;
     const batches: NormalizedEndpoint[][] = [];
-    for (let i = 0; i < candidates.length; i += batchSize) {
-      batches.push(candidates.slice(i, i + batchSize));
+    for (let i = 0; i < endpoints.length; i += batchSize) {
+      batches.push(endpoints.slice(i, i + batchSize));
     }
 
     const allWorkflows: IdentifiedWorkflow[] = [];
@@ -143,7 +116,7 @@ export class WorkflowIdentifierAgent {
 
     for (let i = 0; i < batches.length; i++) {
       this.logger.log(`Analyzing batch ${i + 1}/${batches.length} (${batches[i].length} endpoints)`);
-      const result = await this.identifyBatch(batches[i], candidates);
+      const result = await this.identifyBatch(batches[i], endpoints);
       allWorkflows.push(...result.workflows);
       // 合并 sync capabilities
       if (result.syncCapabilities.webhookEndpoint) {
@@ -164,27 +137,7 @@ export class WorkflowIdentifierAgent {
     return {
       workflows: deduped,
       syncCapabilities,
-      filteredCount,
-    };
-  }
-
-  /**
-   * 规则预过滤：排除明显的非业务端点
-   */
-  private ruleBasedFilter(endpoints: NormalizedEndpoint[]): {
-    candidates: NormalizedEndpoint[];
-    filteredCount: number;
-  } {
-    const candidates = endpoints.filter(ep => {
-      for (const pattern of EXCLUDE_PATTERNS) {
-        if (pattern.test(ep.path)) return false;
-      }
-      return true;
-    });
-
-    return {
-      candidates,
-      filteredCount: endpoints.length - candidates.length,
+      filteredCount: 0,
     };
   }
 

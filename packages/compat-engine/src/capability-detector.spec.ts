@@ -6,26 +6,22 @@ describe('Capability Detector', () => {
       paths: {
         '/auth/login': {
           post: {
-            tags: ['auth'],
-            summary: 'Login',
+            category: 'auth',
           },
         },
         '/flows': {
           get: {
-            tags: ['flows'],
-            summary: 'List flows',
+            category: 'list_flows',
           },
         },
         '/flows/{flowCode}/submit': {
           post: {
-            tags: ['flows'],
-            summary: 'Submit flow',
+            category: 'submit',
           },
         },
         '/flows/{flowCode}/status/{id}': {
           get: {
-            tags: ['flows'],
-            summary: 'Query status',
+            category: 'query_status',
           },
         },
       },
@@ -44,7 +40,7 @@ describe('Capability Detector', () => {
     expect(result.detectedEndpoints.length).toBeGreaterThan(0);
   });
 
-  it('should detect capabilities from HAR entries', () => {
+  it('should not infer endpoint purpose from HAR URL text', () => {
     const mockHar: HarEntry[] = [
       {
         url: 'http://example.com/api/auth/token',
@@ -72,8 +68,9 @@ describe('Capability Detector', () => {
 
     expect(result.hasApi).toBe(true);
     expect(result.hasAuth).toBe(true);
-    expect(result.canReadFlows).toBe(true);
-    expect(result.canSubmit).toBe(true);
+    expect(result.canReadFlows).toBe(false);
+    expect(result.canSubmit).toBe(false);
+    expect(result.detectedEndpoints).toHaveLength(0);
   });
 
   it('should detect form-based capabilities', () => {
@@ -85,6 +82,7 @@ describe('Capability Detector', () => {
           {
             action: '/forms/submit',
             method: 'POST',
+            purpose: 'submit',
             fields: [
               { name: 'title', type: 'text', required: true },
               { name: 'amount', type: 'number', required: true },

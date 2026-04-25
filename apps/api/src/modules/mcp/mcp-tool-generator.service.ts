@@ -68,9 +68,9 @@ export class MCPToolGeneratorService {
     baseUrl: string,
     authConfig: any,
   ) {
-    const action = workflowApi.method.toLowerCase() === 'get' ? 'query' : 'submit';
+    const category = this.resolveWorkflowCategory(workflowApi);
+    const action = category === 'query' ? 'query' : category === 'submit' ? 'submit' : this.defaultActionForMethod(workflowApi.method);
     const toolName = `${workflowApi.workflowType}_${action}`;
-    const category = this.categorizeEndpoint(workflowApi.method, workflowApi.path);
 
     // Merge parameters + requestBody properties into a single param list
     const allParams = [...(workflowApi.parameters || [])];
@@ -161,17 +161,7 @@ export class MCPToolGeneratorService {
   // ── Shared helpers ──────────────────────────────────────────
 
   private categorizeEndpoint(method: string, path: string): string {
-    const m = method.toUpperCase();
-    const p = path.toLowerCase();
-
-    if (p.includes('/submit') || (m === 'POST' && p.includes('/work'))) return 'submit';
-    if (p.includes('/status') || p.includes('/query') || p.includes('/worklog')) return 'query';
-    if (p.includes('/cancel') || m === 'DELETE') return 'cancel';
-    if (p.includes('/urge')) return 'urge';
-    if (p.includes('/list') || p.includes('/search')) return 'list';
-    if (m === 'GET' && p.match(/\/\{[^}]+\}$/)) return 'get';
-    if (m === 'GET') return 'list';
-    return 'other';
+    return this.defaultCategoryForMethod(method);
   }
 
   private generateToolName(path: string, method: string): string {
@@ -181,16 +171,7 @@ export class MCPToolGeneratorService {
   }
 
   private extractAction(path: string, method: string): string {
-    if (path.includes('/submit')) return 'submit';
-    if (path.includes('/query') || path.includes('/status')) return 'query';
-    if (path.includes('/cancel')) return 'cancel';
-    if (path.includes('/urge')) return 'urge';
-    if (path.includes('/list')) return 'list';
-
-    const methodActions: Record<string, string> = {
-      GET: 'get', POST: 'create', PUT: 'update', PATCH: 'update', DELETE: 'delete',
-    };
-    return methodActions[method.toUpperCase()] || 'call';
+    return this.defaultActionForMethod(method);
   }
 
   private extractResource(path: string): string {
@@ -201,6 +182,42 @@ export class MCPToolGeneratorService {
   private extractFlowCode(path: string): string | null {
     const match = path.match(/\/process\/([^\/]+)/);
     return match ? match[1] : null;
+  }
+
+  private resolveWorkflowCategory(workflowApi: any): string {
+    const explicitCategory = String(
+      workflowApi.category
+      || workflowApi.workflowAction
+      || workflowApi.action
+      || '',
+    ).trim().toLowerCase();
+    if (explicitCategory) {
+      return explicitCategory;
+    }
+    return this.defaultCategoryForMethod(workflowApi.method);
+  }
+
+  private defaultCategoryForMethod(method: string): string {
+    const normalized = String(method || '').trim().toUpperCase();
+    if (normalized === 'GET') {
+      return 'query';
+    }
+    if (normalized === 'DELETE') {
+      return 'cancel';
+    }
+    return 'submit';
+  }
+
+  private defaultActionForMethod(method: string): string {
+    const normalized = String(method || '').trim().toUpperCase();
+    const methodActions: Record<string, string> = {
+      GET: 'query',
+      POST: 'submit',
+      PUT: 'submit',
+      PATCH: 'submit',
+      DELETE: 'cancel',
+    };
+    return methodActions[normalized] || 'call';
   }
 
   private buildToolSchema(params: Array<{ name: string; type: string; required: boolean; description?: string }>): any {

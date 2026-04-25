@@ -11,7 +11,7 @@ import {
 import type { StatusResult, SubmitResult } from '@uniflow/oa-adapters';
 import type { DeliveryStatusExecutionResult, DeliverySubmitExecutionResult } from './delivery-agent.types';
 import type { VisionDeliveryExecutionContext } from './delivery-bootstrap.types';
-import { confirmRpaSubmit } from './rpa-submit-confirmation.util';
+import { confirmRpaSubmitIntelligently } from './rpa-submit-confirmation.util';
 import { VisionTaskRuntime } from './vision-task-runtime';
 
 interface BaseVisionExecutionInput {
@@ -64,7 +64,7 @@ export class VisionDeliveryService {
     });
 
     const confirmation = result.success
-      ? confirmRpaSubmit({
+      ? await confirmRpaSubmitIntelligently({
           actionDefinition,
           extractedValues: result.extractedValues,
           finalSnapshot: result.finalSnapshot,
@@ -314,17 +314,6 @@ export class VisionDeliveryService {
     const explicit = extractedValues.status || extractedValues.statusText || extractedValues.currentStatus;
     if (explicit) {
       return String(explicit);
-    }
-
-    const value = String(submissionId || '').toLowerCase();
-    if (value.includes('reject') || value.includes('fail')) {
-      return 'rejected';
-    }
-    if (value.includes('approve') || value.includes('done')) {
-      return 'approved';
-    }
-    if (value.includes('process') || value.includes('pending')) {
-      return 'processing';
     }
     return 'submitted';
   }

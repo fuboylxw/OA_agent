@@ -1,5 +1,6 @@
 import * as path from 'path';
 import type { BrowserSnapshotElement, RpaTargetDefinition } from '@uniflow/shared-types';
+import { BrowserUploadLocatorInferenceEngine } from '@uniflow/compat-engine';
 import type {
   BrowserPageCapture,
   BrowserSessionRecord,
@@ -22,6 +23,17 @@ interface PlaywrightLocatorScope {
 interface UploadLocatorMatch {
   locator: any;
   requestFieldName?: string;
+}
+
+interface UploadLocatorCandidateMatch extends UploadLocatorMatch {
+  candidateId: string;
+  scopeDescription: string;
+  scopeUrl?: string;
+  inputName?: string;
+  inputId?: string;
+  directMeta?: string;
+  nearbyText?: string;
+  fileInputCountInScope?: number;
 }
 
 const CAPTURE_PAGE_SCRIPT = String.raw`
@@ -237,6 +249,7 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
   readonly provider = 'playwright';
   private readonly sessions = new Map<string, PlaywrightSessionState>();
   private readonly pngTemplateMatcher = new PngImageTemplateMatcher();
+  private readonly uploadLocatorInference = new BrowserUploadLocatorInferenceEngine();
 
   async initialize(session: BrowserSessionRecord, tab: BrowserTabRecord) {
     const state = await this.ensureSession(session);
@@ -259,9 +272,34 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
 
   async capturePage(session: BrowserSessionRecord, _tab: BrowserTabRecord): Promise<BrowserPageCapture | undefined> {
     const state = await this.ensureSession(session);
-    const capture = await state.page.evaluate(CAPTURE_PAGE_SCRIPT);
+    const pageCapture = await this.captureScope(state.page);
+    const mainFrame = typeof state.page.mainFrame === 'function'
+      ? state.page.mainFrame()
+      : undefined;
+    const frameCaptures: Array<{ regionId: string; url: string; capture: BrowserPageCapture }> = [];
 
-    return capture as BrowserPageCapture;
+    if (typeof state.page.frames === 'function') {
+      let frameIndex = 0;
+      for (const frame of state.page.frames()) {
+        if (!frame || frame === mainFrame) {
+          continue;
+        }
+
+        const capture = await this.captureScope(frame).catch(() => undefined);
+        if (!capture) {
+          continue;
+        }
+
+        frameIndex += 1;
+        frameCaptures.push({
+          regionId: `frame-${frameIndex}`,
+          url: typeof frame.url === 'function' ? frame.url() : '',
+          capture,
+        });
+      }
+    }
+
+    return this.mergeCapturedScopes(pageCapture, frameCaptures);
   }
 
   async stabilize(session: BrowserSessionRecord, tab: BrowserTabRecord, timeoutMs?: number) {
@@ -609,16 +647,7 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
       return exactMatch;
     }
 
-    return options.find((option) =>
-      [option.value, option.label, option.text].some((candidate) => {
-        const normalizedCandidate = this.normalizeSelectOptionValue(candidate);
-        return normalizedCandidate
-          && (
-            normalizedCandidate.includes(normalizedDesired)
-            || normalizedDesired.includes(normalizedCandidate)
-          );
-      }),
-    ) || null;
+    return null;
   }
 
   private normalizeSelectOptionValue(value: string | undefined | null) {
@@ -681,39 +710,88 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
     }
 
     const state = await this.ensureSession(session);
+    const scopes = this.rankLocatorScopes(this.getLocatorScopes(state), element);
     const prefersTextLocator = element.targetHints?.some((hint) => hint.kind === 'text') && element.text;
     if (element.selector) {
-      return state.page.locator(element.selector).first();
+      const matched = await this.findFirstScopedLocator(
+        scopes,
+        (scope) => scope.locator(element.selector!).first(),
+      );
+      if (matched) {
+        return matched;
+      }
     }
 
     if (element.role === 'upload' && element.label) {
-      return state.page.getByLabel(element.label).first();
+      const matched = await this.findFirstScopedLocator(
+        scopes,
+        (scope) => scope.getByLabel(element.label!).first(),
+      );
+      if (matched) {
+        return matched;
+      }
     }
 
     if (prefersTextLocator) {
-      return state.page.getByText(element.text, { exact: false }).first();
+      const matched = await this.findFirstScopedLocator(
+        scopes,
+        (scope) => scope.getByText(element.text!, { exact: false }).first(),
+      );
+      if (matched) {
+        return matched;
+      }
     }
 
     if (element.fieldKey) {
-      return state.page.locator(this.buildVisibleFieldKeySelector(element.fieldKey)).first();
+      const matched = await this.findFirstScopedLocator(
+        scopes,
+        (scope) => scope.locator(this.buildVisibleFieldKeySelector(element.fieldKey!)).first(),
+      );
+      if (matched) {
+        return matched;
+      }
     }
 
     if (element.label) {
-      return state.page.getByLabel(element.label).first();
+      const matched = await this.findFirstScopedLocator(
+        scopes,
+        (scope) => scope.getByLabel(element.label!).first(),
+      );
+      if (matched) {
+        return matched;
+      }
     }
 
     if (element.text) {
-      return state.page.getByText(element.text, { exact: false }).first();
+      const matched = await this.findFirstScopedLocator(
+        scopes,
+        (scope) => scope.getByText(element.text!, { exact: false }).first(),
+      );
+      if (matched) {
+        return matched;
+      }
     }
 
     const imageHint = element.targetHints?.find((hint) => hint.kind === 'image');
     if (imageHint?.imageUrl) {
       const srcSelector = `img[src*="${this.escapeCssValue(imageHint.imageUrl)}"]`;
-      return state.page.locator(srcSelector).locator('xpath=..').first();
+      const matched = await this.findFirstScopedLocator(
+        scopes,
+        (scope) => scope.locator(srcSelector).locator('xpath=..').first(),
+      );
+      if (matched) {
+        return matched;
+      }
     }
 
     if (imageHint?.label) {
-      return state.page.getByAltText(imageHint.label).locator('xpath=..').first();
+      const matched = await this.findFirstScopedLocator(
+        scopes,
+        (scope) => scope.getByAltText(imageHint.label!).locator('xpath=..').first(),
+      );
+      if (matched) {
+        return matched;
+      }
     }
 
     throw new Error(`Unable to build locator for browser element ${element.ref}`);
@@ -743,7 +821,11 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
       }
 
       const state = await this.ensureSession(session);
-      await state.page.waitForTimeout(500).catch(() => undefined);
+      if (typeof state.page.waitForTimeout === 'function') {
+        await state.page.waitForTimeout(500).catch(() => undefined);
+      } else {
+        await new Promise((resolve) => setTimeout(resolve, 500));
+      }
     }
 
     if (lastError) {
@@ -785,10 +867,6 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
     }
 
     for (const label of labels) {
-      const capLabelMatch = await this.findCapAttachmentLocator(scopes, label);
-      if (capLabelMatch) {
-        return capLabelMatch;
-      }
       const labelMatch = await this.findFirstMatchingLocator(
         scopes,
         (scope) => scope.getByLabel(label).first(),
@@ -815,11 +893,9 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
       }
     }
 
-    for (const label of labels) {
-      const heuristicMatch = await this.findHeuristicUploadLocator(scopes, label);
-      if (heuristicMatch) {
-        return heuristicMatch;
-      }
+    const inferredMatch = await this.findInferredUploadLocator(scopes, element, labels);
+    if (inferredMatch) {
+      return inferredMatch;
     }
 
     const uniqueFileInput = await this.findUniqueFileInputLocator(scopes);
@@ -865,69 +941,6 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
     return null;
   }
 
-  private async findCapAttachmentLocator(
-    scopes: PlaywrightLocatorScope[],
-    hint: string,
-  ): Promise<UploadLocatorMatch | null> {
-    const normalizedHint = this.normalizeLocatorText(hint);
-    if (!normalizedHint) {
-      return null;
-    }
-
-    for (const entry of scopes) {
-      if (typeof entry.scope?.evaluate !== 'function') {
-        continue;
-      }
-
-      const candidate = await entry.scope.evaluate(({ hintText }) => {
-        const normalize = (value: string | null | undefined) => String(value || '')
-          .replace(/\s+/g, ' ')
-          .trim();
-        const fields = Array.from(document.querySelectorAll('.cap-field, .cap4-attach'));
-        for (const field of fields) {
-          const text = normalize(field.textContent);
-          if (!text || !text.includes(hintText)) {
-            continue;
-          }
-          const input = field.querySelector('input[type="file"]') as HTMLInputElement | null;
-          return {
-            fieldId: normalize((field as HTMLElement).id || ''),
-            inputId: normalize(input?.id || ''),
-            inputName: normalize(input?.name || ''),
-          };
-        }
-        return null;
-      }, {
-        hintText: normalizedHint,
-      }).catch(() => null);
-
-      if (!candidate) {
-        continue;
-      }
-
-      const selectors = [
-        candidate.inputId ? `input[type="file"]#${this.escapeCssValue(candidate.inputId)}` : '',
-        candidate.inputName ? `input[type="file"][name="${this.escapeCssValue(candidate.inputName)}"]` : '',
-        candidate.fieldId ? `#${this.escapeCssValue(candidate.fieldId)} input[type="file"]` : '',
-      ].filter(Boolean);
-
-      for (const selector of selectors) {
-        const count = await entry.scope.locator(selector).count().catch(() => 0);
-        if (!count) {
-          continue;
-        }
-
-        const locator = entry.scope.locator(selector).first();
-        return {
-          locator,
-          requestFieldName: await this.readLocatorRequestFieldName(locator),
-        };
-      }
-    }
-
-    return null;
-  }
-
   private getLocatorScopes(state: PlaywrightSessionState): PlaywrightLocatorScope[] {
     const scopes: PlaywrightLocatorScope[] = [{
       scope: state.page,
@@ -950,6 +963,137 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
     }
 
     return scopes;
+  }
+
+  private async captureScope(scope: any): Promise<BrowserPageCapture | undefined> {
+    if (typeof scope?.evaluate !== 'function') {
+      return undefined;
+    }
+
+    const capture = await scope.evaluate(CAPTURE_PAGE_SCRIPT).catch(() => undefined);
+    return capture as BrowserPageCapture | undefined;
+  }
+
+  private mergeCapturedScopes(
+    pageCapture: BrowserPageCapture | undefined,
+    frameCaptures: Array<{ regionId: string; url: string; capture: BrowserPageCapture }>,
+  ): BrowserPageCapture | undefined {
+    if (!pageCapture && frameCaptures.length === 0) {
+      return undefined;
+    }
+
+    const base: BrowserPageCapture = pageCapture
+      ? JSON.parse(JSON.stringify(pageCapture))
+      : {
+          title: '',
+          url: '',
+          regions: [],
+          forms: [],
+          tables: [],
+          dialogs: [],
+          importantTexts: [],
+          interactiveElements: [],
+        };
+
+    for (const frameEntry of frameCaptures) {
+      const frameUrl = String(frameEntry.url || '').trim();
+      base.regions = [
+        ...(base.regions || []),
+        {
+          id: frameEntry.regionId,
+          role: 'main',
+          name: `Frame ${frameEntry.regionId}`,
+          summary: frameUrl || 'iframe scope',
+          elementSelectors: frameEntry.capture.interactiveElements
+            .map((element) => element.selector)
+            .filter(Boolean) as string[],
+        },
+      ];
+      base.forms = [
+        ...(base.forms || []),
+        ...(frameEntry.capture.forms || []).map((form) => ({
+          ...form,
+          id: `${frameEntry.regionId}:${form.id}`,
+          name: `${form.name} [Frame]`,
+        })),
+      ];
+      base.tables = [
+        ...(base.tables || []),
+        ...(frameEntry.capture.tables || []).map((table) => ({
+          ...table,
+          id: `${frameEntry.regionId}:${table.id}`,
+        })),
+      ];
+      base.dialogs = [
+        ...(base.dialogs || []),
+        ...(frameEntry.capture.dialogs || []).map((dialog) => ({
+          ...dialog,
+          id: `${frameEntry.regionId}:${dialog.id}`,
+        })),
+      ];
+      base.importantTexts = Array.from(new Set([
+        ...(base.importantTexts || []),
+        ...(frameEntry.capture.importantTexts || []).map((text) => `[Frame] ${text}`),
+      ]));
+      base.interactiveElements = [
+        ...(base.interactiveElements || []),
+        ...(frameEntry.capture.interactiveElements || []).map((element) => ({
+          ...element,
+          regionId: frameEntry.regionId,
+          targetHints: [
+            ...(element.targetHints || []),
+            ...(frameUrl ? [{ kind: 'url', value: frameUrl, label: 'scope:frame' } as RpaTargetDefinition] : []),
+          ],
+        })),
+      ];
+    }
+
+    return base;
+  }
+
+  private rankLocatorScopes(
+    scopes: PlaywrightLocatorScope[],
+    element: BrowserSnapshotElement,
+  ) {
+    const preferredFrameUrl = this.extractFrameScopeUrl(element);
+    if (!preferredFrameUrl) {
+      return scopes;
+    }
+
+    const normalized = preferredFrameUrl.trim();
+    return [
+      ...scopes.filter((entry) => entry.description.includes(normalized)),
+      ...scopes.filter((entry) => !entry.description.includes(normalized)),
+    ];
+  }
+
+  private extractFrameScopeUrl(element: BrowserSnapshotElement) {
+    return element.targetHints?.find((hint) =>
+      hint.kind === 'url' && hint.label === 'scope:frame',
+    )?.value;
+  }
+
+  private async findFirstScopedLocator(
+    scopes: PlaywrightLocatorScope[],
+    buildLocator: (scope: any) => any,
+  ) {
+    for (const entry of scopes) {
+      const locator = buildLocator(entry.scope);
+      if (!locator) {
+        continue;
+      }
+
+      if (typeof locator.count === 'function') {
+        const count = await locator.count().catch(() => 0);
+        if (!count) {
+          continue;
+        }
+      }
+
+      return locator;
+    }
+
+    return null;
   }
 
   private collectUploadLocatorLabels(element: BrowserSnapshotElement) {
@@ -986,30 +1130,68 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
     return null;
   }
 
-  private async findHeuristicUploadLocator(
+  private async findInferredUploadLocator(
     scopes: PlaywrightLocatorScope[],
-    expectedLabel: string,
+    element: BrowserSnapshotElement,
+    labels: string[],
   ): Promise<UploadLocatorMatch | null> {
-    const normalizedExpected = this.normalizeLocatorText(expectedLabel);
-    if (!normalizedExpected) {
+    const candidates = await this.collectUploadLocatorCandidates(scopes);
+    if (candidates.length === 0) {
       return null;
     }
 
-    let bestMatch: { scope: any; index: number; requestFieldName?: string; score: number } | null = null;
+    const judgement = await this.uploadLocatorInference.infer({
+      element: {
+        ref: element.ref,
+        fieldKey: element.fieldKey,
+        label: element.label,
+        text: element.text,
+        targetHints: element.targetHints,
+      },
+      labels,
+      preferredFrameUrl: this.extractFrameScopeUrl(element),
+      candidates: candidates.map((candidate) => ({
+        candidateId: candidate.candidateId,
+        scopeDescription: candidate.scopeDescription,
+        scopeUrl: candidate.scopeUrl,
+        requestFieldName: candidate.requestFieldName,
+        inputName: candidate.inputName,
+        inputId: candidate.inputId,
+        directMeta: candidate.directMeta,
+        nearbyText: candidate.nearbyText,
+        fileInputCountInScope: candidate.fileInputCountInScope,
+      })),
+    });
 
-    for (const entry of scopes) {
+    if (!judgement.canResolve || !judgement.matchedCandidateId) {
+      return null;
+    }
+
+    const matched = candidates.find((candidate) => candidate.candidateId === judgement.matchedCandidateId);
+    return matched
+      ? {
+          locator: matched.locator,
+          requestFieldName: matched.requestFieldName,
+        }
+      : null;
+  }
+
+  private async collectUploadLocatorCandidates(
+    scopes: PlaywrightLocatorScope[],
+  ): Promise<UploadLocatorCandidateMatch[]> {
+    const collected: UploadLocatorCandidateMatch[] = [];
+
+    for (let scopeIndex = 0; scopeIndex < scopes.length; scopeIndex += 1) {
+      const entry = scopes[scopeIndex];
       if (typeof entry.scope?.evaluate !== 'function') {
         continue;
       }
-      const candidate = await entry.scope.evaluate(({ label }) => {
+
+      const candidates = await entry.scope.evaluate(() => {
         const normalize = (value: string | null | undefined) => String(value || '')
           .replace(/\s+/g, ' ')
           .trim();
-        const normalizedLabel = normalize(label);
-        const genericAttachmentHint = /附件|上传|file|attach|upload/i.test(normalizedLabel);
         const fileInputs = Array.from(document.querySelectorAll('input[type="file"]')) as HTMLInputElement[];
-        let best: { index: number; requestFieldName?: string; score: number } | null = null;
-
         const readNearbyText = (input: HTMLInputElement) => {
           const chunks = [
             input.closest('label')?.textContent,
@@ -1022,73 +1204,49 @@ export class PlaywrightBrowserEngineAdapter implements BrowserEngineAdapter {
           return normalize(chunks.filter(Boolean).join(' '));
         };
 
-        fileInputs.forEach((input, index) => {
-          const requestFieldName = normalize(input.name || input.id || '');
-          const directMeta = normalize([
+        return fileInputs.map((input, index) => ({
+          index,
+          requestFieldName: normalize(input.name || input.id || ''),
+          inputName: normalize(input.name || ''),
+          inputId: normalize(input.id || ''),
+          directMeta: normalize([
             input.name,
             input.id,
             input.title,
             input.getAttribute('aria-label'),
             input.getAttribute('placeholder'),
             input.className,
-          ].filter(Boolean).join(' '));
-          const nearbyText = readNearbyText(input);
-          let score = 0;
+          ].filter(Boolean).join(' ')),
+          nearbyText: readNearbyText(input),
+          fileInputCountInScope: fileInputs.length,
+        }));
+      }).catch(() => []);
 
-          if (directMeta.includes(normalizedLabel)) {
-            score += 8;
-          }
-          if (nearbyText.includes(normalizedLabel)) {
-            score += 6;
-          }
-          if (genericAttachmentHint) {
-            if (/附件|上传|file|attach|upload/i.test(directMeta)) {
-              score += 4;
-            }
-            if (/附件|上传|file|attach|upload/i.test(nearbyText)) {
-              score += 3;
-            }
-          }
-          if (fileInputs.length === 1) {
-            score += 2;
-          }
-
-          if (!best || score > best.score) {
-            best = {
-              index,
-              requestFieldName: requestFieldName || undefined,
-              score,
-            };
-          }
-        });
-
-        return best;
-      }, {
-        label: normalizedExpected,
-      }).catch(() => null);
-
-      if (!candidate || !Number.isFinite(candidate.index) || candidate.score <= 0) {
+      if (!Array.isArray(candidates)) {
         continue;
       }
 
-      if (!bestMatch || candidate.score > bestMatch.score) {
-        bestMatch = {
-          scope: entry.scope,
-          index: candidate.index,
-          requestFieldName: candidate.requestFieldName,
-          score: candidate.score,
-        };
+      for (const candidate of candidates) {
+        if (!Number.isFinite(candidate?.index)) {
+          continue;
+        }
+
+        collected.push({
+          candidateId: `scope-${scopeIndex}:${candidate.index}`,
+          locator: entry.scope.locator('input[type="file"]').nth(candidate.index),
+          requestFieldName: candidate.requestFieldName || undefined,
+          scopeDescription: entry.description,
+          scopeUrl: typeof entry.scope?.url === 'function' ? entry.scope.url() : undefined,
+          inputName: candidate.inputName || undefined,
+          inputId: candidate.inputId || undefined,
+          directMeta: candidate.directMeta || undefined,
+          nearbyText: candidate.nearbyText || undefined,
+          fileInputCountInScope: candidate.fileInputCountInScope,
+        });
       }
     }
 
-    if (!bestMatch) {
-      return null;
-    }
-
-    return {
-      locator: bestMatch.scope.locator('input[type="file"]').nth(bestMatch.index),
-      requestFieldName: bestMatch.requestFieldName,
-    };
+    return collected;
   }
 
   private async findUniqueFileInputLocator(

@@ -14,10 +14,10 @@ import { getClientSessionToken, hasClientSession } from '../lib/client-auth';
 import { withBrowserApiBase } from '../lib/browser-api-base-url';
 
 const QUICK_ACTIONS = [
-  { label: '报销差旅费', icon: 'fa-money-bill-wave', color: 'text-sky-700 bg-sky-100', message: '我要报销差旅费' },
-  { label: '请假申请', icon: 'fa-calendar-alt', color: 'text-emerald-700 bg-emerald-100', message: '我要请假三天' },
-  { label: '采购申请', icon: 'fa-shopping-cart', color: 'text-amber-700 bg-amber-100', message: '我要采购办公用品' },
-  { label: '查看进度', icon: 'fa-chart-bar', color: 'text-slate-700 bg-slate-100', message: '查看我的申请进度' },
+  { label: '发起申请', icon: 'fa-paper-plane', color: 'text-sky-700 bg-sky-100', message: '帮我发起一个流程申请' },
+  { label: '继续办理', icon: 'fa-pen-to-square', color: 'text-emerald-700 bg-emerald-100', message: '我想继续办理刚才那个流程' },
+  { label: '查询进度', icon: 'fa-chart-bar', color: 'text-slate-700 bg-slate-100', message: '查看我的申请进度' },
+  { label: '查看流程', icon: 'fa-list-check', color: 'text-amber-700 bg-amber-100', message: '当前可以办理哪些流程' },
 ];
 
 const CHAT_REQUEST_TIMEOUT_MS = 90000;
@@ -376,6 +376,8 @@ export default function ChatPage() {
   const router = useRouter();
   const searchParams = useSearchParams();
   const flowCode = searchParams.get('flow');
+  const requestedTemplateId = searchParams.get('templateId');
+  const requestedConnectorId = searchParams.get('connectorId');
   const requestedSessionId = searchParams.get('sessionId');
   const resumePromptRequested = searchParams.get('resumePrompt') === '1';
 
@@ -413,6 +415,11 @@ export default function ChatPage() {
   const currentSubtitle = sessionState?.activeProcessCard?.statusText
     || currentSession?.processStatusText
     || (messages.length > 0 ? '继续当前办理进度' : '开始新的办事对话');
+  const flowSelectionKey = [
+    flowCode || '',
+    requestedTemplateId || '',
+    requestedConnectorId || '',
+  ].join('::');
 
   const isNearBottom = useCallback(() => {
     const container = messagesContainerRef.current;
@@ -559,7 +566,14 @@ export default function ChatPage() {
 
   const sendMessage = useCallback(async (
     text?: string,
-    options?: { displayText?: string; silent?: boolean },
+    options?: {
+      displayText?: string;
+      silent?: boolean;
+      routeContext?: {
+        requestedTemplateId?: string | null;
+        requestedConnectorId?: string | null;
+      };
+    },
   ) => {
     const messageText = text || input.trim();
     if (!messageText && pendingFiles.length === 0) {
@@ -597,6 +611,12 @@ export default function ChatPage() {
           sessionId,
           message: messageText || '已上传文件',
           attachments: filesToSend.length > 0 ? filesToSend : undefined,
+          ...(options?.routeContext?.requestedTemplateId
+            ? { requestedTemplateId: options.routeContext.requestedTemplateId }
+            : {}),
+          ...(options?.routeContext?.requestedConnectorId
+            ? { requestedConnectorId: options.routeContext.requestedConnectorId }
+            : {}),
         },
         {
           // Chat turns can include LLM reasoning and server-side orchestration,
@@ -704,29 +724,41 @@ export default function ChatPage() {
     if (!flowCode) {
       return;
     }
-    if (flowBootstrappedRef.current === flowCode) {
+    if (flowBootstrappedRef.current === flowSelectionKey) {
       return;
     }
     if (sessionId || messages.length > 0 || loading) {
       return;
     }
 
-    flowBootstrappedRef.current = flowCode;
+    flowBootstrappedRef.current = flowSelectionKey;
     void (async () => {
       try {
         if (!ensureSession()) {
           return;
         }
-        const response = await apiClient.get(`/process-library/${encodeURIComponent(flowCode)}`);
+        const response = requestedTemplateId
+          ? await apiClient.get(`/process-library/id/${encodeURIComponent(requestedTemplateId)}`)
+          : await apiClient.get(`/process-library/${encodeURIComponent(flowCode)}${requestedConnectorId ? `?connectorId=${encodeURIComponent(requestedConnectorId)}` : ''}`);
         const processName = response.data?.processName || flowCode;
         setShowHistory(false);
-        await sendMessage(`我要办理${processName}`);
+        await sendMessage(`我要办理${processName}`, {
+          routeContext: {
+            requestedTemplateId,
+            requestedConnectorId,
+          },
+        });
       } catch {
         setShowHistory(false);
-        await sendMessage(`我要办理${flowCode}`);
+        await sendMessage(`我要办理${flowCode}`, {
+          routeContext: {
+            requestedTemplateId,
+            requestedConnectorId,
+          },
+        });
       }
     })();
-  }, [authReady, ensureSession, flowCode, loading, messages.length, sendMessage, sessionId]);
+  }, [authReady, ensureSession, flowCode, flowSelectionKey, loading, messages.length, requestedConnectorId, requestedTemplateId, sendMessage, sessionId]);
 
   useEffect(() => {
     if (!authReady || !sessionId || !shouldPollChatSession(sessionState, messages)) {
@@ -760,9 +792,9 @@ export default function ChatPage() {
       setShowHistory(false);
     }
     if (flowCode) {
-      flowBootstrappedRef.current = flowCode;
+      flowBootstrappedRef.current = flowSelectionKey;
     }
-  }, [flowCode]);
+  }, [flowCode, flowSelectionKey]);
 
   const createNewChat = useCallback(() => {
     clearConversationState();

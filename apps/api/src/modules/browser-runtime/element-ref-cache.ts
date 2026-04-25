@@ -69,7 +69,7 @@ export class ElementRefCache {
   private matchesText(left?: string, right?: string) {
     const normalizedLeft = String(left || '').trim().toLowerCase();
     const normalizedRight = String(right || '').trim().toLowerCase();
-    return normalizedLeft.length > 0 && normalizedLeft.includes(normalizedRight);
+    return normalizedLeft.length > 0 && normalizedLeft === normalizedRight;
   }
   private getRecord(sessionId: string, tabId: string) {
     const key = `${sessionId}:${tabId}`;

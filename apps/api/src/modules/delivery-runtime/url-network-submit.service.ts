@@ -1,6 +1,7 @@
 import axios, { type AxiosInstance, type AxiosRequestConfig } from 'axios';
 import { Injectable, Optional } from '@nestjs/common';
 import { sanitizeStructuredData } from '@uniflow/agent-kernel';
+import { ChoiceRequestPatchInferenceEngine } from '@uniflow/compat-engine';
 import type {
   RpaFieldBinding,
   RpaFieldRequestPatch,
@@ -57,6 +58,7 @@ interface PreflightResult {
 export class UrlNetworkSubmitService {
   private readonly client: AxiosInstance;
   private readonly browserTaskRuntime: BrowserTaskRuntime;
+  private readonly choiceRequestPatchInference = new ChoiceRequestPatchInferenceEngine();
 
   constructor(
     @Optional()
@@ -86,7 +88,7 @@ export class UrlNetworkSubmitService {
 
     const preflight = await this.runPreflight(input);
     const requestContext = this.buildRequestContext(input, preflight.extractedValues);
-    const request = this.buildHttpRequest(requestDef, requestContext, input.context);
+    const request = await this.buildHttpRequest(requestDef, requestContext, input.context);
     const response = await this.client.request(request);
     const responseBody = response.data;
     const responseMetadata = this.mapResponse(requestDef, responseBody);
@@ -219,14 +221,14 @@ export class UrlNetworkSubmitService {
     };
   }
 
-  private buildHttpRequest(
+  private async buildHttpRequest(
     definition: RpaNetworkRequestDefinition,
     context: Record<string, any>,
     deliveryContext: UrlDeliveryExecutionContext,
-  ): AxiosRequestConfig {
+  ): Promise<AxiosRequestConfig> {
     const method = String(this.interpolateTemplate(String(definition.method || 'POST'), context) || 'POST').toUpperCase();
     const url = this.interpolateTemplate(definition.url, context);
-    const params = this.applyFieldRequestPatches(
+    const params = await this.applyFieldRequestPatches(
       'query',
       this.applyMapping(definition.query, context),
       context,
@@ -237,7 +239,7 @@ export class UrlNetworkSubmitService {
       this.asRecord(context.preflight?.submitRequestHeaders),
       context,
     );
-    const headers = this.applyFieldRequestPatches(
+    const headers = await this.applyFieldRequestPatches(
       'headers',
       {
         ...capturedHeaders,
@@ -262,13 +264,13 @@ export class UrlNetworkSubmitService {
     delete (config.headers as Record<string, any>)['content-length'];
 
     if (!['GET', 'DELETE'].includes(method)) {
-      const builtBody = this.applyFieldRequestPatches(
+      const builtBody = await this.applyFieldRequestPatches(
         'body',
         this.buildRequestBody(context, definition.body),
         context,
         deliveryContext,
       );
-      this.validateRequiredFieldBindings({
+      await this.validateRequiredFieldBindings({
         body: builtBody,
         query: params,
         headers,
@@ -353,7 +355,7 @@ export class UrlNetworkSubmitService {
     const form = new FormDataCtor();
     const requestFieldNamesWithFiles = new Set<string>();
     const attachmentFieldMap = this.asRecord(context.preflight?.attachmentFieldMap);
-    const fieldBindings = this.getFieldBindings(deliveryContext);
+    const fieldBindings = this.getFieldBindings(deliveryContext, context.preflight);
     const attachments = Array.isArray(context.attachments)
       ? context.attachments.map((attachment) => this.normalizeAttachmentPayload(attachment))
       : [];
@@ -422,13 +424,13 @@ export class UrlNetworkSubmitService {
     form.append(prefix, String(value));
   }
 
-  private applyFieldRequestPatches(
+  private async applyFieldRequestPatches(
     scope: 'body' | 'query' | 'headers',
     target: any,
     context: Record<string, any>,
     deliveryContext: UrlDeliveryExecutionContext,
   ) {
-    const fields = this.getFieldBindings(deliveryContext);
+    const fields = this.getFieldBindings(deliveryContext, context.preflight);
     if (fields.size === 0) {
       return target;
     }
@@ -464,7 +466,7 @@ export class UrlNetworkSubmitService {
       }
     }
 
-    return this.applyInferredFieldRequestPatches(
+    return await this.applyInferredFieldRequestPatches(
       scope,
       patchedTarget,
       context,
@@ -472,7 +474,7 @@ export class UrlNetworkSubmitService {
     );
   }
 
-  private applyInferredFieldRequestPatches(
+  private async applyInferredFieldRequestPatches(
     scope: 'body' | 'query' | 'headers',
     target: any,
     context: Record<string, any>,
@@ -483,7 +485,7 @@ export class UrlNetworkSubmitService {
     }
 
     let patchedTarget = target;
-    for (const field of this.getFieldBindings(deliveryContext).values()) {
+    for (const field of this.getFieldBindings(deliveryContext, context.preflight).values()) {
       if (this.hasExplicitRequestPatch(field) || !this.supportsInferredBodyPatch(field)) {
         continue;
       }
@@ -493,11 +495,12 @@ export class UrlNetworkSubmitService {
         continue;
       }
 
-      const candidates = this.buildInferredBodyPatchCandidates(
+      const candidates = await this.buildInferredBodyPatchCandidates(
         field,
         submittedValue,
         patchedTarget,
         deliveryContext,
+        context.preflight,
       );
       for (const candidate of candidates) {
         if (!candidate.path) {
@@ -518,14 +521,14 @@ export class UrlNetworkSubmitService {
     return patchedTarget;
   }
 
-  private validateRequiredFieldBindings(input: {
+  private async validateRequiredFieldBindings(input: {
     body: any;
     query: any;
     headers: Record<string, any>;
     context: Record<string, any>;
     deliveryContext: UrlDeliveryExecutionContext;
   }) {
-    const fields = [...this.getFieldBindings(input.deliveryContext).values()];
+    const fields = [...this.getFieldBindings(input.deliveryContext, input.context.preflight).values()];
     if (fields.length === 0) {
       return;
     }
@@ -551,6 +554,9 @@ export class UrlNetworkSubmitService {
         if (fieldAttachments.length === 0) {
           continue;
         }
+        if (this.hasSuccessfulDomBinding(field, filledFields)) {
+          continue;
+        }
         const requestFieldName = this.normalizeString(
           attachmentFieldMap[fieldKey]
           || field.requestFieldName,
@@ -571,18 +577,31 @@ export class UrlNetworkSubmitService {
         continue;
       }
 
-      if (!this.isChoiceField(field) && this.hasSuccessfulDomBinding(field, filledFields)) {
+      const hasDomBinding = this.hasSuccessfulDomBinding(field, filledFields);
+      if (!this.isChoiceField(field) && hasDomBinding) {
+        continue;
+      }
+
+      if (await this.hasPatchedRequestValue(
+        field,
+        submittedValue,
+        input.body,
+        input.query,
+        input.headers,
+        input.deliveryContext,
+        input.context.preflight,
+      )) {
         continue;
       }
 
       if (
-        this.hasPatchedRequestValue(
+        this.isChoiceField(field)
+        && hasDomBinding
+        && this.canAcceptChoiceDomBindingWithoutExplicitRequestValue(
           field,
-          submittedValue,
           input.body,
-          input.query,
-          input.headers,
           input.deliveryContext,
+          input.context.preflight,
         )
       ) {
         continue;
@@ -622,13 +641,14 @@ export class UrlNetworkSubmitService {
     return candidateKeys.some((key) => filledFields[key] === true);
   }
 
-  private hasPatchedRequestValue(
+  private async hasPatchedRequestValue(
     field: RpaFieldBinding,
     submittedValue: any,
     body: any,
     query: any,
     headers: Record<string, any>,
     deliveryContext?: UrlDeliveryExecutionContext,
+    preflightValues?: Record<string, any>,
   ) {
     const patches = Array.isArray(field.requestPatches)
       ? field.requestPatches as RpaFieldRequestPatch[]
@@ -655,7 +675,7 @@ export class UrlNetworkSubmitService {
       return false;
     }
 
-    return this.buildInferredBodyPatchCandidates(field, submittedValue, body, deliveryContext)
+    return (await this.buildInferredBodyPatchCandidates(field, submittedValue, body, deliveryContext, preflightValues))
       .some((candidate) =>
         this.valuesRoughlyEqual(
           this.getValueAtRequestPath(body, candidate.path),
@@ -673,19 +693,52 @@ export class UrlNetworkSubmitService {
     return normalizedType !== 'file';
   }
 
-  private isChoiceField(field: Pick<RpaFieldBinding, 'type'>) {
-    const normalizedType = this.normalizeString(field.type)?.toLowerCase() || '';
-    return normalizedType === 'checkbox' || normalizedType === 'radio';
+  private canAcceptChoiceDomBindingWithoutExplicitRequestValue(
+    field: RpaFieldBinding,
+    body: any,
+    deliveryContext: UrlDeliveryExecutionContext,
+    preflightValues?: Record<string, any>,
+  ) {
+    if (this.hasExplicitRequestPatch(field)) {
+      return false;
+    }
+
+    const relatedMappings = this.getCaptureFormFieldMappings(deliveryContext, field.key, preflightValues);
+    if (relatedMappings.length === 0) {
+      return false;
+    }
+
+    const relatedTokens = Array.from(new Set(relatedMappings.flatMap((mapping) =>
+      this.extractStructuredFieldTokens({
+        id: this.normalizeString(mapping?.target?.id),
+        selector: this.normalizeString(mapping?.target?.selector),
+        requestFieldName: this.normalizeString(mapping?.target?.requestFieldName || mapping?.target?.name),
+      }),
+    )));
+    if (relatedTokens.length === 0) {
+      return true;
+    }
+
+    const candidatePaths = this.buildStructuredFieldCandidatePaths(body, relatedTokens);
+    return candidatePaths.length === 0;
   }
 
-  private buildInferredBodyPatchCandidates(
+  private isChoiceField(field: Pick<RpaFieldBinding, 'type' | 'multiple'>) {
+    const normalizedType = this.normalizeString(field.type)?.toLowerCase() || '';
+    return normalizedType === 'checkbox'
+      || normalizedType === 'radio'
+      || (normalizedType === 'select' && field.multiple === true);
+  }
+
+  private async buildInferredBodyPatchCandidates(
     field: RpaFieldBinding,
     submittedValue: any,
     body: any,
     deliveryContext: UrlDeliveryExecutionContext,
-  ): InferredFieldPatchCandidate[] {
+    preflightValues?: Record<string, any>,
+  ): Promise<InferredFieldPatchCandidate[]> {
     if (this.isChoiceField(field)) {
-      return this.buildChoiceBodyPatchCandidates(field, submittedValue, body, deliveryContext);
+      return await this.buildChoiceBodyPatchCandidates(field, submittedValue, body, deliveryContext, preflightValues);
     }
 
     return this.inferBodyPatchPaths(field, body).map((path) => ({
@@ -694,51 +747,84 @@ export class UrlNetworkSubmitService {
     }));
   }
 
-  private buildChoiceBodyPatchCandidates(
+  private async buildChoiceBodyPatchCandidates(
     field: RpaFieldBinding,
     submittedValue: any,
     body: any,
     deliveryContext: UrlDeliveryExecutionContext,
-  ): InferredFieldPatchCandidate[] {
-    const selectedChoices = this.normalizeChoiceValues(submittedValue);
-    if (selectedChoices.length === 0 && !Boolean(submittedValue)) {
+    preflightValues?: Record<string, any>,
+  ): Promise<InferredFieldPatchCandidate[]> {
+    if (this.isEmptyRuntimeValue(submittedValue)) {
       return [];
     }
 
-    const relatedMappings = this.getCaptureFormFieldMappings(deliveryContext, field.key);
-    const colMainDataRoots = this.findColMainDataRoots(body);
+    const relatedMappings = this.getCaptureFormFieldMappings(deliveryContext, field.key, preflightValues);
+    const relatedTokens = Array.from(new Set(relatedMappings.flatMap((mapping) =>
+      this.extractStructuredFieldTokens({
+        id: this.normalizeString(mapping?.target?.id),
+        selector: this.normalizeString(mapping?.target?.selector),
+        requestFieldName: this.normalizeString(mapping?.target?.requestFieldName || mapping?.target?.name),
+      }),
+    )));
+    const structuredRoots = this.findStructuredFieldContainerRoots(body, relatedTokens);
     const candidates: InferredFieldPatchCandidate[] = [];
     const seenPaths = new Set<string>();
 
     for (const mapping of relatedMappings) {
       const mappingAliases = this.collectChoiceAliases(mapping, field);
-      const shouldSelect = selectedChoices.length > 0
-        ? this.choiceAliasesMatch(mappingAliases, selectedChoices)
-        : Boolean(submittedValue);
-
-      const capFieldToken = this.extractCapFieldToken({
+      const knownOptionAliases = Array.from(new Set(
+        relatedMappings.flatMap((candidate) => this.collectChoiceAliases(candidate, field)),
+      ));
+      const fieldTokens = this.extractStructuredFieldTokens({
         id: this.normalizeString(mapping?.target?.id),
         selector: this.normalizeString(mapping?.target?.selector),
-        requestFieldName: this.normalizeString(mapping?.target?.name),
+        requestFieldName: this.normalizeString(mapping?.target?.requestFieldName || mapping?.target?.name),
       });
-      if (!capFieldToken) {
+      if (fieldTokens.length === 0) {
         continue;
       }
 
-      const candidatePaths = colMainDataRoots.length > 0
-        ? colMainDataRoots.map((root) => root ? `${root}.colMainData.${capFieldToken}` : `colMainData.${capFieldToken}`)
-        : [`colMainData.${capFieldToken}`];
+      const candidatePaths = this.buildStructuredFieldCandidatePaths(body, fieldTokens, structuredRoots);
 
       for (const path of candidatePaths) {
         if (!path || seenPaths.has(path)) {
           continue;
         }
         const actual = this.getValueAtRequestPath(body, path);
+        const judgement = await this.choiceRequestPatchInference.infer({
+          submittedValue,
+          currentValue: actual,
+          field: {
+            key: field.key,
+            label: field.label,
+            type: field.type,
+            multiple: field.multiple,
+          },
+          mapping: {
+            label: this.normalizeString(mapping?.target?.label),
+            optionAliases: mappingAliases,
+            requestFieldName: this.normalizeString(mapping?.target?.requestFieldName || mapping?.target?.name),
+            selector: this.normalizeString(mapping?.target?.selector),
+            targetId: this.normalizeString(mapping?.target?.id),
+          },
+          knownOptionAliases,
+          candidatePath: path,
+          siblingOptionCount: relatedMappings.length,
+          trace: {
+            scope: 'delivery.url.choice_request_patch',
+            metadata: {
+              processCode: deliveryContext.rpaFlow?.processCode,
+              fieldKey: field.key,
+              candidatePath: path,
+            },
+          },
+        });
+        if (!judgement.canResolve) {
+          continue;
+        }
         candidates.push({
           path,
-          value: shouldSelect
-            ? this.inferSelectedChoicePatchValue(actual, mapping, field, relatedMappings.length)
-            : this.inferUnselectedChoicePatchValue(actual),
+          value: judgement.patchValue,
         });
         seenPaths.add(path);
       }
@@ -760,12 +846,9 @@ export class UrlNetworkSubmitService {
       }
     }
 
-    const capFieldToken = this.extractCapFieldToken(field);
-    if (capFieldToken) {
-      const colMainDataRoots = this.findColMainDataRoots(body);
-      for (const root of colMainDataRoots) {
-        paths.add(root ? `${root}.colMainData.${capFieldToken}` : `colMainData.${capFieldToken}`);
-      }
+    const fieldTokens = this.extractStructuredFieldTokens(field);
+    for (const path of this.buildStructuredFieldCandidatePaths(body, fieldTokens)) {
+      paths.add(path);
     }
 
     return [...paths];
@@ -774,12 +857,13 @@ export class UrlNetworkSubmitService {
   private getCaptureFormFieldMappings(
     deliveryContext: UrlDeliveryExecutionContext,
     fieldKey?: string,
+    preflightValues?: Record<string, any>,
   ) {
     const preflightSteps = Array.isArray(deliveryContext.runtime?.preflight?.steps)
       ? deliveryContext.runtime.preflight.steps as Array<Record<string, any>>
       : [];
 
-    return preflightSteps
+    const staticMappings = preflightSteps
       .filter((step) => this.normalizeString(step?.builtin) === 'capture_form_submit')
       .flatMap((step) => Array.isArray(step?.options?.fieldMappings) ? step.options.fieldMappings : [])
       .filter((mapping) => mapping && typeof mapping === 'object' && !Array.isArray(mapping))
@@ -789,29 +873,19 @@ export class UrlNetworkSubmitService {
         }
         return this.normalizeString(mapping.fieldKey) === this.normalizeString(fieldKey);
       }) as Array<Record<string, any>>;
-  }
 
-  private normalizeChoiceValues(value: any) {
-    const queue = Array.isArray(value) ? value : [value];
-    const results = new Set<string>();
-    for (const item of queue) {
-      const normalizedItem = this.normalizeString(item);
-      if (!normalizedItem) {
-        continue;
-      }
-      const parts = normalizedItem
-        .split(/[、,，;；\n]/)
-        .map((part) => this.normalizeString(part))
-        .filter((part): part is string => Boolean(part));
-      if (parts.length === 0) {
-        results.add(normalizedItem);
-        continue;
-      }
-      for (const part of parts) {
-        results.add(part);
-      }
-    }
-    return [...results];
+    const dynamicMappings = Array.isArray(preflightValues?.resolvedFieldMappings)
+      ? preflightValues.resolvedFieldMappings
+        .filter((mapping) => mapping && typeof mapping === 'object' && !Array.isArray(mapping))
+        .filter((mapping) => {
+          if (!fieldKey) {
+            return true;
+          }
+          return this.normalizeString((mapping as Record<string, any>).fieldKey) === this.normalizeString(fieldKey);
+        }) as Array<Record<string, any>>
+      : [];
+
+    return dynamicMappings.length > 0 ? dynamicMappings : staticMappings;
   }
 
   private collectChoiceAliases(mapping: Record<string, any>, field: RpaFieldBinding) {
@@ -841,82 +915,6 @@ export class UrlNetworkSubmitService {
     })));
   }
 
-  private choiceAliasesMatch(aliases: string[], selectedChoices: string[]) {
-    return selectedChoices.some((choice) =>
-      aliases.some((alias) =>
-        alias === choice
-        || alias.includes(choice)
-        || choice.includes(alias)));
-  }
-
-  private inferSelectedChoicePatchValue(
-    actual: any,
-    mapping: Record<string, any>,
-    field: RpaFieldBinding,
-    relatedMappingCount: number,
-  ) {
-    if (typeof actual === 'boolean') {
-      return true;
-    }
-    if (typeof actual === 'number') {
-      return 1;
-    }
-
-    const normalizedActual = this.normalizeString(actual)?.toLowerCase();
-    if (normalizedActual) {
-      if (normalizedActual === '0' || normalizedActual === '1') {
-        return '1';
-      }
-      if (normalizedActual === 'false' || normalizedActual === 'true') {
-        return 'true';
-      }
-      if (normalizedActual === 'n' || normalizedActual === 'y') {
-        return 'Y';
-      }
-      return this.getPreferredChoiceValue(mapping, field) || actual;
-    }
-
-    if (relatedMappingCount > 1) {
-      return '1';
-    }
-
-    return this.getPreferredChoiceValue(mapping, field) || '1';
-  }
-
-  private inferUnselectedChoicePatchValue(actual: any) {
-    if (typeof actual === 'boolean') {
-      return false;
-    }
-    if (typeof actual === 'number') {
-      return 0;
-    }
-
-    const normalizedActual = this.normalizeString(actual)?.toLowerCase();
-    if (normalizedActual) {
-      if (normalizedActual === '0' || normalizedActual === '1') {
-        return '0';
-      }
-      if (normalizedActual === 'false' || normalizedActual === 'true') {
-        return 'false';
-      }
-      if (normalizedActual === 'n' || normalizedActual === 'y') {
-        return 'N';
-      }
-    }
-
-    return '';
-  }
-
-  private getPreferredChoiceValue(mapping: Record<string, any>, field: RpaFieldBinding) {
-    const mappingAliases = this.collectOptionAliases(mapping?.options);
-    if (mappingAliases.length > 0) {
-      return mappingAliases[0];
-    }
-
-    return this.normalizeString(mapping?.target?.label)
-      || this.normalizeString(field.label);
-  }
-
   private hasRequestPath(target: any, path: string) {
     const normalizedPath = this.normalizeString(path);
     if (!normalizedPath) {
@@ -925,25 +923,60 @@ export class UrlNetworkSubmitService {
     return this.getValueAtRequestPath(target, normalizedPath) !== undefined;
   }
 
-  private extractCapFieldToken(field: Pick<RpaFieldBinding, 'id' | 'selector' | 'requestFieldName'>) {
+  private extractStructuredFieldTokens(field: Pick<RpaFieldBinding, 'id' | 'selector' | 'requestFieldName'>) {
     const candidates = [
       this.normalizeString(field.id),
       this.normalizeString(field.requestFieldName),
       this.normalizeString(field.selector),
     ].filter((item): item is string => Boolean(item));
 
+    const tokens = new Set<string>();
     for (const candidate of candidates) {
-      const matched = candidate.match(/(field\d+)/i);
-      if (matched?.[1]) {
-        return matched[1];
+      const matches = candidate.match(/[a-z]+[_-]?\d+/ig) || [];
+      for (const matched of matches) {
+        const normalized = this.normalizeString(matched);
+        if (normalized) {
+          tokens.add(normalized);
+        }
       }
     }
 
-    return undefined;
+    return [...tokens];
   }
 
-  private findColMainDataRoots(value: any, prefix = ''): string[] {
+  private buildStructuredFieldCandidatePaths(
+    value: any,
+    fieldTokens: string[],
+    discoveredRoots?: string[],
+  ) {
+    if (fieldTokens.length === 0) {
+      return [];
+    }
+
+    const paths = new Set<string>();
+    const roots = discoveredRoots || this.findStructuredFieldContainerRoots(value, fieldTokens);
+    for (const path of this.findStructuredFieldKeyPaths(value, fieldTokens)) {
+      paths.add(path);
+    }
+
+    for (const root of roots) {
+      for (const token of fieldTokens) {
+        paths.add(root ? `${root}.${token}` : token);
+      }
+    }
+
+    return [...paths];
+  }
+
+  private findStructuredFieldContainerRoots(
+    value: any,
+    fieldTokens: string[],
+    prefix = '',
+  ): string[] {
     const roots: string[] = [];
+    if (fieldTokens.length === 0) {
+      return roots;
+    }
     const current = typeof value === 'string' && this.looksLikeJson(value)
       ? this.safeParseJson(value)
       : value;
@@ -952,12 +985,20 @@ export class UrlNetworkSubmitService {
       return roots;
     }
 
-    if (!Array.isArray(current) && current.colMainData && typeof current.colMainData === 'object') {
+    const normalizedTokens = new Set(fieldTokens.map((token) => String(token).toLowerCase()));
+    if (
+      !Array.isArray(current)
+      && Object.keys(current).some((key) => normalizedTokens.has(String(key || '').toLowerCase()))
+    ) {
       roots.push(prefix);
     }
 
     if (Array.isArray(current)) {
-      return roots;
+      current.forEach((child, index) => {
+        const nextPrefix = prefix ? `${prefix}.${index}` : String(index);
+        roots.push(...this.findStructuredFieldContainerRoots(child, fieldTokens, nextPrefix));
+      });
+      return [...new Set(roots)];
     }
 
     for (const [key, child] of Object.entries(current)) {
@@ -971,19 +1012,60 @@ export class UrlNetworkSubmitService {
         continue;
       }
       const nextPrefix = prefix ? `${prefix}.${key}` : key;
-      if (!Array.isArray(childValue) && childValue.colMainData && typeof childValue.colMainData === 'object') {
-        roots.push(nextPrefix);
-      }
+      roots.push(...this.findStructuredFieldContainerRoots(childValue, fieldTokens, nextPrefix));
     }
 
     return [...new Set(roots)];
   }
 
-  private getFieldBindings(deliveryContext: UrlDeliveryExecutionContext) {
+  private findStructuredFieldKeyPaths(
+    value: any,
+    fieldTokens: string[],
+    prefix = '',
+  ): string[] {
+    const paths: string[] = [];
+    if (fieldTokens.length === 0) {
+      return paths;
+    }
+
+    const current = typeof value === 'string' && this.looksLikeJson(value)
+      ? this.safeParseJson(value)
+      : value;
+    if (!current || typeof current !== 'object') {
+      return paths;
+    }
+
+    const normalizedTokens = new Set(fieldTokens.map((token) => String(token).toLowerCase()));
+    if (Array.isArray(current)) {
+      current.forEach((child, index) => {
+        const nextPrefix = prefix ? `${prefix}.${index}` : String(index);
+        paths.push(...this.findStructuredFieldKeyPaths(child, fieldTokens, nextPrefix));
+      });
+      return [...new Set(paths)];
+    }
+
+    for (const [key, child] of Object.entries(current)) {
+      const normalizedKey = String(key || '').toLowerCase();
+      const nextPrefix = prefix ? `${prefix}.${key}` : key;
+      if (normalizedTokens.has(normalizedKey)) {
+        paths.push(nextPrefix);
+      }
+      if (child !== undefined && child !== null) {
+        paths.push(...this.findStructuredFieldKeyPaths(child, fieldTokens, nextPrefix));
+      }
+    }
+
+    return [...new Set(paths)];
+  }
+
+  private getFieldBindings(
+    deliveryContext: UrlDeliveryExecutionContext,
+    preflightValues?: Record<string, any>,
+  ) {
     const bindings = new Map<string, RpaFieldBinding>();
     const fields = deliveryContext.rpaFlow?.rpaDefinition?.fields;
     if (!Array.isArray(fields)) {
-      return bindings;
+      return this.mergeResolvedFieldBindings(bindings, preflightValues);
     }
 
     for (const field of fields) {
@@ -995,6 +1077,35 @@ export class UrlNetworkSubmitService {
         continue;
       }
       bindings.set(key, field as RpaFieldBinding);
+    }
+
+    return this.mergeResolvedFieldBindings(bindings, preflightValues);
+  }
+
+  private mergeResolvedFieldBindings(
+    bindings: Map<string, RpaFieldBinding>,
+    preflightValues?: Record<string, any>,
+  ) {
+    const resolvedBindings = Array.isArray(preflightValues?.resolvedFieldBindings)
+      ? preflightValues.resolvedFieldBindings
+      : [];
+
+    for (const binding of resolvedBindings) {
+      if (!binding || typeof binding !== 'object' || Array.isArray(binding)) {
+        continue;
+      }
+      const resolvedBinding = binding as Record<string, any>;
+      const key = this.normalizeString(resolvedBinding.key || resolvedBinding.fieldKey);
+      if (!key) {
+        continue;
+      }
+      const current = bindings.get(key) || ({ key } as RpaFieldBinding);
+      bindings.set(key, {
+        ...current,
+        ...resolvedBinding,
+        label: this.normalizeString(current.label) || this.normalizeString(resolvedBinding.label),
+        key,
+      } as RpaFieldBinding);
     }
 
     return bindings;

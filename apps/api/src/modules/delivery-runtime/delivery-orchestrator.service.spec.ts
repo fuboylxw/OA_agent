@@ -6,7 +6,7 @@ import {
 import { DeliveryOrchestratorService } from './delivery-orchestrator.service';
 
 describe('DeliveryOrchestratorService', () => {
-  it('falls back from vision to url when vision delivery fails', async () => {
+  it('falls back from vision to url when the runtime manifest exposes both paths', async () => {
     const prisma = {
       processTemplate: {
         findFirst: jest.fn().mockResolvedValue({
@@ -14,8 +14,37 @@ describe('DeliveryOrchestratorService', () => {
           processCode: 'leave_apply',
           processName: 'Leave Apply',
           uiHints: {
-            executionModes: {
-              submit: ['rpa'],
+            runtimeManifest: {
+              version: 1,
+              capabilities: {
+                submit: [VISION_DELIVERY_PATH, URL_DELIVERY_PATH],
+                queryStatus: [],
+              },
+              definition: {
+                processCode: 'leave_apply',
+                processName: 'Leave Apply',
+                accessMode: 'direct_link',
+                sourceType: 'direct_link',
+                platform: {
+                  jumpUrlTemplate: 'https://oa.example.com/leave',
+                },
+                runtime: {
+                  networkSubmit: {
+                    url: 'https://oa.example.com/api/workflow/submit',
+                  },
+                },
+                actions: {
+                  submit: {
+                    steps: [{
+                      type: 'click',
+                      target: {
+                        kind: 'image',
+                        value: 'submit-button.png',
+                      },
+                    }],
+                  },
+                },
+              },
             },
             rpaDefinition: {
               processCode: 'leave_apply',

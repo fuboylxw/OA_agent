@@ -11,7 +11,8 @@
   },
   "dependencies": {
     "zod": "^3.22.4",
-    "@uniflow/shared-types": "workspace:*"
+    "@uniflow/shared-types": "workspace:*",
+    "@uniflow/agent-kernel": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^20.11.0",

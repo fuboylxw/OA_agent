@@ -66,6 +66,9 @@ class MissingFieldDto {
 
   @ApiProperty({ required: false, description: '是否支持多份上传/多值输入' })
   multiple?: boolean;
+
+  @ApiProperty({ required: false, description: '字段可选项' })
+  options?: Array<{ label: string; value: string }>;
 }
 
 class ActionButtonDto {
@@ -254,6 +257,16 @@ class ChatDto {
   @IsOptional()
   @IsArray()
   attachments?: ChatAttachment[];
+
+  @ApiProperty({ required: false, description: '前端已选中的流程模板 ID，用于精确进入某个流程版本' })
+  @IsOptional()
+  @IsString()
+  requestedTemplateId?: string;
+
+  @ApiProperty({ required: false, description: '前端已选中的连接器 ID，用于避免同码流程串到其他连接器' })
+  @IsOptional()
+  @IsString()
+  requestedConnectorId?: string;
 }
 
 class ChatResponseDto {
@@ -351,6 +364,8 @@ export class AssistantController {
         sessionId: dto.sessionId,
         message: dto.message,
         attachments: dto.attachments,
+        requestedTemplateId: dto.requestedTemplateId,
+        requestedConnectorId: dto.requestedConnectorId,
         identityType: auth.identityType,
         roles: auth.roles,
       });

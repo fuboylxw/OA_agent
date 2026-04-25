@@ -7,8 +7,7 @@ import { SoapXmlAdapter } from './soap-xml-adapter';
  *
  * 匹配规则：
  *   - authConfig 中有 wsdlUrl                    → 90
- *   - baseUrl 以 ?wsdl 结尾或包含 /services/     → 80
- *   - authType='basic' 且 baseUrl 含 /ws/ 或 /soap/ → 60
+ *   - authConfig 中有 soapHeaderXml/soapAuthType → 70
  */
 export const SoapXmlDescriptor: AdapterDescriptor = {
   id: 'soap-xml',
@@ -29,11 +28,9 @@ export const SoapXmlDescriptor: AdapterDescriptor = {
 
   match(config: AdapterConnectionConfig): number {
     const authConfig = config.authConfig || {};
-    const url = config.baseUrl.toLowerCase();
 
     if (authConfig.wsdlUrl) return 90;
-    if (url.endsWith('?wsdl') || url.includes('/services/')) return 80;
-    if ((config.authType === 'basic' || authConfig.soapHeaderXml) && (url.includes('/ws/') || url.includes('/soap/'))) return 60;
+    if (authConfig.soapHeaderXml || authConfig.soapAuthType) return 70;
     return 0;
   },
 
